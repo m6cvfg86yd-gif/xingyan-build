@@ -21,6 +21,10 @@ struct MusicTrack: Decodable, Identifiable, Hashable {
     var url: String
     /// 歌词（后台「音乐（听一听）」里贴的）：LRC 或一行一句都行，空 = 没有
     var lyrics: String? = nil
+    /// 谁赞过（判断我赞过没有）/ 赞了几个 / 被转发几次
+    var likes: [String]? = nil
+    var likeCount: Int? = nil
+    var shareCount: Int? = nil
     var at: Double?
 
     var artistText: String { (artist ?? "").isEmpty ? "未知歌手" : (artist ?? "") }
@@ -1064,6 +1068,11 @@ struct MusicPlayingView: View {
     /// AI 识别歌词：识别中的文字 / 是不是在识别
     @State private var aiText = ""
     @State private var aiBusy = false
+    /// 播放器下面那排：点赞 / 转发 / 分享（微信听一听那一排）
+    @State private var likedNow: Bool? = nil
+    @State private var likeCountNow: Int? = nil
+    @State private var shareTo = false
+    @State private var shareSystem = false
 
     private var t: MusicTrack? { sheet.track ?? player.current }
 
@@ -1071,6 +1080,65 @@ struct MusicPlayingView: View {
     /// 标记还立着，下一次界面刷新又会把它弹回来（用户说的"关不掉"）。
     private func closeMe() {
         MusicSheet.shared.close()
+    }
+
+    /* ---------------------------------------------------------- 赞 / 转发 / 分享 */
+
+    private var liked: Bool {
+        if let v = likedNow { return v }
+        return (t?.likes ?? []).contains(app.me?.id ?? "")
+    }
+    private var likeCount: Int {
+        if let n = likeCountNow { return n }
+        return t?.likeCount ?? (t?.likes ?? []).count
+    }
+
+    /// 一排里的一个：图标 + 数字 + 名字（微信就是"图标在上面、数字/文字在下面"）
+    private func playerAction(icon: String, name: String, count: Int?,
+                              tint: Color, tap: @escaping () -> Void) -> some View {
+        Button { tap() } label: {
+            VStack(spacing: 3) {
+                Image(systemName: icon).font(.system(size: 21)).foregroundColor(tint)
+                if let c = count, c > 0 {
+                    Text("\(c)").font(pf(11.5)).foregroundColor(C.subLabel)
+                }
+                Text(name).font(pf(12)).foregroundColor(C.subLabel)
+            }
+            .frame(maxWidth: .infinity)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func likeIt() {
+        guard let track = t else { return }
+        let now = !liked
+        likedNow = now
+        likeCountNow = max(0, likeCount + (now ? 1 : -1))
+        Task {
+            if let r = await API.shared.musicLike(track.id) {
+                likedNow = r.liked
+                likeCountNow = r.count
+            }
+        }
+    }
+
+    /// 转发出去的那张音乐卡片（和聊天里「＋ → 音乐」发的是同一种）
+    /// 分享面板里那段文字：「歌名 — 歌手」
+    private var shareText: String {
+        let title = t?.title ?? ""
+        let artist = t?.artistText ?? ""
+        return artist.isEmpty ? title : title + " — " + artist
+    }
+
+    private var musicCardJSON: String {
+        guard let track = t else { return "" }
+        var d: [String: Any] = ["id": track.id, "title": track.title, "url": track.url]
+        if let v = track.artist, !v.isEmpty { d["artist"] = v }
+        if let v = track.cover, !v.isEmpty { d["cover"] = v }
+        guard let data = try? JSONSerialization.data(withJSONObject: d),
+              let s = String(data: data, encoding: .utf8) else { return "" }
+        return s
     }
 
     /* ---------------------------------------------------------- 可翻转的玻璃大卡 */
@@ -1289,12 +1357,29 @@ struct MusicPlayingView: View {
                     }
                 }
                 .buttonStyle(.plain)
-                Button { MusicPlayer.shared.seek(min(1, player.progress + 0.1)) } label: {
+            Button { MusicPlayer.shared.seek(min(1, player.progress + 0.1)) } label: {
                     Image(systemName: "goforward").font(.system(size: 24)).foregroundColor(C.label)
                 }
                 .buttonStyle(.plain)
             }
             .padding(.top, 18)
+
+            /* 微信听一听那一排：赞（带数字）· 转发 · 分享 */
+            HStack(spacing: 0) {
+                playerAction(icon: liked ? "heart.fill" : "heart",
+                             name: Tr("赞"),
+                             count: likeCount,
+                             tint: liked ? Color(hex: 0xFF5A5A) : C.label) { likeIt() }
+                playerAction(icon: "arrowshape.turn.up.right",
+                             name: Tr("转发"),
+                             count: t?.shareCount ?? 0,
+                             tint: C.label) { shareTo = true }
+                playerAction(icon: "square.and.arrow.up",
+                             name: Tr("分享"),
+                             count: nil,
+                             tint: C.label) { shareSystem = true }
+            }
+            .padding(.top, 10)
 
             Spacer(minLength: 30)
         }
@@ -1312,6 +1397,17 @@ struct MusicPlayingView: View {
                 MusicLyricsView(track: t) { showLyrics = false }
                     .transition(.opacity)
             }
+        }
+        /* 转发：选一个好友 → 发一张音乐卡片（转发次数 +1） */
+        .sheet(isPresented: $shareTo) {
+            ForwardPickerView(items: [ForwardItem(kind: "music", content: musicCardJSON)]) {
+                if let track = t { Task { await API.shared.musicShareCount(track.id) } }
+            }
+            .environmentObject(app)
+        }
+        /* 分享：系统分享面板（把歌名歌手分享出去） */
+        .sheet(isPresented: $shareSystem) {
+            ShareSheet(items: [shareText])
         }
         .onAppear {
             /* 只有「换了一首」才从头播；同一首进进出出别打断（以前每次进这页都重播一遍） */

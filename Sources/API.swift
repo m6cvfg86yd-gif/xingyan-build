@@ -1879,6 +1879,18 @@ final class API {
         return (r.liked ?? false, r.count ?? 0)
     }
 
+    /// 给一首歌点赞 / 取消
+    func musicLike(_ id: String) async -> (liked: Bool, count: Int)? {
+        struct R: Decodable { var liked: Bool?; var count: Int? }
+        guard let r: R = try? await post("/api/music/like", ["id": id], as: R.self) else { return nil }
+        return (r.liked ?? false, r.count ?? 0)
+    }
+
+    /// 记一次转发（转发音乐卡片时调）
+    func musicShareCount(_ id: String) async {
+        _ = try? await request("POST", "/api/music/share", body: ["id": id])
+    }
+
     func branding() async -> BrandInfo? {
         guard let payload: BrandingPayload = try? await get("/api/branding", as: BrandingPayload.self) else { return nil }
         return payload.branding
