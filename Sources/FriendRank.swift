@@ -16,6 +16,49 @@ final class WebBox: ObservableObject {
     weak var web: WKWebView?
 }
 
+/* ============================================================
+   ⚠ 为什么排行榜以前一直不生效：
+
+   小游戏是**先下到本机再跑**的（file:// 打开的），原来那层 JS 里是直接
+   `fetch('https://43.242.194.89/api/games/score')` —— 这条路走不通：
+     · 网页是 file:// 起源，属于跨域；
+     · 更要命的是 App 连的是**IP + 自签证书**，WKWebView 不认这个证书，
+       请求在 TLS 那一步就断了（游戏文件要下到本机也是同一个原因）。
+   而 fetch 是 `.catch(function(){})` 静默吃掉的，所以"报分/拉榜都做了，就是没反应"。
+
+   现在改成**原生桥**：网页只喊一声
+     window.webkit.messageHandlers.chrisRank.postMessage({action:'score'|'rank', ...})
+   真正发请求的是原生这边（走 App 自己那套网络栈，证书是放过的），
+   拉完榜单再把 JSON 塞回网页里画（chrisRank.render(json)）。
+   JS 里保留 fetch 兜底：万一哪天桥没挂上，老的逻辑还能跑。
+   ============================================================ */
+
+/// 网页 → 原生 的那根线（WKScriptMessageHandler）
+final class RankBridge: NSObject, WKScriptMessageHandler {
+    /// 报分：游戏标识 + 分数
+    var onScore: ((String, Int) -> Void)?
+    /// 拉榜单：游戏标识 + 回调（回的是服务器那段 JSON 字符串，空串 = 失败）
+    var onRank: ((String, @escaping (String) -> Void) -> Void)?
+    weak var web: WKWebView?
+
+    func userContentController(_ uc: WKUserContentController, didReceive message: WKScriptMessage) {
+        guard let body = message.body as? [String: Any] else { return }
+        let action = (body["action"] as? String) ?? ""
+        let game = (body["game"] as? String) ?? ""
+        if action == "score" {
+            let n = (body["score"] as? NSNumber)?.intValue ?? 0
+            onScore?(game, n)
+        } else if action == "rank" {
+            onRank?(game) { [weak self] json in
+                guard !json.isEmpty else { return }
+                DispatchQueue.main.async {
+                    self?.web?.evaluateJavaScript("window.chrisRank && window.chrisRank.render(\(json));")
+                }
+            }
+        }
+    }
+}
+
 func chrisRankJs(game: String, token: String, base: String) -> String {
     let g = game.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
     let t = token.replacingOccurrences(of: "\"", with: "\\\"")
@@ -28,6 +71,8 @@ func chrisRankJs(game: String, token: String, base: String) -> String {
       function report(n) {
         n = Math.floor(Number(n) || 0);
         if (!(n > 0)) return;
+        /* 先走原生桥（网页是本地文件，自己发请求发不出去 —— 见上面那段说明） */
+        if (bridge({ action: 'score', game: GAME, score: n })) return;
         fetch(abs('/api/games/score'), {
           method: 'POST',
           headers: { 'Authorization': 'Bearer ' + TOKEN, 'Content-Type': 'application/json' },
@@ -35,12 +80,30 @@ func chrisRankJs(game: String, token: String, base: String) -> String {
         }).catch(function () { });
       }
       function hide() { var el = document.getElementById('__chris_rank'); if (el) el.remove(); }
+      /* 原生桥：网页 → App（真正发请求的是 App 自己，证书/跨域都不是问题） */
+      function bridge(msg) {
+        try {
+          if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.chrisRank) {
+            window.webkit.messageHandlers.chrisRank.postMessage(msg);
+            return true;
+          }
+        } catch (e) { }
+        return false;
+      }
       function show() {
         hide();
+        if (bridge({ action: 'rank', game: GAME })) return;
         fetch(abs('/api/games/rank?game=' + encodeURIComponent(GAME)), { headers: { 'Authorization': 'Bearer ' + TOKEN } })
           .then(function (r) { return r.json(); })
-          .then(function (j) {
-            var d = (j && j.data) || {}, list = d.list || [];
+          .then(function (j) { paint(j); })
+          .catch(function () { });
+      }
+      /* 画榜单（原生桥拿回来的那段 JSON 也走这里） */
+      function paint(j) {
+        hide();
+        /* 两种来源都要认：原生桥直接给 data，JS 兜底的 fetch 给的是 {ok,data} */
+        var d = (j && j.data) ? j.data : (j || {});
+        var list = d.list || [];
             var rows = list.map(function (x) {
               var medal = x.rank === 1 ? '🥇' : (x.rank === 2 ? '🥈' : (x.rank === 3 ? '🥉' : (x.rank + '')));
               return '<div class="__cr_row' + (x.me ? ' me' : '') + '">'
@@ -69,7 +132,6 @@ func chrisRankJs(game: String, token: String, base: String) -> String {
               + '<button class="__cr_btn" onclick="chrisRank.hide()">关闭</button></div>';
             el.addEventListener('click', function (e) { if (e.target === el) hide(); });
             document.body.appendChild(el);
-          }).catch(function () { });
       }
       /* 自动报分：页面自己往 localStorage 存的最高分（*_best）一存就报上去 */
       try {
@@ -90,7 +152,7 @@ func chrisRankJs(game: String, token: String, base: String) -> String {
           }
         });
       } catch (e) { }
-      window.chrisRank = { report: report, show: show, hide: hide, game: GAME };
+      window.chrisRank = { report: report, show: show, hide: hide, render: paint, game: GAME };
     })();
     """
 }

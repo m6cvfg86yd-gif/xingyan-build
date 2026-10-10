@@ -27,6 +27,34 @@ struct MusicTrack: Decodable, Identifiable, Hashable {
 
 /* ---------------------------------------------------------- 歌词 */
 
+/* ---------------------------------------------------------- 好友在听什么 */
+
+/// 好友"正在听"的一条（服务器 /api/music/friends 回的）
+struct FriendNowPlaying: Decodable, Identifiable {
+    var id: String
+    var name: String
+    var avatar: String?
+    var trackId: String
+    var title: String
+    var artist: String?
+    var cover: String?
+    var url: String
+    var at: Double?
+
+    var asTrack: MusicTrack {
+        MusicTrack(id: trackId.isEmpty ? id : trackId, title: title,
+                   artist: artist, cover: cover, url: url, at: nil)
+    }
+
+    /// 「在听《歌名》 · 歌手」那一行
+    var line: String {
+        let a = (artist ?? "").trimmingCharacters(in: .whitespaces)
+        return "在听《" + title + "》" + (a.isEmpty ? "" : " · " + a)
+    }
+}
+
+struct NowPlayingPayload: Decodable { var list: [FriendNowPlaying]? }
+
 struct MusicLyricLine: Identifiable, Equatable {
     var id: Int
     var time: Double
@@ -210,6 +238,17 @@ final class MusicPlayer: NSObject, ObservableObject, AVAudioPlayerDelegate {
     private var remoteReady = false
     /// 上一次报给锁屏的秒数（别每 0.3 秒都报一遍）
     private var syncedSecond: Int = -1
+    /// 上一次报给服务器的"我在听这首"（同一首 60 秒内只报一次）
+    private var nowId = ""
+    private var nowAt = Date.distantPast
+
+    /// 报一句"我在听这首"：好友在「听一听 → 朋友推荐」里就能看到
+    private func reportNow(_ t: MusicTrack) {
+        if nowId == t.id, Date().timeIntervalSince(nowAt) < 60 { return }
+        nowId = t.id
+        nowAt = Date()
+        Task { await API.shared.musicNow(t) }
+    }
 
     /// 只在用到播放器的时候挂一次锁屏控制（省得在 init 里碰 MediaPlayer）
     func ensureRemote() {
@@ -271,6 +310,7 @@ final class MusicPlayer: NSObject, ObservableObject, AVAudioPlayerDelegate {
         ensureRemote()
         cacheCover(t)
         current = t
+        reportNow(t)
         /* ① 本机已经存过一份：直接放（秒开、离线也能放） */
         if let local = localURL(t), FileManager.default.fileExists(atPath: local.path),
            let p = try? AVAudioPlayer(contentsOf: local) {
@@ -501,6 +541,9 @@ struct ListenView: View {
     @State private var tab = 0
     /// 「换一批」每点一次 +1，推荐列表跟着重排
     @State private var batch = 0
+    /// 朋友推荐（好友最近 2 小时在听的）
+    @State private var friends: [FriendNowPlaying] = []
+    @State private var friendsLoaded = false
     @ObservedObject private var player = MusicPlayer.shared
 
     private var sendMode: Bool { sendTo != nil }
@@ -686,19 +729,62 @@ struct ListenView: View {
                             row(t)
                         }
                     } else {
-                        VStack(spacing: 8) {
-                            Text(Tr("朋友推荐还没有内容"))
-                                .font(pf(14)).foregroundColor(C.subLabel)
-                            Text(Tr("等朋友听过的歌多了，这里就会出现"))
-                                .font(pf(12.5)).foregroundColor(C.subLabel.opacity(0.8))
+                        /* 朋友推荐 = 好友最近 2 小时在听的歌（用户要的「让好友看到我在听啥」）。
+                           进来的时候拉一次，切到这一栏也会再拉一次。 */
+                        if !friends.isEmpty {
+                            ForEach(Array(friends.enumerated()), id: \.element.id) { i, f in
+                                if i > 0 { HairLine(inset: 66) }
+                                friendRow(f)
+                            }
+                            Text(Tr("好友最近 2 小时在听的歌"))
+                                .font(pf(12)).foregroundColor(C.subLabel.opacity(0.8))
+                                .frame(maxWidth: .infinity)
+                                .padding(.top, 14)
+                        } else {
+                            VStack(spacing: 8) {
+                                Text(Tr("朋友推荐还没有内容")).font(pf(14)).foregroundColor(C.subLabel)
+                                Text(Tr("你在这一页放一首歌，好友的「朋友推荐」里就会看到你在听什么；\n反过来，好友在听的时候这里也会出现。"))
+                                    .font(pf(12.5)).foregroundColor(C.subLabel.opacity(0.8))
+                                    .multilineTextAlignment(.center)
+                            }
+                            .frame(maxWidth: .infinity).padding(.top, 50)
                         }
-                        .frame(maxWidth: .infinity).padding(.top, 50)
                     }
                     Spacer().frame(height: 24)
                 }
             }
             .background(C.pageBg)
         }
+        /* 进来先拉一次好友在听什么；点到「朋友推荐」那一栏再拉一次（要最新的） */
+        .task { await loadFriends() }
+        .onChange(of: tab) { t in if t == 2 { Task { await loadFriends() } } }
+    }
+
+    /* 好友在听的一行：头像 + 名字 + 在听什么 + 一起听（点了直接播这首） */
+    private func friendRow(_ f: FriendNowPlaying) -> some View {
+        let t = f.asTrack
+        return Button { MusicPlayer.shared.toggle(t) } label: {
+            HStack(spacing: 12) {
+                Avatar(path: f.avatar ?? "", size: 40, radius: 6)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(f.name).font(pf(15)).foregroundColor(C.label).lineLimit(1)
+                    Text(f.line)
+                        .font(pf(12)).foregroundColor(C.subLabel).lineLimit(1)
+                }
+                Spacer(minLength: 6)
+                MusicPlayButton(playing: player.isPlaying(t.id), loading: player.loadingId == t.id,
+                                size: 30, tint: .white, bg: C.green)
+            }
+            .padding(.horizontal, 14).frame(height: 64)
+            .background(C.cardBg)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func loadFriends() async {
+        friends = await API.shared.friendsNowPlaying()
+        friendsLoaded = true
     }
 
     private func row(_ t: MusicTrack) -> some View {

@@ -157,7 +157,9 @@ struct MiniAppRuntimeView: View {
                                injectBridge: !app.isGame,
                                rankJs: chrisRankJs(game: app.id, token: API.shared.token, base: API.shared.base),
                                box: box,
-                               onMessage: handle)
+                               onMessage: handle,
+                               onScore: { g, s in Task { await API.shared.gameScore(g, s) } },
+                               onRank: { g, done in Task { done(await API.shared.gameRankJSON(g)) } })
             } else if loading {
                 VStack(spacing: 10) {
                     ProgressView().tint(.white)
@@ -252,6 +254,9 @@ struct MiniAppWebView: UIViewRepresentable {
     let rankJs: String
     let box: WebBox
     let onMessage: ([String: Any]) -> Void
+    /// 报分 / 拉榜：由原生替网页发（本地 file:// 直连服务器会被证书拦掉）
+    var onScore: ((String, Int) -> Void)? = nil
+    var onRank: ((String, @escaping (String) -> Void) -> Void)? = nil
 
     func makeUIView(context: Context) -> WKWebView {
         let cfg = WKWebViewConfiguration()
@@ -260,6 +265,10 @@ struct MiniAppWebView: UIViewRepresentable {
         if !rankJs.isEmpty {
             cfg.userContentController.addUserScript(
                 WKUserScript(source: rankJs, injectionTime: .atDocumentStart, forMainFrameOnly: true))
+            /* 好友排行那根线（报分 / 拉榜） */
+            context.coordinator.rank.onScore = onScore
+            context.coordinator.rank.onRank = onRank
+            cfg.userContentController.add(context.coordinator.rank, name: "chrisRank")
         }
         if injectBridge {
             cfg.userContentController.add(context.coordinator, name: "wx")
@@ -274,6 +283,7 @@ struct MiniAppWebView: UIViewRepresentable {
         v.scrollView.contentInsetAdjustmentBehavior = .never
         v.loadFileURL(index, allowingReadAccessTo: dir ?? index.deletingLastPathComponent())
         context.coordinator.web = v
+        context.coordinator.rank.web = v
         box.web = v
         return v
     }
@@ -284,6 +294,8 @@ struct MiniAppWebView: UIViewRepresentable {
 
     final class Coord: NSObject, WKScriptMessageHandler {
         let onMessage: ([String: Any]) -> Void
+        /// 好友排行（自己不是一个 handler 名，见 makeUIView 里的注册）
+        let rank = RankBridge()
         weak var web: WKWebView?
         init(onMessage: @escaping ([String: Any]) -> Void) { self.onMessage = onMessage }
         func userContentController(_ uc: WKUserContentController, didReceive message: WKScriptMessage) {

@@ -71,6 +71,13 @@ final class StickerCam: NSObject, ObservableObject, AVCaptureVideoDataOutputSamp
     private var started = false
     private var rendering = false
     private var frameNo = 0
+    /* 这一帧要不要转 90°/180° 才"正"。
+       ⚠ 不同机型 / 系统版本上，采集连接给的旋转是不一样的（iOS 17 的
+       videoRotationAngle 和老的 videoOrientation 行为也有差别），照着一个写死的
+       角度走，轻则取景像躺着的（用户说的「感觉镜头是错的」），重则 Vision 认不出脸
+       （「拍不到人」）。所以这里**自己找一个能认到脸的方向**并记住：
+       下面 detectOriented() 会依次试几个方向，谁认得到脸就用谁。 */
+    private var fix: CGImagePropertyOrientation = .right
 
     func start() {
         guard !started else { return }
@@ -89,6 +96,8 @@ final class StickerCam: NSObject, ObservableObject, AVCaptureVideoDataOutputSamp
     /// 前后摄像头切换（微信「拍摄表情」右下角那颗）
     func flip() {
         usingFront.toggle()
+        /* 换了镜头：上一颗镜头的人脸框不算数了，清掉让它重新找一个能认到脸的方向 */
+        faceBox = nil
         queue.async { [weak self] in
             guard let self else { return }
             self.session.beginConfiguration()
@@ -135,26 +144,34 @@ final class StickerCam: NSObject, ObservableObject, AVCaptureVideoDataOutputSamp
                        didOutput sampleBuffer: CMSampleBuffer,
                        from connection: AVCaptureConnection) {
         guard let buf = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
-        var img = CIImage(cvPixelBuffer: buf)
+        let raw = CIImage(cvPixelBuffer: buf)
+
+        /* ① 先把这一帧"转正"：人脸检测顺便当成方向探针（见 detectOriented） */
+        frameNo += 1
+        var img = oriented(raw, fix)
+        if frameNo % 4 == 1 {
+            if let r = detectOriented(raw) {
+                fix = r.fix
+                faceBox = r.box
+            } else {
+                faceBox = nil
+            }
+            img = oriented(raw, fix)
+        }
+
         let fx = stickerFxList[min(max(0, fxIndex), stickerFxList.count - 1)]
         if !fx.filter.isEmpty { img = img.applyingFilter(fx.filter) }
-        /* 人脸：**每 6 帧检一次**（Vision 很快，但没必要每帧跑）。
-           跟不跟脸特效都跑 —— 拍照时要按脸裁正方形（不然竖屏自拍的脸会被切掉）。 */
-        frameNo += 1
-        if frameNo % 6 == 1 {
+        if fx.isFace {
             let before = faceBox
-            detectFace(img)
-            if fx.isFace {
-                var moved = false
-                if let a = faceBox, let b = before {
-                    moved = abs(a.minX - b.minX) > 0.01 || abs(a.minY - b.minY) > 0.01 || abs(a.width - b.width) > 0.01
-                } else if (faceBox == nil) != (before == nil) {
-                    moved = true
-                }
-                if moved || faceOverlay == nil {
-                    let over = makeFaceOverlay(fx.face, frameSize: img.extent.size)
-                    DispatchQueue.main.async { self.faceOverlay = over }
-                }
+            var moved = false
+            if let a = faceBox, let b = before {
+                moved = abs(a.minX - b.minX) > 0.01 || abs(a.minY - b.minY) > 0.01 || abs(a.width - b.width) > 0.01
+            } else if (faceBox == nil) != (before == nil) {
+                moved = true
+            }
+            if moved || faceOverlay == nil {
+                let over = makeFaceOverlay(fx.face, frameSize: img.extent.size)
+                DispatchQueue.main.async { self.faceOverlay = over }
             }
         }
         if !fx.isFace, faceOverlay != nil {
@@ -175,10 +192,13 @@ final class StickerCam: NSObject, ObservableObject, AVCaptureVideoDataOutputSamp
         guard let ci = lastCI, let base = render(cropSquare(ci)) else { return nil }
         let fx = stickerFxList[min(max(0, fxIndex), stickerFxList.count - 1)]
         guard fx.isFace, let over = faceOverlay, over.size.width > 1 else { return base }
-        /* 那一层是按「整幅取景画面」的比例画的，这里按裁剪偏移把它对到方图里 */
-        let side = min(ci.extent.width, ci.extent.height)
-        let cropX = (ci.extent.width - side) / 2
-        let cropY = (ci.extent.height - side) / 2
+        /* 那一层是按「整幅取景画面」的比例画的，这里按**实际裁剪的那块**把它对到方图里。
+           ⚠ 以前这里按"居中裁"算偏移，但裁的时候是**以脸为中心**裁的 ——
+           于是存下来的表情贴纸会歪到一边（脸在中间、耳朵跑到头上）。 */
+        let rect = cropRect(ci)
+        let side = rect.width
+        let cropX = rect.minX
+        let cropY = ci.extent.height - rect.maxY          // CI 是左下原点 → 换算成"离顶边多少"
         let s = ci.extent.width / over.size.width
         let r = UIGraphicsImageRenderer(size: base.size)
         return r.image { c in
@@ -189,17 +209,43 @@ final class StickerCam: NSObject, ObservableObject, AVCaptureVideoDataOutputSamp
 
     /* ---------------- 人脸特效：检测 + 画那一层 ---------------- */
 
+    /// 按 EXIF 方向转一下（.up 就是原样）
+    private func oriented(_ img: CIImage, _ o: CGImagePropertyOrientation) -> CIImage {
+        o == .up ? img : img.oriented(o)
+    }
+
+    /// 这一帧该转哪个方向才对？**拿人脸当探针**：
+    /// 先试上次记住的那个方向；没认到脸就把另外几个方向也挨个试一遍
+    /// （只在这帧上试、而且缩到 480 再检，很快）。谁认到脸就用谁并记下来。
+    /// 一个方向都认不到（屋里没人 / 太暗）：保住上次记住的方向。
+    private func detectOriented(_ raw: CIImage) -> (box: CGRect, fix: CGImagePropertyOrientation)? {
+        var seen = Set<UInt32>()
+        let all: [CGImagePropertyOrientation] = [fix, .up, .right, .left, .down].filter { o in
+            if seen.contains(o.rawValue) { return false }
+            seen.insert(o.rawValue)
+            return true
+        }
+        /* 已经认到过人：只走记住的那个方向（省性能）；还没认到过：多试几个 */
+        let tries: [CGImagePropertyOrientation] = faceBox == nil ? all : [fix]
+        for o in tries {
+            if let box = faceBoxIn(oriented(raw, o)) { return (box, o) }
+        }
+        return nil
+    }
+
     /// 找人脸（Vision）：结果框是「左下角为原点」的归一化坐标，
     /// 这里立刻转成**左上角为原点**（UIKit 画图那个方向），后面画贴纸就不用再翻来翻去。
-    private func detectFace(_ img: CIImage) {
+    private func faceBoxIn(_ img: CIImage) -> CGRect? {
+        /* 缩到 480 再检：只要归一化坐标，缩放不影响结果，但快很多 */
+        let e = img.extent
+        let long = max(e.width, e.height)
+        var probe = img
+        if long > 640 { probe = img.transformed(by: CGAffineTransform(scaleX: 480 / long, y: 480 / long)) }
         let req = VNDetectFaceRectanglesRequest()
-        let handler = VNImageRequestHandler(ciImage: img, orientation: .up, options: [:])
-        guard (try? handler.perform([req])) != nil, let f = req.results?.first else {
-            faceBox = nil
-            return
-        }
+        let handler = VNImageRequestHandler(ciImage: probe, orientation: .up, options: [:])
+        guard (try? handler.perform([req])) != nil, let f = req.results?.first else { return nil }
         let b = f.boundingBox
-        faceBox = CGRect(x: b.minX, y: 1 - b.maxY, width: b.width, height: b.height)
+        return CGRect(x: b.minX, y: 1 - b.maxY, width: b.width, height: b.height)
     }
 
     /// 画人脸特效那一层（小一号画，省性能；反正预览和方图都会等比缩放）
@@ -239,13 +285,13 @@ final class StickerCam: NSObject, ObservableObject, AVCaptureVideoDataOutputSamp
         return UIImage(cgImage: cgOut)
     }
 
-    private func cropSquare(_ img: CIImage) -> CIImage {
+    /// 要裁的那块正方形：**检到脸就以脸为中心**（竖屏自拍的脸偏上，
+    /// 按正中裁经常把整张脸切掉 —— 用户说的"拍不到人"），没检到就居中。
+    private func cropRect(_ img: CIImage) -> CGRect {
         let e = img.extent
         let side = min(e.width, e.height)
         var x = e.midX - side / 2
         var y = e.midY - side / 2
-        /* ⚠ 竖屏自拍的**脸是偏上的**，按正中裁正方形经常把整张脸切掉
-           （用户反馈的「拍不到脸」就是这个）。检到脸就以脸为中心裁。 */
         if let b = faceBox {
             let cx = e.minX + b.midX * e.width
             /* faceBox 是「左上角为原点」，CI 这张图是「左下角为原点」，y 要翻一下 */
@@ -255,7 +301,11 @@ final class StickerCam: NSObject, ObservableObject, AVCaptureVideoDataOutputSamp
         }
         x = min(max(e.minX, x), e.maxX - side)
         y = min(max(e.minY, y), e.maxY - side)
-        let rect = CGRect(x: x, y: y, width: side, height: side)
+        return CGRect(x: x, y: y, width: side, height: side)
+    }
+
+    private func cropSquare(_ img: CIImage) -> CIImage {
+        let rect = cropRect(img)
         return img.cropped(to: rect).transformed(by: CGAffineTransform(translationX: -rect.minX, y: -rect.minY))
     }
 

@@ -185,7 +185,9 @@ struct GameWebPage: View {
             if let localIndex {
                 GameWebView(index: localIndex, dir: localDir,
                             rankJs: chrisRankJs(game: game.id, token: API.shared.token, base: API.shared.base),
-                            box: box)
+                            box: box,
+                            onScore: { g, s in Task { await API.shared.gameScore(g, s) } },
+                            onRank: { g, done in Task { done(await API.shared.gameRankJSON(g)) } })
             } else if loading {
                 VStack(spacing: 10) {
                     ProgressView().tint(.white)
@@ -266,6 +268,13 @@ struct GameWebView: UIViewRepresentable {
     /// 好友排名那一层（自动报分 + 🏆 面板）
     var rankJs: String = ""
     var box: WebBox? = nil
+    /// 报分：由**原生**替网页发（网页是本地 file://，直连服务器会被证书/CORS 拦掉 ——
+    /// 这就是以前排行榜一直不生效的原因）
+    var onScore: ((String, Int) -> Void)? = nil
+    /// 拉榜单：拿到 JSON 字符串后回填到网页里画
+    var onRank: ((String, @escaping (String) -> Void) -> Void)? = nil
+
+    func makeCoordinator() -> RankBridge { RankBridge() }
 
     func makeUIView(context: Context) -> WKWebView {
         let cfg = WKWebViewConfiguration()
@@ -274,6 +283,11 @@ struct GameWebView: UIViewRepresentable {
         if !rankJs.isEmpty {
             cfg.userContentController.addUserScript(
                 WKUserScript(source: rankJs, injectionTime: .atDocumentStart, forMainFrameOnly: true))
+            /* 网页 → 原生 的那根线：报分 / 拉榜都走它 */
+            let b = context.coordinator
+            b.onScore = onScore
+            b.onRank = onRank
+            cfg.userContentController.add(b, name: "chrisRank")
         }
         let v = WKWebView(frame: .zero, configuration: cfg)
         v.isOpaque = false
@@ -283,6 +297,7 @@ struct GameWebView: UIViewRepresentable {
         v.scrollView.contentInsetAdjustmentBehavior = .never
         v.loadFileURL(index, allowingReadAccessTo: dir ?? index.deletingLastPathComponent())
         box?.web = v
+        context.coordinator.web = v
         return v
     }
 

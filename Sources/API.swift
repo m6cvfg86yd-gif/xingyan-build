@@ -1771,6 +1771,39 @@ final class API {
 
     /* ---------------------------------------------------------- 业务接口 */
 
+    /* ---------------------------------------------------------- 小游戏排行（网页游戏那层 JS 桥用） */
+
+    /// 报分：只涨不跌。失败就算了 —— 不能因为报分失败把游戏也卡住。
+    func gameScore(_ game: String, _ score: Int) async {
+        _ = try? await request("POST", "/api/games/score", body: ["game": game, "score": score])
+    }
+
+    /// 好友榜单：**直接把服务器那段 JSON 原样交给网页那层画**
+    /// （原生这边不再解析一遍，省得两套模型对不齐）
+    func gameRankJSON(_ game: String) async -> String {
+        let q = game.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? game
+        guard let any = try? await request("GET", "/api/games/rank?game=" + q),
+              let d = try? JSONSerialization.data(withJSONObject: any, options: []),
+              let s = String(data: d, encoding: .utf8) else { return "" }
+        return s
+    }
+
+    /* ---------------------------------------------------------- 音乐：我正在听 / 好友在听 */
+
+    /// 报一下"我正在听这首"（好友「听一听 → 朋友推荐」那一栏看的就是它）。失败就算了。
+    func musicNow(_ t: MusicTrack) async {
+        _ = try? await request("POST", "/api/music/now", body: [
+            "id": t.id, "title": t.title, "artist": t.artist ?? "",
+            "cover": t.cover ?? "", "url": t.url
+        ])
+    }
+
+    /// 我好友最近在听什么（服务器只回 2 小时内的）
+    func friendsNowPlaying() async -> [FriendNowPlaying] {
+        guard let p: NowPlayingPayload = try? await get("/api/music/friends", as: NowPlayingPayload.self) else { return [] }
+        return p.list ?? []
+    }
+
     func branding() async -> BrandInfo? {
         guard let payload: BrandingPayload = try? await get("/api/branding", as: BrandingPayload.self) else { return nil }
         return payload.branding
