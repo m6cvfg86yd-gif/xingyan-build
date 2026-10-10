@@ -609,6 +609,7 @@ struct ChatsView: View {
                 withAnimation(.spring(response: 0.46, dampingFraction: 0.70)) { floorUp = false }
             } label: {
                 HStack(spacing: 0) {
+                    Spacer(minLength: 0)
                     Text(navTitle)
                         .font(pf(16))
                         .foregroundColor(C.label)
@@ -616,9 +617,22 @@ struct ChatsView: View {
                     Spacer(minLength: 0)
                 }
                 .padding(.horizontal, 16)
-                .frame(height: 54)
+                /* 参考图里那一条正好是 **80pt 高、文字居中** ——
+                   而且它看着像"被二楼压着一层"：行底再罩一层淡紫（就是二楼那层烟透下来），
+                   顶上加一道渐隐，让二楼和这一条连在一起（不是突然断开）。 */
+                .frame(height: 80)
                 .frame(maxWidth: .infinity)
-                .background(C.chatsRowBg)
+                .background(
+                    ZStack {
+                        C.chatsRowBg
+                        Color(hex: 0x8E86C8).opacity(0.55)
+                        LinearGradient(colors: [Color(hex: 0x322F44).opacity(0.9),
+                                                Color.clear],
+                                       startPoint: .top, endPoint: .bottom)
+                            .frame(height: 22)
+                            .frame(maxHeight: .infinity, alignment: .top)
+                    }
+                )
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
