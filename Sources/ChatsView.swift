@@ -698,11 +698,15 @@ struct ChatsView: View {
                 /* 会**流动**的烟（用户要求："后面没有烟雾效果流动"）——
                    四团很淡的雾各自慢慢飘，颜色/浓度/速度都能后台调：
                    floorSmokeColor（默认 8E86C8）、floorSmokeFlow（0.16）、floorSmokeSpeed（1） */
-                FloorSmoke(color: Color(hexString: UIConfig.text("floorSmokeColor", "8E86C8"),
-                                        fallback: 0x8E86C8),
-                           intensity: UIConfig.num("floorSmokeFlow", 0.16),
-                           speed: UIConfig.num("floorSmokeSpeed", 1))
-                    .opacity(floorUp ? 1 : t)
+                /* 二楼现在是常驻的（收起来只是高度 0），所以这层会飘的烟只在
+                   看得见的时候才开 —— 否则一直在后台跑动画白耗电。 */
+                if floorUp || pullDown > 0.5 {
+                    FloorSmoke(color: Color(hexString: UIConfig.text("floorSmokeColor", "8E86C8"),
+                                            fallback: 0x8E86C8),
+                               intensity: UIConfig.num("floorSmokeFlow", 0.16),
+                               speed: UIConfig.num("floorSmokeSpeed", 1))
+                        .opacity(floorUp ? 1 : t)
+                }
             }
             /* 二楼是**全屏**的：顶上连状态栏那一条（时间 / 信号 / Wi-Fi）也要铺这层烟的颜色，
                不能让那里露出会话列表的底色。 */
@@ -932,17 +936,12 @@ struct ChatsView: View {
                         .frame(maxWidth: .infinity)
                         .opacity(floorUp ? 0 : 1)
 
-                        /* 拉到第三个点才看得到二楼页面（之前只有那几个点在提示力度） */
-                        if floorUp || pullDown >= floorPull {
-                            miniFloor
-                                .frame(maxWidth: .infinity, alignment: .top)
-                                /* 铺出来那一下：从顶上一路**放大 + 淡入**（更活一点）。
-                                   floorPopBounce=0 时改成纯淡入淡出 —— 缩放/位移一点都不做，
-                                   用户要的"不要上下弹一下"。 */
-                                .transition(floorBounce
-                                            ? .opacity.combined(with: .scale(scale: 0.93, anchor: .top))
-                                            : .opacity)
-                        }
+                        /* 二楼**一直在那儿**（微信就是这样）：手指往下拉多少就露出多少 ——
+                           容器高度 = 下拉距离，内容顶部对齐、超出部分裁掉。
+                           收起来时高度回到 0（整页往上滑走），所以也**不用**做进出场过渡 ——
+                           以前那个 fade/scale 的 transition 就是"整个一下子出来"的来源。 */
+                        miniFloor
+                            .frame(maxWidth: .infinity, alignment: .top)
                     }
                         .frame(height: floorReveal)
                         .frame(maxWidth: .infinity, alignment: .top)
@@ -1223,30 +1222,11 @@ private struct FloorPop: ViewModifier {
     var t: CGFloat
     var delay: Double
 
-    /// 「缩放弹出」的起手大小（后台键 floorPopScale，默认 0.88）
-    private var popScale: CGFloat {
-        max(0.5, min(1, UIConfig.num("floorPopScale", 0.88)))
-    }
-    /// 要不要那一点点过冲（后台键 floorPopBounce：写 0 = 原来那种最稳、不回弹的）
-    private var bounce: Bool { UIConfig.num("floorPopBounce", 1) > 0 }
-
+    /* 微信那套四楼（下拉二楼）里，二楼的内容是**一直在那儿的**：
+       手指往下拉多少，就露出多少 —— 里面每一块从来不单独淡入 / 缩放 / 位移。
+       （用户："出来画面的时候不要整个出来，和微信感觉一样的出来"。）
+       所以这里什么都不做，只是保留这个修饰器，方便以后想再打开动效。 */
     func body(content: Content) -> some View {
         content
-            .opacity(up ? 1 : 0.10 + 0.90 * t)
-            /* 用户要的是「**缩放弹出**」：整块从 0.88 放大到正位（锚点在中间），
-               带着一点点过冲的弹簧 —— 像从屏幕里弹出来，而不是页面那样滑出来。
-               只改 scale（渲染层），不动布局，所以不会把文字抖移位（上次那个抖动是 offset 引起的）。 */
-            .scaleEffect(up ? 1 : popScale + (1 - popScale) * t, anchor: .center)
-            /* 用户又提「不要上下弹一下」：floorPopBounce=0 时**连上下位移也去掉**，
-               只留缩放 + 淡入淡出 —— 屏幕上不会有任何上下动的东西。 */
-            .offset(y: bounce ? (up ? 0 : (1 - t) * 18) : 0)
-            .animation(bounce
-                       ? .spring(response: 0.34, dampingFraction: 0.72).delay(delay)
-                       /* 用户说「二楼出来不要有弹簧感」：后台 floorPopBounce 写 0 时走这条 ——
-                          纯缓动、一点点回弹都没有（不是把弹簧调稳，是压根不用弹簧）。 */
-                       : .easeOut(duration: 0.26).delay(delay),
-                       value: up)
     }
 }
-
-
