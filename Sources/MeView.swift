@@ -130,6 +130,8 @@ struct MeView: View {
                 } else if key == "devices" {
                     /* 账号与安全 → 登录设备管理（真设备列表） */
                     LoginDevicesView()
+                } else if key == "devices.faq" {
+                    DevicesFaqView()
                 } else if key == "teen" {
                     TeenModeView()
                 } else if key == "care" {

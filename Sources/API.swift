@@ -2931,6 +2931,16 @@ final class API {
         return p.devices ?? []
     }
 
+    /// 删掉某台登录设备（登录设备管理 → 编辑 → 删除；当前这台服务器不给删）
+    func removeDevice(id: String) async -> String? {
+        do {
+            _ = try await request("POST", "/api/devices/remove", body: ["id": id])
+            return nil
+        } catch {
+            return (error as? APIError)?.errorDescription ?? "删除失败"
+        }
+    }
+
     /* ---------------------------------------------------------- 推送通知（苹果 APNs） */
 
     /// 把苹果给的 device token 交给服务器：手机没连实时通道时它就用这个推通知
