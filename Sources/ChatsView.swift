@@ -862,7 +862,9 @@ struct ChatsView: View {
                         .clipped()
                         .allowsHitTesting(floorOn && (pullDown > floorPull * 0.6 || floorUp))
                         /* 二楼本身也是弹簧 + 阻尼地滑出来（不是一下跳出来） */
-                        .animation(.spring(response: 0.46, dampingFraction: 0.70), value: floorUp)
+                        /* 弹簧**不带回弹**（damping 1.0）：二楼停住之后文字不会再抖一下 ——
+                           0.70 那种会冲过目标再弹回来，字看着就在抖。 */
+                        .animation(.spring(response: 0.42, dampingFraction: 1.0), value: floorUp)
                 }
 
                 VStack(spacing: 0) {
@@ -1123,7 +1125,10 @@ private struct FloorPop: ViewModifier {
             .opacity(up ? 1 : 0.10 + 0.90 * t)
             .scaleEffect(up ? 1 : 0.92 + 0.08 * t, anchor: .top)
             .offset(y: up ? 0 : (1 - t) * 26)
-            .animation(.spring(response: 0.44, dampingFraction: 0.72).delay(delay), value: up)
+            /* 停住之后（up = 1）就是正位，**没有回弹、没有余震** ——
+               不然文字会抖一下（用户反馈"二楼出来后文字抖动"）。
+               错开入场靠 delay 就够，不需要弹簧过冲。 */
+            .animation(.spring(response: 0.40, dampingFraction: 1.0).delay(delay), value: up)
     }
 }
 
