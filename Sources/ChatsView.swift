@@ -572,9 +572,10 @@ struct ChatsView: View {
         let full = UIScreen.main.bounds.height
         /* 但**最底下要留一条**：露出会话列表最后一行 + 底栏（微信就是这么做的，
            截图里底上那条「微信（2233）」就是它），点那一条 / 往上滑就收起二楼。 */
-        /* 二楼是**全屏**下来的（用户要求）：连底部导航那一条也盖住 ——
-           底下只留一点点"两页叠在一起"的露出（在 miniFloor 里画那个小尖）。 */
-        let top = max(240, full)
+        /* 用户反馈「二楼上去后底栏不见了」：二楼铺满到**底栏上面**为止，
+           4 个 tab 照常看得见 —— 底下那条「星言（N）」正好压在底栏上沿，
+           还是"两页叠一起"的那点露出。 */
+        let top = max(240, full - (L.tabH + L.safeBottom))
         if floorUp { return top }
         if pullDown > 0.5 { return min(pullDown, top) }
         return 0
@@ -691,10 +692,9 @@ struct ChatsView: View {
             /* 二楼是**全屏**的：顶上连状态栏那一条（时间 / 信号 / Wi-Fi）也要铺这层烟的颜色，
                不能让那里露出会话列表的底色。 */
             .ignoresSafeArea(edges: .top)
-            /* 二楼铺满全屏时要**盖住底部导航**（用户要求），所以二楼一拉开就把底栏藏起来 */
-            .onChange(of: floorUp) { v in
-                withAnimation(.easeOut(duration: 0.2)) { app.floorFull = v }
-            }
+            /* 用户反馈「二楼上去后底栏不见了」：**不再藏底栏**了 ——
+               二楼铺到「底栏上沿」为止（见 floorReveal），
+               4 个 tab 一直在，点哪个都能直接换页。 */
         )
         /* 二楼**顶上那条遮罩**：状态栏那一条压得最重、往下化开 ——
            微信二楼顶上也是这么压一条，内容就不会顶着时间/信号图标。
