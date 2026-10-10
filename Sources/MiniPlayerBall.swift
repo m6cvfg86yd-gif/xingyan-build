@@ -28,13 +28,13 @@ struct MiniPlayerBall: View {
     /// 外层这份在它弹出来时要先让位（不然两层都在画，过渡动画里会看到球在飘）。
     var hidden: Bool = false
 
-    /* ⚠ 位置**不存比例**（以前存的是"屏宽的百分之几"）：屏幕高度一变
-       （键盘弹起、切标签栏、弹层推上来）按比例算出来的 y 就跟着变，
-       看着就是「音乐那颗小图标在乱跳」。现在只存两件事：
-         贴哪一边（0 左 / 1 右）+ 离屏幕底多少 pt
-       —— 页面高度怎么变，它都钉在那儿不动。 */
-    @AppStorage("miniBallSide") private var side: Int = 1
-    @AppStorage("miniBallBottom") private var bottom: Double = -1      // -1 = 还没拖过
+    /* ⚠ 位置**不存比例**（以前存"屏宽的百分之几"：键盘弹起、切页、弹层推上来时
+       y 会跟着一起变，看着就是「小图标在乱跳」）。现在存两个**绝对点**：
+         离屏幕左边多少 pt（miniBallX）+ 离屏幕底多少 pt（miniBallBottom）
+       拖动时球跟手指 1:1 走，松手**停在原地**（不再自动吸到左右边 ——
+       以前一松手横着跳一大截，用户说"移起来很奇怪"）。 */
+    @AppStorage("miniBallX") private var storedX: Double = -1
+    @AppStorage("miniBallBottom") private var storedBottom: Double = -1   // -1 = 还没拖过
 
     /// 这一次拖动的位移（松手归零，位置落进上面两个键里）
     @State private var dx: CGFloat = 0
@@ -49,9 +49,10 @@ struct MiniPlayerBall: View {
         GeometryReader { geo in
             let w = max(geo.size.width, 1), h = max(geo.size.height, 1)
             let pad = dia / 2 + 6
-            let bt = min(max(bottom < 0 ? defaultBottom : CGFloat(bottom), pad + 4), h)
-            let cx = min(max((side == 0 ? pad : w - pad) + dx, pad), w - pad)
-            let cy = min(max(h - bt + dy, L.safeTop + pad), h - pad)
+            let restX = storedX < 0 ? w - pad : CGFloat(storedX)
+            let restY = h - (storedBottom < 0 ? defaultBottom : CGFloat(storedBottom))
+            let cx = min(max(restX + dx, pad), w - pad)
+            let cy = min(max(restY + dy, L.safeTop + pad), h - pad)
 
             /* ⚠ 手势必须挂在**球自己身上**，而且要在 .position **之前**：
                .position 会把这一层的框撑成整屏，挂在它后面的点击/拖动
@@ -61,9 +62,10 @@ struct MiniPlayerBall: View {
             ball
                 .contentShape(Circle())
                 /* 点球 = 回到大图（微信那套：往下划收成小球，点小球又回到播放页）。
-                   这里用 highPriorityGesture 的单击：手指一动超过一点点它就自动让位，
-                   拖球照旧 —— 不然两种手势会互相抢，点了没反应。 */
-                .highPriorityGesture(TapGesture().onEnded { openPlayer() })
+                   用普通的 onTapGesture：**不能用 highPriorityGesture** ——
+                   那样会把球里那两个小钮（播放/暂停、✕）的点击也抢走。
+                   普通 tap 和拖动不冲突：手指一动就是拖动，原地抬起来就是点击。 */
+                .onTapGesture { openPlayer() }
                 .gesture(drag(w: w, h: h))
                 .position(x: cx, y: cy)
         }
@@ -113,7 +115,6 @@ struct MiniPlayerBall: View {
         }
         .frame(width: dia, height: dia)
         .shadow(color: .black.opacity(0.24), radius: 10, y: 4)
-        .scaleEffect(dragging ? 1.08 : 1)
     }
 
     private func openPlayer() {
@@ -132,7 +133,8 @@ struct MiniPlayerBall: View {
             }
             .onEnded { v in
                 let pad = dia / 2 + 6
-                let bt = min(max(bottom < 0 ? defaultBottom : CGFloat(bottom), pad + 4), h)
+                let restX = storedX < 0 ? w - pad : CGFloat(storedX)
+                let restY = h - (storedBottom < 0 ? defaultBottom : CGFloat(storedBottom))
 
                 /* 往下甩：关掉这颗球（用户说"卡片缩小后又自己弹回来"，
                    所以这里只有用户自己甩下来才收，别自动展开/自动弹回） */
@@ -142,11 +144,11 @@ struct MiniPlayerBall: View {
                     return
                 }
 
-                /* 吸附到最近的一边，纵向只记「离屏幕底多少」 */
-                let nx = (side == 0 ? pad : w - pad) + v.translation.width
-                let ny = min(max(h - bt + v.translation.height, L.safeTop + pad), h - pad)
-                side = nx < w / 2 ? 0 : 1
-                bottom = Double(min(max(h - ny, pad + 4), h - L.safeTop - pad))
+                /* 松手停在原地（不吸附）：只把最终落点记下来 */
+                let nx = min(max(restX + v.translation.width, pad), w - pad)
+                let ny = min(max(restY + v.translation.height, L.safeTop + pad), h - pad)
+                storedX = Double(nx)
+                storedBottom = Double(min(max(h - ny, pad + 4), h - L.safeTop - pad))
                 dx = 0; dy = 0
                 dragging = false
             }
