@@ -45,6 +45,9 @@ struct UserManageView: View {
     @State private var showCoverPick = false
     /// 正在编辑的小程序/小游戏（点一行进编辑页）
     @State private var editing: MiniApp? = nil
+    /// 音乐多选删除：选中了哪些 / 是不是在选
+    @State private var pickingMusic = false
+    @State private var pickedMusic: Set<String> = []
 
     var body: some View {
         VStack(spacing: 0) {
@@ -167,10 +170,41 @@ struct UserManageView: View {
     private var musicIcons: some View {
         card(Tr("音乐图标")) {
             if let list = data?.music, !list.isEmpty {
+                HStack {
+                    Text(pickingMusic ? (Tr("已选 ") + "\(pickedMusic.count)" + Tr(" 首")) : Tr("点每首右边的图换封面"))
+                        .font(pf(12)).foregroundColor(C.subLabel)
+                    Spacer(minLength: 0)
+                    Button {
+                        if pickingMusic { Task { await deletePicked() } }
+                        else { pickingMusic = true }
+                    } label: {
+                        Text(pickingMusic ? Tr("删除选中") : Tr("批量删除"))
+                            .font(pf(13, .medium))
+                            .foregroundColor(pickingMusic ? C.red : C.green)
+                    }
+                    .buttonStyle(.plain)
+                    if pickingMusic {
+                        Button { pickingMusic = false; pickedMusic = [] } label: {
+                            Text(Tr("取消")).font(pf(13)).foregroundColor(C.subLabel)
+                        }
+                        .buttonStyle(.plain)
+                        .padding(.leading, 10)
+                    }
+                }
+                .padding(.horizontal, 16).padding(.vertical, 8)
+                HairLine(inset: 16)
                 ForEach(Array(list.enumerated()), id: \.element.id) { i, t in
                     if i > 0 { HairLine(inset: 70) }
                     iconRow(cover: t.cover ?? "", title: t.title, sub: t.artistText,
-                            busyKey: t.id) { startPick(t.id) }
+                            busyKey: t.id, id: t.id,
+                            picking: pickingMusic, picked: pickedMusic.contains(t.id)) {
+                        if pickingMusic {
+                            if pickedMusic.contains(t.id) { pickedMusic.remove(t.id) }
+                            else { pickedMusic.insert(t.id) }
+                        } else {
+                            startPick(t.id)
+                        }
+                    }
                 }
             } else {
                 hint(loading ? Tr("正在加载…") : Tr("曲库还是空的"))
@@ -234,9 +268,16 @@ struct UserManageView: View {
     }
 
     private func iconRow(cover: String, title: String, sub: String,
-                         busyKey: String, tap: @escaping () -> Void) -> some View {
+                         busyKey: String, id: String = "",
+                         picking: Bool = false, picked: Bool = false,
+                         tap: @escaping () -> Void) -> some View {
         Button { tap() } label: {
             HStack(spacing: 12) {
+                if picking {
+                    Image(systemName: picked ? "checkmark.circle.fill" : "circle")
+                        .font(.system(size: 21))
+                        .foregroundColor(picked ? C.green : C.subLabel)
+                }
                 ZStack {
                     RoundedRectangle(cornerRadius: 10, style: .continuous).fill(C.pageBg)
                     Text("🖼").font(pf(18))
@@ -251,8 +292,10 @@ struct UserManageView: View {
                     Text(sub).font(pf(12)).foregroundColor(C.subLabel).lineLimit(1)
                 }
                 Spacer(minLength: 6)
-                Text(busy == busyKey ? Tr("上传中…") : Tr("换图标"))
-                    .font(pf(13)).foregroundColor(C.green)
+                if !picking {
+                    Text(busy == busyKey ? Tr("上传中…") : Tr("换图标"))
+                        .font(pf(13)).foregroundColor(C.green)
+                }
             }
             .padding(.horizontal, 14).frame(height: 62)
             .contentShape(Rectangle())
@@ -444,6 +487,23 @@ struct UserManageView: View {
             await load()
         } catch {
             msg = (error as? APIError)?.errorDescription ?? "保存失败"
+        }
+        busy = ""
+    }
+
+    /// 批量删除选中的歌
+    private func deletePicked() async {
+        let ids = Array(pickedMusic)
+        guard !ids.isEmpty else { msg = Tr("先勾几首再删"); return }
+        busy = "del"
+        do {
+            try await API.shared.manageRemoveMusic(ids: ids)
+            msg = Tr("已删除 ") + "\(ids.count)" + Tr(" 首")
+            pickedMusic = []
+            pickingMusic = false
+            await load()
+        } catch {
+            msg = (error as? APIError)?.errorDescription ?? "删除失败"
         }
         busy = ""
     }

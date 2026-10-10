@@ -1850,6 +1850,11 @@ final class API {
                                      "icon": icon, "group": group, "url": url])
     }
 
+    /// 批量删歌（管理页多选以后点删除）
+    func manageRemoveMusic(ids: [String]) async throws {
+        _ = try await request("POST", "/api/manage/music/remove", body: ["ids": ids])
+    }
+
     /// 报一下"我正在听这首"（好友「听一听 → 朋友推荐」那一栏看的就是它）。失败就算了。
     func musicNow(_ t: MusicTrack) async {
         _ = try? await request("POST", "/api/music/now", body: [
