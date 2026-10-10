@@ -281,6 +281,8 @@ struct ChatDetailView: View {
     @State private var gifts: [Gift] = []
     /// App 内打开的网页（AI 发的淘宝 / 闪购卡片，没装 App 时用这个）
     @State private var web: WebURL?
+    /// 好友分享来的小游戏：点卡片全屏打开（用运行时跑）
+    @State private var runningMiniApp: MiniApp?
     /// 已经自动跳过的卡片（同一条只跳一次）
     @State private var autoOpened: Set<String> = []
     /* 长按消息的那套（和微信一样）：动作条 / 转发 / 多选 / 引用 */
@@ -985,6 +987,10 @@ struct ChatDetailView: View {
             ForwardPickerView(items: forwardItems) { }
                 .environmentObject(app)
         }
+        /* 点了好友分享来的小游戏卡片 → 全屏用运行时打开 */
+        .fullScreenCover(item: $runningMiniApp) { g in
+            GameWebPage(game: g).environmentObject(app)
+        }
         /* 点「视频通话」→ 微信那样弹「语音通话 / 视频通话」两个选择 */
         .confirmationDialog(Tr("音视频通话"), isPresented: $showCallChoice, titleVisibility: .hidden) {
             Button(Tr("语音通话")) { startRealCall(video: false) }
@@ -1675,6 +1681,7 @@ struct ChatDetailView: View {
                    onOpenLocation: { p in openLocation = p },
                    onOpenUserCard: { uid in openCardUser(uid) },
                    onOpenAnnounce: { text in announcePage = text; showAnnouncePage = true },
+                   onOpenMiniApp: { g in runningMiniApp = g },
                    onOpenVideo: { u in videoToPlay = u; videoPayload = message.body },
                    onPat: { uid in pat(uid) },
                    onTapRedPacket: { info in tapRedPacket(info) },
@@ -3387,6 +3394,8 @@ struct MessageRow: View {
     var onOpenUserCard: ((String) -> Void)? = nil
     /// 点群里那条群公告卡片 → 进一整页看全文
     var onOpenAnnounce: ((String) -> Void)? = nil
+    /// 点好友分享来的小游戏卡片 → 打开那个小游戏
+    var onOpenMiniApp: ((MiniApp) -> Void)? = nil
     /// 点视频气泡 / 长按实况 → 交给聊天页去全屏播放
     var onOpenVideo: ((URL) -> Void)? = nil
     /// 双击头像 = 拍一拍（微信的手势）
@@ -3670,6 +3679,19 @@ struct MessageRow: View {
             /* 群公告：发公告时自动落的那条卡片（群里所有人可见），点一下看全文 */
             AnnounceBubble(text: message.body) {
                 onOpenAnnounce?(message.body)
+            }
+
+        case "miniapp":
+            /* 好友分享来的小游戏 / 小程序卡片：点一下直接用运行时打开 */
+            if let m = MiniAppShare(json: message.body) {
+                MiniAppCardBubble(info: m) { onOpenMiniApp?(m.asApp) }
+            } else {
+                Text(Tr("[小游戏]"))
+                    .font(pf(L.chatFontSize))
+                    .foregroundColor(C.bubbleText)
+                    .padding(.horizontal, L.bubblePadHPill)
+                    .padding(.vertical, L.bubblePadV)
+                    .background(BubbleFill(mine: mine, tail: showTail, seed: bubbleSeed(message.id)))
             }
 
         case "audio":

@@ -36,6 +36,83 @@ struct MiniApp: Decodable, Identifiable, Hashable {
     var groupText: String { (group?.isEmpty == false) ? group! : "推荐小游戏" }
 }
 
+/* ---------------------------------------------------------- 分享出去的那张卡 */
+
+/// 好友发来的「小游戏 / 小程序」卡片：body 就是这一段 JSON
+struct MiniAppShare: Decodable {
+    var id: String
+    var name: String
+    var desc: String?
+    var icon: String?
+    var kind: String?
+    var url: String
+    var cover: String?
+    var action: String?
+
+    var asApp: MiniApp {
+        MiniApp(id: id, name: name, desc: desc, icon: icon, kind: kind, url: url,
+                color: nil, cover: cover, group: nil, action: action)
+    }
+    var isGame: Bool { (kind ?? "") == "game" }
+
+    /// 从聊天消息 body 里解析（解析不出来就返回 nil，界面上退回一行「[小游戏]」）
+    init?(json: String) {
+        guard let d = json.data(using: .utf8),
+              let o = (try? JSONSerialization.jsonObject(with: d)) as? [String: Any] else { return nil }
+        let name = (o["name"] as? String) ?? ""
+        let url = (o["url"] as? String) ?? ""
+        guard !name.isEmpty, !url.isEmpty else { return nil }
+        self.id = (o["id"] as? String) ?? ""
+        self.name = name
+        self.desc = o["desc"] as? String
+        self.icon = o["icon"] as? String
+        self.kind = o["kind"] as? String
+        self.url = url
+        self.cover = o["cover"] as? String
+        self.action = o["action"] as? String
+    }
+}
+
+/// 聊天里那张小游戏卡片（微信里好友分享给你的小游戏就是这个样子）
+struct MiniAppCardBubble: View {
+    let info: MiniAppShare
+    var onOpen: () -> Void
+
+    var body: some View {
+        HStack(spacing: 10) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    .fill(LinearGradient(colors: [Color(hex: 0x2B2F3A), Color(hex: 0x171B22)],
+                                         startPoint: .topLeading, endPoint: .bottomTrailing))
+                Text(info.icon?.isEmpty == false ? info.icon! : (info.isGame ? "🕹️" : "🧩"))
+                    .font(.system(size: 26))
+                if let cv = info.cover, !cv.isEmpty {
+                    RemoteImage(path: cv).frame(width: 52, height: 52)
+                        .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+                }
+            }
+            .frame(width: 52, height: 52)
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(info.name).font(pf(15)).foregroundColor(C.label).lineLimit(1)
+                Text(info.desc?.isEmpty == false ? info.desc! : Tr("点开就能玩"))
+                    .font(pf(12)).foregroundColor(C.subLabel).lineLimit(2)
+                Text(Tr("小游戏"))
+                    .font(pf(10.5)).foregroundColor(C.subLabel)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 9)
+        .frame(width: 232, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(C.cardBg))
+        .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous)
+            .stroke(C.hairline, lineWidth: 0.5))
+        .contentShape(Rectangle())
+        .onTapGesture { onOpen() }
+    }
+}
+
 /* ---------------------------------------------------------- 列表页（发现 → 小程序） */
 
 struct MiniAppsView: View {

@@ -81,7 +81,7 @@ struct GamesPageView: View {
         .swipeBack { dismiss() }
         /* 点开一款：**内置浏览器全屏**玩（网页小游戏在服务器上） */
         .fullScreenCover(item: $playing) { g in
-            GameWebPage(game: g)
+            GameWebPage(game: g).environmentObject(app)
         }
         .task {
             /* 和「发现 → 小程序」同一个源：后台「小程序 / 小游戏」里 kind=小游戏 的那些。
@@ -145,6 +145,7 @@ struct GamesPageView: View {
 /// 左上角一颗「✕」退出，页面本身就是 canvas 全屏，不做别的栏，免得挡着玩。
 struct GameWebPage: View {
     let game: MiniApp
+    @EnvironmentObject var app: AppState
     @Environment(\.dismiss) private var dismiss
     /// 下到本机的那份 index.html（见 prepare()）
     @State private var localIndex: URL?
@@ -153,6 +154,8 @@ struct GameWebPage: View {
     @State private var errorText = ""
     /// 顶栏那颗 🏆（好友排名面板）要往里打 JS
     @StateObject private var box = WebBox()
+    /// 「分享给好友」那个选人页
+    @State private var share = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -174,6 +177,14 @@ struct GameWebPage: View {
                         box.web?.evaluateJavaScript("window.chrisRank && chrisRank.show()")
                     } label: {
                         Text("🏆").font(.system(size: 18))
+                            .frame(width: 48, height: L.navH)
+                    }
+                    .buttonStyle(.plain)
+                    /* 分享给好友：发一张小游戏卡片（对方点开就能直接玩） */
+                    Button { share = true } label: {
+                        Image(systemName: "square.and.arrow.up")
+                            .font(.system(size: 17, weight: .semibold))
+                            .foregroundColor(.white)
                             .frame(width: 48, height: L.navH)
                     }
                     .buttonStyle(.plain)
@@ -212,7 +223,25 @@ struct GameWebPage: View {
         }
         .background(Color(hex: 0x0B0E17).ignoresSafeArea())
         .statusBarHidden(true)
+        /* 选一个好友 → 发出去就是一张小游戏卡片（收端在聊天里点开直接进这个游戏） */
+        .sheet(isPresented: $share) {
+            ForwardPickerView(items: [ForwardItem(kind: "miniapp", content: sharePayload)]) { share = false }
+                .environmentObject(app)
+        }
         .task { await prepare() }
+    }
+
+    /// 分享出去那张卡片的 body（收端按这段 JSON 画卡片）
+    private var sharePayload: String {
+        var d: [String: Any] = ["id": game.id, "name": game.name,
+                                "kind": game.kind ?? "game", "url": game.url]
+        if let v = game.desc, !v.isEmpty { d["desc"] = v }
+        if let v = game.icon, !v.isEmpty { d["icon"] = v }
+        if let v = game.cover, !v.isEmpty { d["cover"] = v }
+        if let v = game.action, !v.isEmpty { d["action"] = v }
+        guard let data = try? JSONSerialization.data(withJSONObject: d),
+              let s = String(data: data, encoding: .utf8) else { return "" }
+        return s
     }
 
     /// 一款小游戏要的那几个文件（服务器上 /games/xxx/ 下面就是这套）
