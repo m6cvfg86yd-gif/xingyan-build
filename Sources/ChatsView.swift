@@ -667,10 +667,13 @@ struct ChatsView: View {
            ③ 左上一团极淡的高光：烟在空中散开的那种不均匀 */
         .background(
             ZStack {
-                LinearGradient(colors: [Color(hex: 0x1B1A2A),
-                                        Color(hex: 0x232130),
-                                        Color(hex: 0x2B283C),
-                                        Color(hex: 0x322F44)],
+                /* 四个色标都能在后台调（改完重开 App 生效，不用出包）：
+                   floorBg1 … floorBg4（写法 "#浅色|#深色"，不配就用内置这组）。
+                   默认比原来那组**加深了一档**（用户要求：二楼背景再深一点）。 */
+                LinearGradient(colors: [UIConfig.color("floorBg1", 0x121120, 0x121120),
+                                        UIConfig.color("floorBg2", 0x181626, 0x181626),
+                                        UIConfig.color("floorBg3", 0x1E1B2C, 0x1E1B2C),
+                                        UIConfig.color("floorBg4", 0x242132, 0x242132)],
                                startPoint: .top, endPoint: .bottom)
                 Rectangle().fill(.ultraThinMaterial)
                     .opacity(UIConfig.num("floorSmokeBlur", 0.35))
