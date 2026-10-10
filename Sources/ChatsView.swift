@@ -1201,7 +1201,9 @@ private struct FloorPop: ViewModifier {
             .offset(y: up ? 0 : (1 - t) * 18)
             .animation(bounce
                        ? .spring(response: 0.34, dampingFraction: 0.72).delay(delay)
-                       : .spring(response: 0.40, dampingFraction: 1.0).delay(delay),
+                       /* 用户说「二楼出来不要有弹簧感」：后台 floorPopBounce 写 0 时走这条 ——
+                          纯缓动、一点点回弹都没有（不是把弹簧调稳，是压根不用弹簧）。 */
+                       : .easeOut(duration: 0.26).delay(delay),
                        value: up)
     }
 }
