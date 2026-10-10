@@ -21,6 +21,8 @@ struct StickerFx: Identifiable, Hashable {
     var id: String
     var name: String
     var filter: String = ""
+    /// 滤镜参数（像素/点彩这类要"多大一格"）：0 = 用系统默认
+    var scale: Double = 0
     var face: String = ""
     /// 是不是「人脸特效」那一类（界面分两个 tab 用）
     var isFace: Bool { !face.isEmpty }
@@ -41,8 +43,24 @@ let stickerFxList: [StickerFx] = [
     StickerFx(id: "mono",   name: "黑白", filter: "CIPhotoEffectMono"),
     StickerFx(id: "retro",  name: "复古", filter: "CIPhotoEffectInstant"),
     StickerFx(id: "comic",  name: "漫画", filter: "CIComicEffect"),
-    StickerFx(id: "sepia",  name: "怀旧", filter: "CISepiaTone")
+    StickerFx(id: "sepia",  name: "怀旧", filter: "CISepiaTone"),
+    /* ---- 像素风（用户要的「像素」）：整幅画面打成马赛克/像素块 ---- */
+    StickerFx(id: "pixel",     name: "像素",     filter: "CIPixellate",           scale: 12),
+    StickerFx(id: "pixelBig",  name: "大像素",   filter: "CIPixellate",           scale: 30),
+    StickerFx(id: "hexPixel",  name: "六边像素", filter: "CIHexagonalPixellate",  scale: 16),
+    StickerFx(id: "dots",      name: "点彩",     filter: "CIPointillize",         scale: 10)
 ]
+
+/// 套一层特效：带 scale 的（像素/点彩）要把参数一起传进去，不然是系统默认那一档
+func stickerApply(_ img: CIImage, _ fx: StickerFx) -> CIImage {
+    guard !fx.filter.isEmpty else { return img }
+    if fx.scale > 0 {
+        /* 点彩那个滤镜的参数叫 radius，其它（像素/六边像素）叫 scale */
+        let key = (fx.filter == "CIPointillize") ? kCIInputRadiusKey : kCIInputScaleKey
+        return img.applyingFilter(fx.filter, parameters: [key: fx.scale])
+    }
+    return img.applyingFilter(fx.filter)
+}
 
 /// 「特效来自：××」那一行（微信写的是 WeChat Effect）
 let stickerEffectSource = "星言 Effect"
@@ -160,7 +178,7 @@ final class StickerCam: NSObject, ObservableObject, AVCaptureVideoDataOutputSamp
         }
 
         let fx = stickerFxList[min(max(0, fxIndex), stickerFxList.count - 1)]
-        if !fx.filter.isEmpty { img = img.applyingFilter(fx.filter) }
+        img = stickerApply(img, fx)
         if fx.isFace {
             let before = faceBox
             var moved = false
@@ -453,9 +471,9 @@ struct StickerCamera: View {
                 /* 相册来的图：裁成正方形 + 套当前那层调色（不抠背景，人家选的就是想要的图）。
                    选完还是走「重拍 / 使用」这一步，和拍的一样。 */
                 let sq = stickerSquare(img)
-                let name = fxNow.filter
+                let fxPick = fxNow
                 DispatchQueue.global(qos: .userInitiated).async {
-                    let out = stickerEffect(sq, name)
+                    let out = stickerEffect(sq, fxPick)
                     DispatchQueue.main.async { shot = out }
                 }
             }
@@ -730,10 +748,10 @@ func stickerSquare(_ img: UIImage) -> UIImage {
     return UIImage(cgImage: cropped, scale: img.scale, orientation: img.imageOrientation)
 }
 
-/// 给一张图套上特效（滤镜名传空 = 原图不动）
-func stickerEffect(_ img: UIImage, _ filterName: String) -> UIImage {
-    guard !filterName.isEmpty, let ci = CIImage(image: img) else { return img }
-    let out = ci.applyingFilter(filterName)
+/// 给一张图套上特效（特效是"无特效" = 原图不动）
+func stickerEffect(_ img: UIImage, _ fx: StickerFx) -> UIImage {
+    guard !fx.filter.isEmpty, let ci = CIImage(image: img) else { return img }
+    let out = stickerApply(ci, fx)
     let ctx = CIContext(options: nil)
     guard let cg = ctx.createCGImage(out, from: out.extent) else { return img }
     return UIImage(cgImage: cg, scale: img.scale, orientation: img.imageOrientation)
