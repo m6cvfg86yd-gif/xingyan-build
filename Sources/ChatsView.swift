@@ -793,12 +793,17 @@ struct ChatsView: View {
                                     pullDown = 0
                                 }
                             }
-                            .onEnded { _ in
+                            .onEnded { g in
                                 /* 弹簧 + 阻尼：拉过阈值就"吸"上去停在二楼（会有一点回弹），
                                    没拉够就软软地弹回去（不是硬切）。
                                    阈值由后台 chatsFloorPull 控制，默认 **120pt**
                                    （原来 70pt 太浅，用户反馈"二楼一直误触"）。 */
-                                let open = floorOn && pullDown > floorPull
+                                /* 防误触（用户反馈"还是会误触"）：
+                                   ① 拉够阈值
+                                   ② **松手时速度不快**（快速上滑蹭到顶部时 predictedEnd 冲得很远，
+                                      这种是"滑到头弹一下"，不该开二楼）—— 只认慢慢拉过去的。 */
+                                let fling = abs(g.predictedEndTranslation.height - g.translation.height)
+                                let open = floorOn && pullDown > floorPull && fling < 220
                                 if open { UIImpactFeedbackGenerator(style: .light).impactOccurred() }
                                 withAnimation(.spring(response: 0.52, dampingFraction: 0.76)) {
                                     floorUp = open
@@ -817,12 +822,9 @@ struct ChatsView: View {
                            橡皮筋，不需要我们再挂一层手势，所以不会跟滚动抢手势。 */
                         let p = max(0, -v)
                         if abs(p - pullDown) > 0.5 { pullDown = p }
-                        /* 拉过阈值（后台 chatsFloorPull，默认 120pt）：二楼**停住**
-                           （微信就是这么做的，不会松手就弹没）。阈值调深是为了不误触。 */
-                        if floorOn, p > floorPull, !floorUp {
-                            floorUp = true
-                            UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                        }
+                        /* 二楼**只在松手那一下判断**（onEnded 里），不再拉到一半就自己弹出来 ——
+                           之前"滑到头弹一下"也会被这里判定成开二楼，就是误触的主因。
+                           阈值后台键：chatsFloorPull（现在 180pt）。 */
                         if s > 14, floorUp { floorUp = false }     // 往上滚 = 收起二楼
                     }
                     /* 列表不加底色，而且允许它滚到安全区（顶栏）底下 */
