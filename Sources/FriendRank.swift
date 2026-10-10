@@ -39,6 +39,8 @@ final class RankBridge: NSObject, WKScriptMessageHandler {
     var onScore: ((String, Int) -> Void)?
     /// 拉榜单：游戏标识 + 回调（回的是服务器那段 JSON 字符串，空串 = 失败）
     var onRank: ((String, @escaping (String) -> Void) -> Void)?
+    /// 棋牌大厅那根线（同一个宿主，另一个 handler 名）
+    let room = RoomBridge()
     weak var web: WKWebView?
 
     func userContentController(_ uc: WKUserContentController, didReceive message: WKScriptMessage) {
@@ -56,6 +58,17 @@ final class RankBridge: NSObject, WKScriptMessageHandler {
                 }
             }
         }
+    }
+}
+
+/* 棋牌大厅那根线：网页里走了一步 → 原生拿去发给同桌的人 */
+final class RoomBridge: NSObject, WKScriptMessageHandler {
+    var onMove: (([String: Any]) -> Void)?
+
+    func userContentController(_ uc: WKUserContentController, didReceive message: WKScriptMessage) {
+        guard let body = message.body as? [String: Any] else { return }
+        guard (body["action"] as? String) == "move" else { return }
+        if let mv = body["move"] as? [String: Any] { onMove?(mv) }
     }
 }
 

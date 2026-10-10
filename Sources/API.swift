@@ -1891,6 +1891,66 @@ final class API {
         _ = try? await request("POST", "/api/music/share", body: ["id": id])
     }
 
+    /* ---------------------------------------------------------- 棋牌大厅（桌子） */
+
+    /// 大厅里摆着的桌子
+    func gameTables(_ game: String) async -> [GameTable] {
+        struct R: Decodable { var tables: [GameTable]? }
+        guard let r: R = try? await get("/api/games/tables?game=" + game, as: R.self) else { return [] }
+        return r.tables ?? []
+    }
+
+    /// 自己开一桌 → (桌号, 我的座位)
+    func gameTableCreate(_ game: String) async -> (code: String, seat: Int)? {
+        struct T: Decodable { var code: String?; var seats: [GameTableSeat?]? }
+        struct R: Decodable { var table: T?; var seat: Int? }
+        guard let r: R = try? await post("/api/games/tables/create", ["game": game], as: R.self),
+              let code = r.table?.code else { return nil }
+        return (code, r.seat ?? 0)
+    }
+
+    /// 坐下 → (桌号, 座位, 桌上的人, 开没开)
+    func gameTableSit(_ code: String) async -> (seat: Int, players: [String?], started: Bool)? {
+        struct T: Decodable { var code: String?; var started: Bool?; var seats: [GameTableSeat?]? }
+        struct R: Decodable { var table: T?; var seat: Int?; var started: Bool? }
+        guard let r: R = try? await post("/api/games/tables/sit", ["code": code], as: R.self),
+              let t = r.table else { return nil }
+        let names = (t.seats ?? []).map { $0?.name }
+        return (r.seat ?? 0, names, (r.started ?? t.started) ?? false)
+    }
+
+    func gameTableLeave(_ code: String) async {
+        _ = try? await request("POST", "/api/games/tables/leave", body: ["code": code])
+    }
+
+    func gameTableStart(_ code: String) async {
+        _ = try? await request("POST", "/api/games/tables/start", body: ["code": code])
+    }
+
+    func gameTableMove(_ code: String, _ move: [String: Any]) async {
+        _ = try? await request("POST", "/api/games/tables/move", body: ["code": code, "move": move])
+    }
+
+    /// 拉别人走的步（轮询）
+    func gameTableMoves(_ code: String, since: Int) async -> (n: Int, list: [Any]) {
+        struct R: Decodable {
+            struct M: Decodable {
+                var n: Int?; var seat: Int?
+                struct MV: Decodable { var from: Int?; var to: Int? }
+                var move: MV?
+            }
+            var n: Int?; var moves: [M]?
+        }
+        guard let r: R = try? await get("/api/games/tables/moves?code=\(code)&since=\(since)", as: R.self) else {
+            return (since, [])
+        }
+        let list: [Any] = (r.moves ?? []).map { m in
+            ["n": m.n ?? 0, "seat": m.seat ?? 0,
+             "move": ["from": m.move?.from ?? 0, "to": m.move?.to ?? 0]]
+        }
+        return (r.n ?? since, list)
+    }
+
     func branding() async -> BrandInfo? {
         guard let payload: BrandingPayload = try? await get("/api/branding", as: BrandingPayload.self) else { return nil }
         return payload.branding

@@ -1593,6 +1593,8 @@ struct MomentRow: View {
     var onTogglePin: (() -> Void)? = nil
 
     @State private var deletingComment: String?
+    /// 爱心爆开（自己点赞 / 别人点赞进来都会放一下）
+    @State private var heartBurst = false
     /// 微信：点「···」是在按钮**旁边**弹出「赞 | 评论」小横条，不是底部弹层
     @State private var showActions = false
 
@@ -1686,6 +1688,9 @@ struct MomentRow: View {
                                     .font(.system(size: 11.5))
                                     .foregroundColor(Color(hex: 0x9A9A9A))
                                     .padding(.top, 3)
+                                    .overlay {
+                                        if heartBurst { HeartBurst() }
+                                    }
                                 Text(likes.compactMap { $0.nickname }.joined(separator: "，"))
                                     .font(pf(14.5))
                                     .foregroundColor(C.link)
@@ -1819,11 +1824,15 @@ struct MomentRow: View {
         HStack(spacing: 0) {
             Button {
                 withAnimation(.easeOut(duration: 0.12)) { showActions = false }
+                burstHeart()
                 onLike?()
             } label: {
                 HStack(spacing: 5) {
-                    Image(systemName: "hand.thumbsup")
-                        .font(.system(size: 12.5))
+                    ZStack {
+                        Image(systemName: moment.likedByMe == true ? "heart.fill" : "heart")
+                            .font(.system(size: 13))
+                        if heartBurst { HeartBurst() }
+                    }
                     Text(moment.likedByMe == true ? Tr("取消赞") : Tr("赞"))
                         .font(pf(14.5))
                 }
