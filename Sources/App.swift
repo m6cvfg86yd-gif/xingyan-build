@@ -351,6 +351,7 @@ final class AppState: ObservableObject {
     }
 
     func boot() async {
+        CrashCatcher.note("启动", "3 boot 开始")
         /* 兜底：不管网络多慢，最多 6 秒一定离开「正在连接…」这一屏。
            线路被掐的时候让用户盯着「正在连接」干等，是最容易被投诉的那种体验：
            到点就先放进 App（有缓存资料就用缓存），后台继续连，连上了界面自己会更新。 */
@@ -365,6 +366,7 @@ final class AppState: ObservableObject {
         }
         defer { watchdog.cancel() }
         await refreshUI(force: true)
+        CrashCatcher.note("启动", "4 界面配置就绪")
         await loadBadges()
         /* 版本更新 / 弹窗公告：不阻塞启动（失败了也不影响进 App） */
         await checkVersionAndNotice()
@@ -374,6 +376,7 @@ final class AppState: ObservableObject {
         }
         do {
             let s = try await API.shared.session()
+            CrashCatcher.note("启动", "5 会话查询返回")
             if s.ok, let user = s.user {
                 me = user
                 rememberLastUser()      // 登录页那个圆圈用「最后登录的人」的头像
@@ -738,6 +741,9 @@ struct CHRISApp: App {
     init() {
         /* 一启动就装崩溃上报：连登录页崩都能抓到（以前放在登录之后，前面的崩抓不到） */
         CrashCatcher.install()
+        /* 启动分阶段打点：万一崩在启动路上，服务器日志里能看到卡在第几步
+           （只看 "launch" 一条的话，不知道是崩在配置、会话还是主界面） */
+        CrashCatcher.note("启动", "1 App init")
         /* 图片/视频/媒体走系统磁盘缓存：服务器现在给上传文件发的是「一年内不用再问」的长缓存，
            把缓存容量调大以后，头像、封面、朋友圈图片、看过的视频就不再每次重下了 ——
            这是手机上"卡"和费流量的大头。默认只有 10MB，太小。 */

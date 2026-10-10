@@ -217,6 +217,9 @@ struct MainTabView: View {
                 try? await Task.sleep(nanoseconds: 5_000_000_000)
             }
         }
+        /* 启动打点：主界面真的画出来了（和 App.swift 里 1/3/4/5 那几条对着看，
+           就知道是崩在配置、会话还是主界面上） */
+        .onAppear { CrashCatcher.note("启动", "7 主界面出现") }
     }
 }
 
