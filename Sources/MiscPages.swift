@@ -1052,8 +1052,16 @@ struct FriendsStatusView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            /* 用户要求：标题不要那行字，改成一个**缺一丢丢的圆环**（状态那种图标） */
-            NavBar(title: "", back: { dismiss() })
+            /* 顶栏标题：默认是**一个缺一丢丢的圆环**（用户要的状态图标）。
+               ⚠ 位置用 ZStack 居中对齐（以前用 overlay+padding 算，结果跑到状态栏上去了）。
+               想换成文字：后台 ui.json 写 friendsStatusTitle = "朋友的状态" 就会显示文字。 */
+            ZStack {
+                NavBar(title: UIConfig.text("friendsStatusTitle", ""), back: { dismiss() })
+                if UIConfig.text("friendsStatusTitle", "").isEmpty {
+                    StatusRingIcon()
+                        .allowsHitTesting(false)
+                }
+            }
 
             if list.isEmpty {
                 VStack(spacing: 10) {
@@ -1093,12 +1101,6 @@ struct FriendsStatusView: View {
         .toolbar(.hidden, for: .navigationBar)
         .swipeBack { dismiss() }
         .hidesTabBar()
-        /* 顶栏标题位置那个「缺一丢丢的圆环」 */
-        .overlay(alignment: .top) {
-            StatusRingIcon()
-                .padding(.top, (L.navH - 26) / 2)
-                .allowsHitTesting(false)
-        }
         .sheet(item: $picked) { u in
             NavigationStack { FriendStatusView(user: u).environmentObject(app) }
         }
