@@ -236,7 +236,7 @@ struct MiniAppRuntimeView: View {
                                box: box,
                                onMessage: handle,
                                onScore: { g, s in Task { await API.shared.gameScore(g, s) } },
-                               onRank: { g, done in Task { done(await API.shared.gameRankJSON(g)) } })
+                               onRank: { g, done in Task { done(await API.shared.gameRankJSONWithAvatars(g)) } })
             } else if loading {
                 VStack(spacing: 10) {
                     ProgressView().tint(.white)

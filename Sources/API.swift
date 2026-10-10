@@ -1791,6 +1791,33 @@ final class API {
         return s
     }
 
+    /// 和上面一样，但**把好友头像先下成本机、转成 data: 图片**再交给网页。
+    /// 为什么必须这样：榜单是在 WKWebView 里画的，而我们的服务器是 IP + 自签证书，
+    /// WebView 直接 `<img src="https://43.242...">` 一律加载不出来（头像全空白）。
+    /// 走 App 自己的网络层拿到字节再内联，WebView 就能显示了。
+    func gameRankJSONWithAvatars(_ game: String) async -> String {
+        let q = game.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? game
+        guard let any = try? await request("GET", "/api/games/rank?game=" + q),
+              var d = any as? [String: Any] else { return "" }
+        if var list = d["list"] as? [[String: Any]] {
+            for i in list.indices {
+                guard let a = list[i]["avatar"] as? String, !a.isEmpty, let u = assetURL(a) else {
+                    list[i]["avatar"] = ""
+                    continue
+                }
+                if let data = try? await assetData(u), data.count < 700_000 {
+                    list[i]["avatar"] = "data:image/jpeg;base64," + data.base64EncodedString()
+                } else {
+                    list[i]["avatar"] = ""
+                }
+            }
+            d["list"] = list
+        }
+        guard let out = try? JSONSerialization.data(withJSONObject: d, options: []),
+              let s = String(data: out, encoding: .utf8) else { return "" }
+        return s
+    }
+
     /* ---------------------------------------------------------- 音乐：我正在听 / 好友在听 */
 
     /* ---------------------------------------------------------- App 内的「管理」（ops 用户） */
@@ -1813,6 +1840,14 @@ final class API {
     func manageSetIcon(kind: String, id: String, cover: String) async throws {
         _ = try await request("POST", "/api/manage/icon",
                               body: ["kind": kind, "id": id, "cover": cover])
+    }
+
+    /// 改小程序/小游戏：名字、说明、图标（emoji）、入口地址
+    func manageSaveMiniApp(id: String, name: String, desc: String,
+                           icon: String, group: String, url: String) async throws {
+        _ = try await request("POST", "/api/manage/miniapp",
+                              body: ["id": id, "name": name, "desc": desc,
+                                     "icon": icon, "group": group, "url": url])
     }
 
     /// 报一下"我正在听这首"（好友「听一听 → 朋友推荐」那一栏看的就是它）。失败就算了。

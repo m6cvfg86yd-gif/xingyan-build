@@ -1,6 +1,18 @@
 import SwiftUI
 import WebKit
 
+/// 分享出去那张小游戏卡片的 body（收端按这段 JSON 画卡片、点开直接进游戏）
+func miniAppSharePayload(_ g: MiniApp) -> String {
+    var d: [String: Any] = ["id": g.id, "name": g.name, "kind": g.kind ?? "game", "url": g.url]
+    if let v = g.desc, !v.isEmpty { d["desc"] = v }
+    if let v = g.icon, !v.isEmpty { d["icon"] = v }
+    if let v = g.cover, !v.isEmpty { d["cover"] = v }
+    if let v = g.action, !v.isEmpty { d["action"] = v }
+    guard let data = try? JSONSerialization.data(withJSONObject: d),
+          let s = String(data: data, encoding: .utf8) else { return "" }
+    return s
+}
+
 /* ============================================================
    游戏（发现 → 游戏）
    四款小游戏都是**网页小游戏**（服务器 /games/ 下面那几套，后台能改 data/games.json）：
@@ -14,6 +26,8 @@ struct GamesPageView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var games: [MiniApp] = []
     @State private var playing: MiniApp?
+    /// 分享给好友：选人页在最外层弹（在游戏页里弹会闪退，见 GameWebPage 里的说明）
+    @State private var shareApp: MiniApp?
     /// 换图标（只有 ops 账号看得到那张小按钮）
     @State private var iconPickFor = ""
     @State private var showIconPick = false
@@ -98,6 +112,11 @@ struct GamesPageView: View {
                 }
             }
         }
+        /* 分享给好友：选一个聊天 → 发一张小游戏卡片（收端在聊天里点开直接玩） */
+        .sheet(item: $shareApp) { g in
+            ForwardPickerView(items: [ForwardItem(kind: "miniapp", content: miniAppSharePayload(g))]) { shareApp = nil }
+                .environmentObject(app)
+        }
         .task {
             /* 和「发现 → 小程序」同一个源：后台「小程序 / 小游戏」里 kind=小游戏 的那些。
                这样后台加一款游戏，App 不用出包。 */
@@ -155,6 +174,15 @@ struct GamesPageView: View {
                 }
                 .buttonStyle(.plain)
             }
+            /* 分享给好友（谁都能用） */
+            Button { shareApp = g } label: {
+                Image(systemName: "square.and.arrow.up")
+                    .font(.system(size: 16))
+                    .foregroundColor(subInk)
+                    .frame(width: 34, height: 34)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
             Text(g.actionText)
                 .font(pf(13.5, .medium))
                 .foregroundColor(.white)
@@ -209,14 +237,9 @@ struct GameWebPage: View {
                             .frame(width: 48, height: L.navH)
                     }
                     .buttonStyle(.plain)
-                    /* 分享给好友：发一张小游戏卡片（对方点开就能直接玩） */
-                    Button { share = true } label: {
-                        Image(systemName: "square.and.arrow.up")
-                            .font(.system(size: 17, weight: .semibold))
-                            .foregroundColor(.white)
-                            .frame(width: 48, height: L.navH)
-                    }
-                    .buttonStyle(.plain)
+                    /* 分享给好友挪到**列表页**那颗按钮上了 ——
+                       在这里弹选人页会闪退（用户反馈的「分享出去会没法选择哪个人还闪退」），
+                       列表页（普通的 NavigationStack 页面）里弹就没事。 */
                 }
             }
             .frame(height: L.navH)
@@ -227,7 +250,7 @@ struct GameWebPage: View {
                             rankJs: chrisRankJs(game: game.id, token: API.shared.token, base: API.shared.base),
                             box: box,
                             onScore: { g, s in Task { await API.shared.gameScore(g, s) } },
-                            onRank: { g, done in Task { done(await API.shared.gameRankJSON(g)) } })
+                            onRank: { g, done in Task { done(await API.shared.gameRankJSONWithAvatars(g)) } })
             } else if loading {
                 VStack(spacing: 10) {
                     ProgressView().tint(.white)
@@ -252,25 +275,7 @@ struct GameWebPage: View {
         }
         .background(Color(hex: 0x0B0E17).ignoresSafeArea())
         .statusBarHidden(true)
-        /* 选一个好友 → 发出去就是一张小游戏卡片（收端在聊天里点开直接进这个游戏） */
-        .sheet(isPresented: $share) {
-            ForwardPickerView(items: [ForwardItem(kind: "miniapp", content: sharePayload)]) { share = false }
-                .environmentObject(app)
-        }
         .task { await prepare() }
-    }
-
-    /// 分享出去那张卡片的 body（收端按这段 JSON 画卡片）
-    private var sharePayload: String {
-        var d: [String: Any] = ["id": game.id, "name": game.name,
-                                "kind": game.kind ?? "game", "url": game.url]
-        if let v = game.desc, !v.isEmpty { d["desc"] = v }
-        if let v = game.icon, !v.isEmpty { d["icon"] = v }
-        if let v = game.cover, !v.isEmpty { d["cover"] = v }
-        if let v = game.action, !v.isEmpty { d["action"] = v }
-        guard let data = try? JSONSerialization.data(withJSONObject: d),
-              let s = String(data: data, encoding: .utf8) else { return "" }
-        return s
     }
 
     /// 一款小游戏要的那几个文件（服务器上 /games/xxx/ 下面就是这套）

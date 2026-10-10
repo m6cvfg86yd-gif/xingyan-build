@@ -193,6 +193,10 @@ struct MainTabView: View {
             .animation(.easeOut(duration: 0.22), value: musicSheet.open)
         }
         /* 点推送通知 → 直接进那个会话（服务器在通知里带了 chatId） */
+        /* 好友分享来的小游戏：从聊天里点那张卡片 → 这里全屏打开（最外层弹，稳） */
+        .fullScreenCover(item: $app.openMiniApp) { g in
+            GameWebPage(game: g).environmentObject(app)
+        }
         .onReceive(NotificationCenter.default.publisher(for: .chrisOpenChat)) { note in
             guard let chatId = note.userInfo?["chatId"] as? String, !chatId.isEmpty else { return }
             Task { @MainActor in

@@ -1686,7 +1686,9 @@ struct ChatDetailView: View {
                    onOpenLocation: { p in openLocation = p },
                    onOpenUserCard: { uid in openCardUser(uid) },
                    onOpenAnnounce: { text in announcePage = text; showAnnouncePage = true },
-                   onOpenMiniApp: { g in runningMiniApp = g },
+                   /* ⚠ 交给最外层去弹（见 AppState.openMiniApp 的说明）：
+                      在聊天页里挂 fullScreenCover(item:) 会让这一页一打开就闪退 */
+                   onOpenMiniApp: { g in app.openMiniApp = g },
                    onOpenVideo: { u in videoToPlay = u; videoPayload = message.body },
                    onPat: { uid in pat(uid) },
                    onTapRedPacket: { info in tapRedPacket(info) },

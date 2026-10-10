@@ -43,6 +43,8 @@ struct UserManageView: View {
     /// 正在给谁挑图："" = 上新那首的封面；"mus_xxx" = 那首歌；"g01" = 那款游戏
     @State private var pickFor = ""
     @State private var showCoverPick = false
+    /// 正在编辑的小程序/小游戏（点一行进编辑页）
+    @State private var editing: MiniApp? = nil
 
     var body: some View {
         VStack(spacing: 0) {
@@ -52,6 +54,7 @@ struct UserManageView: View {
                     addSection
                     musicIcons
                     gameIcons
+                    miniappsSection
                     if !msg.isEmpty {
                         Text(msg).font(pf(12.5)).foregroundColor(C.subLabel)
                             .frame(maxWidth: .infinity, alignment: .leading)
@@ -91,6 +94,11 @@ struct UserManageView: View {
         }
         .sheet(isPresented: $showCoverPick) {
             PhotoPicker { img in uploadPic(img) }
+        }
+        /* 改小程序/小游戏：名字 / 说明 / 图标 emoji / 入口地址 */
+        .sheet(item: $editing) { g in
+            MiniAppEditSheet(item: g) { await load() }
+                .environmentObject(app)
         }
     }
 
@@ -171,6 +179,45 @@ struct UserManageView: View {
     }
 
     /* ------------------------------------------------------- 游戏图标 */
+
+    /* ------------------------------------------------------- 小程序（图标 + 文字） */
+
+    private var miniappsSection: some View {
+        card(Tr("小程序（图标 / 名字 / 说明）")) {
+            if let list = data?.apps, !list.isEmpty {
+                ForEach(Array(list.enumerated()), id: \.element.id) { i, a in
+                    if i > 0 { HairLine(inset: 70) }
+                    Button { editing = a } label: {
+                        HStack(spacing: 12) {
+                            ZStack {
+                                RoundedRectangle(cornerRadius: 10, style: .continuous).fill(C.pageBg)
+                                Text(a.iconText).font(.system(size: 22))
+                                if let cv = a.cover, !cv.isEmpty {
+                                    RemoteImage(path: cv).frame(width: 46, height: 46)
+                                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                                }
+                            }
+                            .frame(width: 46, height: 46)
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text(a.name).font(pf(15.5)).foregroundColor(C.label).lineLimit(1)
+                                Text((a.desc ?? "").isEmpty ? a.url : a.desc!)
+                                    .font(pf(12)).foregroundColor(C.subLabel).lineLimit(1)
+                            }
+                            Spacer(minLength: 6)
+                            Text(Tr("编辑")).font(pf(13)).foregroundColor(C.green)
+                            Image(systemName: "chevron.right")
+                                .font(.system(size: 11, weight: .semibold)).foregroundColor(C.subLabel)
+                        }
+                        .padding(.horizontal, 14).frame(height: 62)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                }
+            } else {
+                hint(loading ? Tr("正在加载…") : Tr("还没有小程序"))
+            }
+        }
+    }
 
     private var gameIcons: some View {
         card(Tr("游戏图标")) {
@@ -399,5 +446,145 @@ struct UserManageView: View {
             msg = (error as? APIError)?.errorDescription ?? "保存失败"
         }
         busy = ""
+    }
+}
+
+/* ============================================================
+   编辑一个小程序 / 小游戏：名字、说明、图标 emoji、图标图片、入口地址
+   （用户要的「小程序图标文字更换加入我的管理」）
+   ============================================================ */
+
+struct MiniAppEditSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    let item: MiniApp
+    /// 存完通知外面刷新列表
+    var onSaved: () async -> Void
+
+    @State private var name = ""
+    @State private var desc = ""
+    @State private var icon = ""
+    @State private var group = ""
+    @State private var url = ""
+    @State private var cover = ""
+    @State private var showPic = false
+    @State private var busy = false
+    @State private var msg = ""
+
+    var body: some View {
+        VStack(spacing: 0) {
+            NavBar(title: Tr("编辑小程序"), back: { dismiss() }) {
+                Button { Task { await save() } } label: {
+                    Text(busy ? Tr("保存中…") : Tr("保存"))
+                        .font(pf(15, .medium))
+                        .foregroundColor(busy ? C.subLabel : C.green)
+                        .padding(.horizontal, 14)
+                        .frame(height: 32)
+                }
+                .buttonStyle(.plain)
+                .disabled(busy)
+            }
+
+            ScrollView(showsIndicators: false) {
+                VStack(spacing: 0) {
+                    /* 图标：左边一个预览，点一下换图 */
+                    Button { showPic = true } label: {
+                        HStack(spacing: 12) {
+                            ZStack {
+                                RoundedRectangle(cornerRadius: 12, style: .continuous).fill(C.pageBg)
+                                Text(icon.isEmpty ? "🧩" : icon).font(.system(size: 26))
+                                if !cover.isEmpty {
+                                    RemoteImage(path: cover).frame(width: 56, height: 56)
+                                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                                }
+                            }
+                            .frame(width: 56, height: 56)
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text(Tr("图标图片")).font(pf(16)).foregroundColor(C.label)
+                                Text(cover.isEmpty ? Tr("点一下选张图") : Tr("已设置，点一下换一张"))
+                                    .font(pf(12)).foregroundColor(C.subLabel)
+                            }
+                            Spacer(minLength: 6)
+                            Image(systemName: "chevron.right")
+                                .font(.system(size: 12, weight: .semibold)).foregroundColor(C.subLabel)
+                        }
+                        .padding(.horizontal, 16).frame(height: 76)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .background(C.cardBg)
+
+                    textRow(Tr("名字"), $name)
+                    textRow(Tr("说明"), $desc)
+                    textRow(Tr("图标（emoji）"), $icon)
+                    textRow(Tr("分组"), $group)
+                    textRow(Tr("入口地址"), $url)
+
+                    if !msg.isEmpty {
+                        Text(msg).font(pf(12.5)).foregroundColor(C.subLabel)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.horizontal, 18).padding(.top, 12)
+                    }
+                    Spacer().frame(height: 30)
+                }
+                .padding(.top, 8)
+            }
+            .background(C.pageBg)
+        }
+        .background(C.pageBg.ignoresSafeArea(edges: .top))
+        .toolbar(.hidden, for: .navigationBar)
+        .swipeBack { dismiss() }
+        .hidesTabBar()
+        .onAppear {
+            name = item.name
+            desc = item.desc ?? ""
+            icon = item.icon ?? ""
+            group = item.group ?? ""
+            url = item.url
+            cover = item.cover ?? ""
+        }
+        .sheet(isPresented: $showPic) {
+            PhotoPicker { img in
+                busy = true
+                Task {
+                    if let u = try? await API.shared.upload(image: img) {
+                        cover = u
+                        msg = Tr("图标图片已上传，别忘了保存")
+                    } else {
+                        msg = Tr("图片上传失败")
+                    }
+                    busy = false
+                }
+            }
+        }
+    }
+
+    private func textRow(_ k: String, _ v: Binding<String>) -> some View {
+        HStack(spacing: 10) {
+            Text(k).font(pf(16)).foregroundColor(C.label)
+                .frame(width: 92, alignment: .leading)
+            TextField("", text: v)
+                .font(pf(16))
+                .multilineTextAlignment(.trailing)
+        }
+        .padding(.horizontal, 16)
+        .frame(height: 54)
+        .background(C.cardBg)
+        .overlay(alignment: .bottom) { HairLine(inset: 16) }
+    }
+
+    private func save() async {
+        busy = true
+        do {
+            try await API.shared.manageSaveMiniApp(id: item.id, name: name, desc: desc,
+                                                   icon: icon, group: group, url: url)
+            if cover != (item.cover ?? "") {
+                try await API.shared.manageSetIcon(kind: "miniapp", id: item.id, cover: cover)
+            }
+            await onSaved()
+            dismiss()
+        } catch {
+            msg = (error as? APIError)?.errorDescription ?? "保存失败"
+        }
+        busy = false
     }
 }

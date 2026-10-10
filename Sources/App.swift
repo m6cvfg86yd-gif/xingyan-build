@@ -227,6 +227,10 @@ final class AppState: ObservableObject {
     /// 走最外层整页打开，不依赖「会话页的导航栈还在不在」——扫一扫从任何页面都能开，
     /// 以前那种「往会话页栈里 push」的写法，人不在会话页时通知就丢了（所以看着像不跳转）。
     @Published var openChat: Chat?
+    /// 从聊天里点好友分享来的小游戏卡片 → 全屏打开那个小游戏。
+    /// ⚠ 挂在**最外层**（MainTab）来弹，不放在聊天页里 —— 在聊天页里挂
+    /// `fullScreenCover(item:)` 会让聊天页一打开就闪退（2026-10-11 踩过）。
+    @Published var openMiniApp: MiniApp?
     @Published var loadingChats = false
     @Published var loadError: String?
     /// 服务器上的界面配置变了就 +1，整个界面重建一次（不用重装 App）
