@@ -377,8 +377,19 @@ struct ListenView: View {
     private var recommend: [MusicTrack] {
         var list = tracks
         if !query.trimmingCharacters(in: .whitespaces).isEmpty { return matched }
-        list.shuffle()
+        /* ⚠ 以前这里每次算都现 shuffle()：这一页盯着播放器（进度 0.3 秒跳一次），
+           等于每 0.3 秒重排一遍 —— 用户看到的「音乐卡片怎么在乱跳」就是这个。
+           现在按「批次号」做**确定性**打乱：同一批永远同一个顺序，
+           只有点「换一批」（batch + 1）才换一份新的。 */
+        list.sort { recRank($0.id) < recRank($1.id) }
         return Array(list.prefix(12))
+    }
+
+    /// 按 id + 批次号算一个稳定的分数（同一批里顺序固定，换一批才变）
+    private func recRank(_ id: String) -> UInt64 {
+        var h = UInt64(truncatingIfNeeded: batch &* 2654435761) &+ 1469598103934665603
+        for b in id.utf8 { h = (h ^ UInt64(b)) &* 1099511628211 }
+        return h
     }
 
     /// 推荐音乐人 = 曲库里出现过的歌手
@@ -502,7 +513,9 @@ struct ListenView: View {
                         }
                         .padding(.horizontal, 16).padding(.top, 14).padding(.bottom, 8)
 
-                        ForEach(Array(recommend.enumerated()), id: \.offset) { i, t in
+                        /* 用**歌 id** 当身份（不是行号）：换一批的时候行是"换内容"，
+                           不是"整排重建"，不会闪 */
+                        ForEach(Array(recommend.enumerated()), id: \.element.id) { i, t in
                             if i > 0 { HairLine(inset: 66) }
                             row(t)
                         }
