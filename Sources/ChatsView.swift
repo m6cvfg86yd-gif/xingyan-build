@@ -644,6 +644,14 @@ struct ChatsView: View {
                                         Color.clear],
                                center: UnitPoint(x: 0.35, y: 0.12),
                                startRadius: 20, endRadius: 430)
+                /* 会**流动**的烟（用户要求："后面没有烟雾效果流动"）——
+                   四团很淡的雾各自慢慢飘，颜色/浓度/速度都能后台调：
+                   floorSmokeColor（默认 8E86C8）、floorSmokeFlow（0.16）、floorSmokeSpeed（1） */
+                FloorSmoke(color: Color(hexString: UIConfig.text("floorSmokeColor", "8E86C8"),
+                                        fallback: 0x8E86C8),
+                           intensity: UIConfig.num("floorSmokeFlow", 0.16),
+                           speed: UIConfig.num("floorSmokeSpeed", 1))
+                    .opacity(floorUp ? 1 : t)
             }
         )
         /* 二楼**顶上那条遮罩**：状态栏那一条压得最重、往下化开 ——
