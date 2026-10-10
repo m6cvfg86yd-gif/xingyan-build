@@ -388,21 +388,32 @@ struct TabBar: View {
         let fill = UIConfig.colorIfSet("tabBarColor")
             ?? UIConfig.colorIfSet("tabBg")
             ?? C.tabBg
-        /* 用户要求「**底栏叠加系统毛玻璃**」：
-           以前那层系统材质（.bar）是**垫在底色下面**的，被底色压住基本看不见；
-           现在把它**叠到颜色上面**（顺序反过来）——
-           划过去的内容照样被 iOS 那套磨砂糊开，颜色还是和顶栏同一条色，只是多了一层玻璃。
-           开关 / 浓度都在后台：
-             · tabGlass      写 0 = 不要这层玻璃（回到纯遮罩）
-             · tabGlassAlpha 玻璃浓度（0.5 是现在这个，1 = 最糊）
-             · tabBarOpaque  底下那层实色的浓度（0.32 是现在这个） */
+        /* 用户要求：底栏的质感和**朋友圈顶栏那条**一样（灰玻璃 + 上面压一层色）。
+           朋友圈那条用的是 GlassBackground（系统玻璃/自绘玻璃 + 亮边）+ 一层染色，
+           这里照抄同一套配方：
+             · tabBarGlass    玻璃浓度（默认 0.9，和朋友圈顶栏的 momentBarGlass 一个量级）
+             · tabBarOpaque   上面压的那层色多浓（默认 0.22）—— 就是"底部遮罩"
+             · tabGlass       写 0 = 不要这层玻璃（回到纯遮罩）
+             · tabBarOpaqueBg 写 1 = 底栏后面再铺一条和页面同色的实底（会挡住玻璃） */
+        let glassOn = UIConfig.num("tabGlass", 1) > 0
+        if glassOn {
+            return AnyView(ZStack {
+                GlassBackground(shape: Rectangle(),
+                                opacity: UIConfig.num("tabBarGlass", 0.9),
+                                edgeAlpha: 0,
+                                shadow: false,
+                                seed: 0.55,
+                                native: true)
+                fill.opacity(UIConfig.num("tabBarOpaque", 0.22))
+            })
+        }
         let glass = UIConfig.num("tabGlass", 1) > 0 ? UIConfig.num("tabGlassAlpha", 0.5) : 0
-        return ZStack {
+        return AnyView(ZStack {
             fill
                 .opacity(UIConfig.num("tabBarOpaque", 0.32))
             Rectangle().fill(.bar)
                 .opacity(glass)
-        }
+        })
     }
 
     /// 整条底栏往下落的量（tabBarDrop）。**默认 0** —— 微信那张参考图里
