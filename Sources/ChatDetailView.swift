@@ -319,6 +319,8 @@ struct ChatDetailView: View {
     @State private var kbHeight: CGFloat = 0
     /// 红包：发红包页 / 拆红包 / 详情
     @State private var showSendRedPacket = false
+    /// 发红包成功那一下的全屏红包雨（播完自己关）
+    @State private var rainOn = false
     @State private var openRedPacket: RedPacketInfo? = nil
     @State private var redPacketDetail: String? = nil
     @State private var showGroupInfo = false
@@ -1072,9 +1074,18 @@ struct ChatDetailView: View {
         /* 红包：发红包（半屏）→ 塞钱进红包要支付密码；抢 / 看详情各自一套 */
         .sheet(isPresented: $showSendRedPacket) {
             RedPacketSendView(chat: chat) { _ in
+                /* 发出去的那一下：全屏**红包雨**（金红渐变、带摆动和淡出），
+                   播完自己关掉。不想看：后台写 redPacketRain = 0。 */
+                if UIConfig.num("redPacketRain", 1) > 0 { rainOn = true }
                 Task { await load(initial: false); await app.loadChats() }
             }
             .environmentObject(app)
+        }
+        .overlay {
+            if rainOn {
+                RedPacketRain(duration: UIConfig.num("redPacketRainSec", 3.2)) { rainOn = false }
+                    .zIndex(30)
+            }
         }
         .fullScreenCover(item: $openRedPacket) { info in
             RedPacketOpenView(info: info, myId: myId) { id in
