@@ -15,6 +15,24 @@ private func chrisSignalHandler(_ s: Int32) {
 enum CrashCatcher {
     private static var installed = false
 
+    /* ⚠ 以前崩溃信息只写在 UserDefaults 里。UserDefaults 不是马上落盘的：
+       崩的瞬间写完、进程紧接着被系统杀掉（看门狗 / SIGKILL），这一条就**丢了** ——
+       我们服务器上看到的就是「只有启动、没有崩溃栈」。
+       所以现在**同时写一份文件**（.atomic 写完就落盘），下次启动一定补得回去。 */
+    private static var crashFile: URL? {
+        guard let dir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first else { return nil }
+        return dir.appendingPathComponent("chris-last-crash.txt")
+    }
+    private static func saveCrashFile(_ text: String) {
+        guard let f = crashFile else { return }
+        try? Data(text.prefix(20000).utf8).write(to: f, options: [.atomic])
+    }
+    private static func loadCrashFile() -> String {
+        guard let f = crashFile, let d = try? Data(contentsOf: f) else { return "" }
+        return String(data: d, encoding: .utf8) ?? ""
+    }
+    private static func clearCrashFile() { if let f = crashFile { try? FileManager.default.removeItem(at: f) } }
+
     static func install() {
         guard !installed else { return }
         installed = true
@@ -51,9 +69,11 @@ enum CrashCatcher {
 
     /// 补发上次没送出去的崩溃信息（存成 kind\ntext\n\nstack 这种格式）
     static func uploadPending() {
-        let raw = UserDefaults.standard.string(forKey: "chris.lastCrash") ?? ""
+        /* 先看落盘那份（更靠得住），没有再用 UserDefaults 里的 */
+        let fromFile = loadCrashFile()
+        let raw = fromFile.isEmpty ? (UserDefaults.standard.string(forKey: "chris.lastCrash") ?? "") : fromFile
         let at = UserDefaults.standard.string(forKey: "chris.lastCrashAt") ?? ""
-        guard !raw.isEmpty, !at.isEmpty else { return }
+        guard !raw.isEmpty else { return }
         if (UserDefaults.standard.string(forKey: "chris.lastCrashSent") ?? "") == at { return }
         let parts = raw.components(separatedBy: "\n\n")
         let head = parts.first ?? raw
@@ -66,7 +86,7 @@ enum CrashCatcher {
             "text": String(text.prefix(3000)),
             "stack": String(stack.prefix(6000)),
             "app": AppInfo.build.prefix(28).description,
-            "at": at,
+            "at": at.isEmpty ? ISO8601DateFormatter().string(from: Date()) : at,
             "late": true
         ]
         if let data = try? JSONSerialization.data(withJSONObject: payload),
@@ -79,6 +99,7 @@ enum CrashCatcher {
             API.shared.session.dataTask(with: req) { _, resp, _ in
                 if let http = resp as? HTTPURLResponse, (200...299).contains(http.statusCode) {
                     UserDefaults.standard.set(at, forKey: "chris.lastCrashSent")
+                    clearCrashFile()
                 }
             }.resume()
         }
@@ -98,6 +119,8 @@ enum CrashCatcher {
             UserDefaults.standard.set("\(kind)\n\(text)\n\n\(stack)".prefix(6000).description,
                                       forKey: "chris.lastCrash")
             UserDefaults.standard.set(ISO8601DateFormatter().string(from: Date()), forKey: "chris.lastCrashAt")
+            /* 顺手**落盘**一份：被杀掉也不丢（见上面 crashFile 那段说明） */
+            saveCrashFile("\(kind)\n\(text)\n\n\(stack)")
         }
         let payload: [String: Any] = [
             "kind": kind,
