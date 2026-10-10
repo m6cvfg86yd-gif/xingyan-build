@@ -625,17 +625,15 @@ struct ChatsView: View {
                 }
             }
             Spacer(minLength: 0)
-            /* 最底那一条：跟微信一样 —— 二楼底下露出被它顶下去的**会话列表开头**，
-               就是「星言（2272）」这一行（截图里那条「微信（2233）」）。点一下收起二楼。 */
+            /* 最底那一条：二楼底下露出被它顶下去的**会话列表开头**那一层
+               （微信截图里是「微信（2233）」那一行）。
+               用户要求：**二楼里不要出现「智信」这个标题**，所以这一条只留"一层页"的样子，
+               不再写字；点一下照样收起二楼。 */
             Button {
                 withAnimation(floorAnim) { floorUp = false }
             } label: {
                 HStack(spacing: 0) {
                     Spacer(minLength: 0)
-                    Text(navTitle)
-                        .font(pf(16))
-                        .foregroundColor(C.label)
-                        .lineLimit(1)
                     Spacer(minLength: 0)
                 }
                 .padding(.horizontal, 16)
@@ -1020,6 +1018,11 @@ struct ChatsView: View {
                         Rectangle().fill(C.navLine).frame(height: 0.5)
                             .opacity(scrolled > 6 ? 1 : 0)
                     }
+                    /* 用户要求：二楼里**不要出现「智信」这个标题和右边那个「＋」** ——
+                       二楼是盖在列表上的，而顶栏是画在二楼**上面**的，所以这里得自己收掉：
+                       二楼拉开时整条顶栏淡出 + 不再吃点击。 */
+                    .opacity(floorUp ? 0 : 1)
+                    .allowsHitTesting(!floorUp)
                     Spacer(minLength: 0)
                 }
             }
