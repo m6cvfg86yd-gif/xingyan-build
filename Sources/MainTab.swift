@@ -388,11 +388,20 @@ struct TabBar: View {
         let fill = UIConfig.colorIfSet("tabBarColor")
             ?? UIConfig.colorIfSet("tabBg")
             ?? C.tabBg
+        /* 用户要求「**底栏叠加系统毛玻璃**」：
+           以前那层系统材质（.bar）是**垫在底色下面**的，被底色压住基本看不见；
+           现在把它**叠到颜色上面**（顺序反过来）——
+           划过去的内容照样被 iOS 那套磨砂糊开，颜色还是和顶栏同一条色，只是多了一层玻璃。
+           开关 / 浓度都在后台：
+             · tabGlass      写 0 = 不要这层玻璃（回到纯遮罩）
+             · tabGlassAlpha 玻璃浓度（0.5 是现在这个，1 = 最糊）
+             · tabBarOpaque  底下那层实色的浓度（0.32 是现在这个） */
+        let glass = UIConfig.num("tabGlass", 1) > 0 ? UIConfig.num("tabGlassAlpha", 0.5) : 0
         return ZStack {
-            Rectangle().fill(.bar)
-                .opacity(UIConfig.num("tabGlassAlpha", 0.2))
             fill
-                .opacity(UIConfig.num("tabBarOpaque", 0.94))
+                .opacity(UIConfig.num("tabBarOpaque", 0.32))
+            Rectangle().fill(.bar)
+                .opacity(glass)
         }
     }
 
