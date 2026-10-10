@@ -14,6 +14,9 @@ struct GamesPageView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var games: [MiniApp] = []
     @State private var playing: MiniApp?
+    /// 换图标（只有 ops 账号看得到那张小按钮）
+    @State private var iconPickFor = ""
+    @State private var showIconPick = false
 
     private let pageBg = Color.dyn(0x111111, 0x141419)
     private let cardBg = Color(hex: 0x1B1B1D)
@@ -83,6 +86,18 @@ struct GamesPageView: View {
         .fullScreenCover(item: $playing) { g in
             GameWebPage(game: g).environmentObject(app)
         }
+        /* 有管理权限：在小游戏列表里直接点一下就能换图标 */
+        .sheet(isPresented: $showIconPick) {
+            PhotoPicker { img in
+                let id = iconPickFor
+                Task {
+                    if let url = try? await API.shared.upload(image: img) {
+                        try? await API.shared.manageSetIcon(kind: "miniapp", id: id, cover: url)
+                        games = await API.shared.miniApps(kind: "game")
+                    }
+                }
+            }
+        }
         .task {
             /* 和「发现 → 小程序」同一个源：后台「小程序 / 小游戏」里 kind=小游戏 的那些。
                这样后台加一款游戏，App 不用出包。 */
@@ -126,6 +141,20 @@ struct GamesPageView: View {
                     .lineLimit(2).fixedSize(horizontal: false, vertical: true)
             }
             Spacer(minLength: 6)
+            /* ops 账号：卡片右下角多一颗「换图标」 */
+            if app.me?.ops == true {
+                Button {
+                    iconPickFor = g.id
+                    showIconPick = true
+                } label: {
+                    Image(systemName: "photo.badge.plus")
+                        .font(.system(size: 16))
+                        .foregroundColor(C.green)
+                        .frame(width: 34, height: 34)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
             Text(g.actionText)
                 .font(pf(13.5, .medium))
                 .foregroundColor(.white)

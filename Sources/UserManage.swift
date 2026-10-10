@@ -35,6 +35,11 @@ struct UserManageView: View {
     @State private var audioName = ""
     @State private var newCoverURL = ""
     @State private var showAudioPick = false
+    /// 批量：选多个文件 / 选整个文件夹（一次把一堆歌导进来）
+    @State private var showBatchPick = false
+    @State private var showFolderPick = false
+    @State private var batchTotal = 0
+    @State private var batchDone = 0
     /// 正在给谁挑图："" = 上新那首的封面；"mus_xxx" = 那首歌；"g01" = 那款游戏
     @State private var pickFor = ""
     @State private var showCoverPick = false
@@ -74,6 +79,16 @@ struct UserManageView: View {
                       allowsMultipleSelection: false) { result in
             uploadAudio(result)
         }
+        /* 一次选好几首 */
+        .fileImporter(isPresented: $showBatchPick, allowedContentTypes: [.item],
+                      allowsMultipleSelection: true) { result in
+            if case .success(let urls) = result { importFiles(urls) }
+        }
+        /* 直接挑一个文件夹：里面的歌全导进来（歌名就用文件名） */
+        .fileImporter(isPresented: $showFolderPick, allowedContentTypes: [.folder],
+                      allowsMultipleSelection: false) { result in
+            if case .success(let urls) = result, let dir = urls.first { importFolder(dir) }
+        }
         .sheet(isPresented: $showCoverPick) {
             PhotoPicker { img in uploadPic(img) }
         }
@@ -88,6 +103,10 @@ struct UserManageView: View {
                 .font(pf(11.5)).foregroundColor(C.subLabel)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.horizontal, 16).padding(.bottom, 8)
+            HairLine(inset: 16)
+            row(Tr("批量导入"), batchTotal > 0 ? (Tr("已导入 ") + "\(batchDone)/\(batchTotal)") : Tr("一次选好几首")) { showBatchPick = true }
+            HairLine(inset: 16)
+            row(Tr("导入整个文件夹"), Tr("文件夹里的歌全进来（歌名=文件名）")) { showFolderPick = true }
             HairLine(inset: 16)
             HStack {
                 Text(Tr("歌名")).font(pf(16)).foregroundColor(C.label)
@@ -272,6 +291,65 @@ struct UserManageView: View {
     /// 按后缀报正确的 mime（以前不管什么文件都报 audio/mpeg，
     /// 结果服务器把 m4a 也存成 .mp3，扩展名和内容对不上）。认不出来就 octet-stream，
     /// 服务器照样收，并在入库时用 ffmpeg 嗅探真实格式转成 mp3。
+    private let audioExts: Set<String> = ["mp3", "m4a", "flac", "wav", "aac", "ogg", "oga",
+                                          "opus", "ape", "wma", "aiff", "aif", "amr", "mka", "mp4"]
+
+    /// 挑了一个文件夹：把里面（含子文件夹）的音频挨个导进来
+    private func importFolder(_ dir: URL) {
+        let ok = dir.startAccessingSecurityScopedResource()
+        if !ok { msg = Tr("读不到这个文件夹") ; return }
+        var files: [URL] = []
+        if let e = FileManager.default.enumerator(at: dir, includingPropertiesForKeys: nil) {
+            for case let u as URL in e where audioExts.contains(u.pathExtension.lowercased()) {
+                files.append(u)
+            }
+        }
+        guard !files.isEmpty else {
+            dir.stopAccessingSecurityScopedResource()
+            msg = Tr("这个文件夹里没找到音频文件")
+            return
+        }
+        /* 权限要一直开到导完（下面那个 Task 里读完再释放） */
+        importFiles(files, holding: dir)
+    }
+
+    /// 批量导入：歌名就用文件名；一首一首来（顺序上传，不炸内存也不炸服务器）
+    private func importFiles(_ urls: [URL], holding: URL? = nil) {
+        let list = urls.filter { audioExts.contains($0.pathExtension.lowercased()) }
+        guard !list.isEmpty else {
+            holding?.stopAccessingSecurityScopedResource()
+            msg = Tr("没找到能导入的音频文件")
+            return
+        }
+        batchTotal = list.count
+        batchDone = 0
+        Task {
+            defer { holding?.stopAccessingSecurityScopedResource() }
+            for u in list {
+                let scoped = u.startAccessingSecurityScopedResource()
+                defer { if scoped { u.stopAccessingSecurityScopedResource() } }
+                do {
+                    let raw = try Data(contentsOf: u)
+                    if raw.count > 60 * 1024 * 1024 { batchDone += 1; continue }
+                    let payload: [String: Any] = [
+                        "dataUrl": "data:" + mimeFor(u.lastPathComponent) + ";base64," + raw.base64EncodedString(),
+                        "filename": u.lastPathComponent
+                    ]
+                    let r = try await API.shared.rawUpload(payload)
+                    try await API.shared.manageSaveMusic(id: "",
+                                                         title: u.deletingPathExtension().lastPathComponent,
+                                                         artist: "", cover: "", url: r.url, lyrics: "")
+                } catch {
+                    /* 单首失败不影响后面的 */
+                }
+                batchDone += 1
+                msg = Tr("正在导入 ") + "\(batchDone)/\(batchTotal)"
+            }
+            msg = Tr("导入完成 ") + "\(batchDone)/\(batchTotal)"
+            await load()
+        }
+    }
+
     private func mimeFor(_ name: String) -> String {
         switch (name as NSString).pathExtension.lowercased() {
         case "mp3": return "audio/mpeg"

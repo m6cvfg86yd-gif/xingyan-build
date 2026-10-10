@@ -546,6 +546,9 @@ struct ListenView: View {
     /// 朋友推荐（好友最近 2 小时在听的）
     @State private var friends: [FriendNowPlaying] = []
     @State private var friendsLoaded = false
+    /// 换图标（只有 ops 账号看得到那个小按钮）
+    @State private var iconPickFor = ""
+    @State private var showIconPick = false
     @ObservedObject private var player = MusicPlayer.shared
 
     private var sendMode: Bool { sendTo != nil }
@@ -764,6 +767,18 @@ struct ListenView: View {
         /* 进来先拉一次好友在听什么；点到「朋友推荐」那一栏再拉一次（要最新的） */
         .task { await loadFriends() }
         .onChange(of: tab) { t in if t == 2 { Task { await loadFriends() } } }
+        /* 换个封面：选一张图 → 上传 → 存到这首的 cover 上 */
+        .sheet(isPresented: $showIconPick) {
+            PhotoPicker { img in
+                let id = iconPickFor
+                Task {
+                    if let url = try? await API.shared.upload(image: img) {
+                        try? await API.shared.manageSetIcon(kind: "music", id: id, cover: url)
+                        tracks = await API.shared.musicTracks()
+                    }
+                }
+            }
+        }
     }
 
     /* 好友在听的一行：头像 + 名字 + 在听什么 + 一起听（点了直接播这首） */
@@ -815,6 +830,21 @@ struct ListenView: View {
                     Text(t.artistText).font(pf(12)).foregroundColor(C.subLabel).lineLimit(1)
                 }
                 Spacer(minLength: 8)
+                /* 有管理权限的账号：在听一听列表里直接点一下就能给这首歌换图标
+                   （后台、App 管理页里也都能换，这里最顺手） */
+                if app.me?.ops == true {
+                    Button {
+                        iconPickFor = t.id
+                        showIconPick = true
+                    } label: {
+                        Image(systemName: "photo.badge.plus")
+                            .font(.system(size: 17))
+                            .foregroundColor(C.green)
+                            .frame(width: 40, height: 44)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                }
             }
             .padding(.horizontal, 14).frame(height: 64)
             .background(C.cardBg)
