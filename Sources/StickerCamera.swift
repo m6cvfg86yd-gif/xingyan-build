@@ -96,6 +96,10 @@ final class StickerCam: NSObject, ObservableObject, AVCaptureVideoDataOutputSamp
        （「拍不到人」）。所以这里**自己找一个能认到脸的方向**并记住：
        下面 detectOriented() 会依次试几个方向，谁认得到脸就用谁。 */
     private var fix: CGImagePropertyOrientation = .right
+    /// 诊断用：连续多少帧没检到脸（只上报一次，别刷屏）
+    private var missFrames = 0
+    private var reportedMiss = false
+    private var reportedHit = false
 
     func start() {
         guard !started else { return }
@@ -169,10 +173,20 @@ final class StickerCam: NSObject, ObservableObject, AVCaptureVideoDataOutputSamp
         var img = oriented(raw, fix)
         if frameNo % 4 == 1 {
             if let r = detectOriented(raw) {
+                if !reportedHit {
+                    reportedHit = true
+                    CrashCatcher.note("拍摄表情", "检到脸了 fix=\(r.fix.rawValue) box=\(Int(r.box.width * 1000))/1000 前=\(String(format: "%.2f", r.box.minX))/\(String(format: "%.2f", r.box.minY))")
+                }
                 fix = r.fix
                 faceBox = r.box
+                missFrames = 0
             } else {
                 faceBox = nil
+                missFrames += 1
+                if missFrames == 25, !reportedMiss {
+                    reportedMiss = true
+                    CrashCatcher.note("拍摄表情", "连续 25 次没检到脸（fix=\(fix.rawValue)，分辨率 \(Int(raw.extent.width))x\(Int(raw.extent.height))）")
+                }
             }
             img = oriented(raw, fix)
         }
@@ -254,21 +268,28 @@ final class StickerCam: NSObject, ObservableObject, AVCaptureVideoDataOutputSamp
     /// 找人脸（Vision）：结果框是「左下角为原点」的归一化坐标，
     /// 这里立刻转成**左上角为原点**（UIKit 画图那个方向），后面画贴纸就不用再翻来翻去。
     private func faceBoxIn(_ img: CIImage) -> CGRect? {
-        /* 缩到 480 再检：只要归一化坐标，缩放不影响结果，但快很多 */
+        /* 缩到 640 再检：只要归一化坐标，缩放不影响结果，但快很多。
+           以前写 480，小一点的脸会检不出来（用户反馈"特效不追脸"）。 */
         let e = img.extent
         let long = max(e.width, e.height)
         var probe = img
-        if long > 640 { probe = img.transformed(by: CGAffineTransform(scaleX: 480 / long, y: 480 / long)) }
+        if long > 900 { probe = img.transformed(by: CGAffineTransform(scaleX: 640 / long, y: 640 / long)) }
         let req = VNDetectFaceRectanglesRequest()
         let handler = VNImageRequestHandler(ciImage: probe, orientation: .up, options: [:])
         guard (try? handler.perform([req])) != nil, let f = req.results?.first else { return nil }
         let b = f.boundingBox
+        /* 太小的当成误检（背景里的路人甲）——只认宽度 ≥ 6% 的 */
+        if b.width < 0.06 { return nil }
         return CGRect(x: b.minX, y: 1 - b.maxY, width: b.width, height: b.height)
     }
 
     /// 画人脸特效那一层（小一号画，省性能；反正预览和方图都会等比缩放）
     private func makeFaceOverlay(_ kind: String, frameSize: CGSize) -> UIImage? {
-        guard let box = faceBox, frameSize.width > 1, frameSize.height > 1 else { return nil }
+        guard frameSize.width > 1, frameSize.height > 1 else { return nil }
+        /* ⚠ 检不到脸时**也要有个兜底位置**：按自拍最常见的构图放在画面**上中**一块，
+           尺寸按画面宽的一半算。以前检不到就直接不画 —— 用户看到的就是
+           「特效不追脸、拍出来没特效」。真检到脸还是以脸为准。 */
+        let box = faceBox ?? CGRect(x: 0.25, y: 0.16, width: 0.5, height: 0.5)
         let long = max(frameSize.width, frameSize.height)
         let s = min(1, 480 / long)
         let size = CGSize(width: frameSize.width * s, height: frameSize.height * s)
