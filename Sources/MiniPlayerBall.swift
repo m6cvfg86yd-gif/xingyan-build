@@ -24,9 +24,17 @@ import AVFoundation
 struct MiniPlayerBall: View {
     @ObservedObject private var player = MusicPlayer.shared
 
-    /// 球的位置（按屏幕宽高的比例存，换机型也不会跑到屏幕外；-1 = 还没拖过）
-    @AppStorage("miniBallX") private var storedX: Double = -1
-    @AppStorage("miniBallY") private var storedY: Double = -1
+    /// 这颗球**只在屏幕上留一颗**：聊天那条全屏路径自己挂了一份，
+    /// 外层这份在它弹出来时要先让位（不然两层都在画，过渡动画里会看到球在飘）。
+    var hidden: Bool = false
+
+    /* ⚠ 位置**不存比例**（以前存的是"屏宽的百分之几"）：屏幕高度一变
+       （键盘弹起、切标签栏、弹层推上来）按比例算出来的 y 就跟着变，
+       看着就是「音乐那颗小图标在乱跳」。现在只存两件事：
+         贴哪一边（0 左 / 1 右）+ 离屏幕底多少 pt
+       —— 页面高度怎么变，它都钉在那儿不动。 */
+    @AppStorage("miniBallSide") private var side: Int = 1
+    @AppStorage("miniBallBottom") private var bottom: Double = -1      // -1 = 还没拖过
 
     /// 这一次拖动的位移（松手归零，位置落进上面两个键里）
     @State private var dx: CGFloat = 0
@@ -35,18 +43,15 @@ struct MiniPlayerBall: View {
 
     private var dia: CGFloat { max(42, min(76, UIConfig.num("miniBallSize", 54))) }
     private var on: Bool { UIConfig.num("miniBallOn", 1) > 0 }
-    private var showing: Bool { on && player.current != nil }
+    private var showing: Bool { on && !hidden && player.current != nil }
 
     var body: some View {
         GeometryReader { geo in
             let w = max(geo.size.width, 1), h = max(geo.size.height, 1)
             let pad = dia / 2 + 6
-            /* 没拖过的话：默认贴在右下角、底栏上面一点 */
-            let autoY = h - dia / 2 - L.tabH - L.safeBottom - 10
-            let bx = storedX < 0 ? w - pad : CGFloat(storedX) * w
-            let by = storedY < 0 ? autoY : CGFloat(storedY) * h
-            let cx = min(max(bx + dx, pad), w - pad)
-            let cy = min(max(by + dy, L.safeTop + pad), h - pad)
+            let bt = min(max(bottom < 0 ? defaultBottom : CGFloat(bottom), pad + 4), h)
+            let cx = min(max((side == 0 ? pad : w - pad) + dx, pad), w - pad)
+            let cy = min(max(h - bt + dy, L.safeTop + pad), h - pad)
 
             ball
                 .position(x: cx, y: cy)
@@ -55,10 +60,11 @@ struct MiniPlayerBall: View {
         }
         .ignoresSafeArea()
         .opacity(showing ? 1 : 0)
-        .scaleEffect(showing ? 1 : 0.65)
         .allowsHitTesting(showing)
-        .animation(.easeOut(duration: 0.18), value: showing)
     }
+
+    /// 没拖过的话：默认贴在右下角、底栏上面一点
+    private var defaultBottom: CGFloat { dia / 2 + L.tabH + L.safeBottom + 10 }
 
     /* ------------------------------------------------------- 球本身 */
 
@@ -117,9 +123,7 @@ struct MiniPlayerBall: View {
             }
             .onEnded { v in
                 let pad = dia / 2 + 6
-                let autoY = h - dia / 2 - L.tabH - L.safeBottom - 10
-                let bx = storedX < 0 ? w - pad : CGFloat(storedX) * w
-                let by = storedY < 0 ? autoY : CGFloat(storedY) * h
+                let bt = min(max(bottom < 0 ? defaultBottom : CGFloat(bottom), pad + 4), h)
 
                 /* 往下甩：关掉这颗球（用户说"卡片缩小后又自己弹回来"，
                    所以这里只有用户自己甩下来才收，别自动展开/自动弹回） */
@@ -129,12 +133,11 @@ struct MiniPlayerBall: View {
                     return
                 }
 
-                let nx = min(max(bx + v.translation.width, pad), w - pad)
-                let ny = min(max(by + v.translation.height, L.safeTop + pad), h - pad)
-                /* 吸附到最近的一边（左边还是右边） */
-                let snapX = nx < w / 2 ? pad : w - pad
-                storedX = Double(snapX / w)
-                storedY = Double(ny / h)
+                /* 吸附到最近的一边，纵向只记「离屏幕底多少」 */
+                let nx = (side == 0 ? pad : w - pad) + v.translation.width
+                let ny = min(max(h - bt + v.translation.height, L.safeTop + pad), h - pad)
+                side = nx < w / 2 ? 0 : 1
+                bottom = Double(min(max(h - ny, pad + 4), h - L.safeTop - pad))
                 dx = 0; dy = 0
                 dragging = false
             }

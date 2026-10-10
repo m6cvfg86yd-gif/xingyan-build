@@ -161,7 +161,9 @@ struct MainTabView: View {
         /* 小图标（迷你播放球）：有歌在放就常驻在屏幕上（用户要求"要有个小图标
            可以在后台挂起"）—— 挂在最外层，四个 tab 和它们推进去的二级页都能看到。
            聊天页那条路径（openChat 整页打开）在下面单独再挂一份。 */
-        .overlay(MiniPlayerBall())
+        /* ⚠ 全屏聊天弹出来的时候，这份先让位：不然两层各画一颗，
+           过渡动画里会看到球在飘（用户反馈的"音乐图标在乱跳"）。 */
+        .overlay(MiniPlayerBall(hidden: app.openChat != nil))
         /* 全局打开聊天：扫码进群 / 建完群 / 点推送都走这里（整页打开，不受当前在哪个 tab 影响） */
         .fullScreenCover(item: $app.openChat) { c in
             /* 外面套一层 NavigationStack：聊天页里的二级页（聊天信息）现在是 push 打开的，
