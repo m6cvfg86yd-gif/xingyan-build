@@ -1433,6 +1433,8 @@ struct ChatDetailView: View {
             }
             .onAppear {
                 ChatScrollDiag.shared.note("onAppear 打开会话")
+                /* 启动/进会话打点：连 ChatDetailView 都没到，就说明崩在上一层 */
+                CrashCatcher.note("聊天页", "9 页面出现 " + chat.id)
                 scroller = proxy          // 上翻加载完要靠它把位置钉住
                 backfillVoiceText()       // 以前转过的语音，把文字贴回来
                 wasAtBottom = true        // 刚打开会话 = 贴在底部（后面按手指滑动再更新）

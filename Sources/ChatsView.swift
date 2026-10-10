@@ -1107,7 +1107,7 @@ struct ChatsView: View {
                 withAnimation(.easeOut(duration: 0.2)) { app.floorFull = v }
             }
             .navigationDestination(for: Chat.self) { chat in
-                ChatDetailView(chat: chat)
+                chatDest(chat)
             }
             /* 公众号那两条会话：点进去是公众号页面（不是聊天页） */
             .navigationDestination(isPresented: $showOA) {
@@ -1270,3 +1270,9 @@ private struct FloorPop: ViewModifier {
         content
     }
 }
+    /// 包一层只是为了**进聊天页前先打一条点**（只有这条、没有「9 页面出现」的话，
+    /// 说明崩在 ChatDetailView 的构建里，而不是在上面这一层）
+    private func chatDest(_ chat: Chat) -> some View {
+        CrashCatcher.note("聊天页", "8 准备打开 " + chat.id)
+        return ChatDetailView(chat: chat)
+    }
