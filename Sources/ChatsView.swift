@@ -822,7 +822,8 @@ struct ChatsView: View {
                                     if lit != floorTick {
                                         floorTick = lit
                                         if lit > 0 {
-                                            UIImpactFeedbackGenerator(style: lit >= 3 ? .medium : .light).impactOccurred()
+                                            /* 用户要求"拉下来再加重"：前两颗 medium、第三颗 heavy */
+                                            UIImpactFeedbackGenerator(style: lit >= 3 ? .heavy : .medium).impactOccurred()
                                         }
                                     }
                                 } else if !floorUp {
@@ -846,7 +847,7 @@ struct ChatsView: View {
                                 if open {
                                     UIImpactFeedbackGenerator(style: .heavy).impactOccurred()
                                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
-                                        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                                        UIImpactFeedbackGenerator(style: .rigid).impactOccurred()
                                     }
                                 }
                                 floorTick = 0
