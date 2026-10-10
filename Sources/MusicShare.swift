@@ -18,9 +18,148 @@ struct MusicTrack: Decodable, Identifiable, Hashable {
     var artist: String?
     var cover: String?
     var url: String
+    /// 歌词（后台「音乐（听一听）」里贴的）：LRC 或一行一句都行，空 = 没有
+    var lyrics: String? = nil
     var at: Double?
 
     var artistText: String { (artist ?? "").isEmpty ? "未知歌手" : (artist ?? "") }
+}
+
+/* ---------------------------------------------------------- 歌词 */
+
+struct MusicLyricLine: Identifiable, Equatable {
+    var id: Int
+    var time: Double
+    var text: String
+}
+
+enum MusicLyrics {
+    /// 解析歌词：带 [00:12.34] 时间戳的按 LRC 走；纯文字就按总时长均分。
+    static func parse(_ raw: String, duration: Double) -> [MusicLyricLine] {
+        let text = raw.replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+        let rows = text.split(separator: "\n", omittingEmptySubsequences: false)
+            .map { String($0).trimmingCharacters(in: .whitespaces) }
+        guard !rows.isEmpty else { return [] }
+
+        if let re = try? NSRegularExpression(pattern: "\\[(\\d{1,2}):(\\d{1,2})(?:[.:](\\d{1,3}))?\\]") {
+            var out: [MusicLyricLine] = []
+            for r in rows {
+                let ns = r as NSString
+                let ms = re.matches(in: r, options: [], range: NSRange(location: 0, length: ns.length))
+                var stamp: Double? = nil
+                for m in ms {
+                    let mm = Double(ns.substring(with: m.range(at: 1))) ?? 0
+                    let ss = Double(ns.substring(with: m.range(at: 2))) ?? 0
+                    var frac = 0.0
+                    if m.range(at: 3).location != NSNotFound {
+                        let raw3 = ns.substring(with: m.range(at: 3))
+                        frac = (Double(raw3) ?? 0) / pow(10, Double(max(1, raw3.count)))
+                    }
+                    if stamp == nil { stamp = mm * 60 + ss + frac }
+                }
+                guard let t0 = stamp else { continue }
+                let last = ms.last
+                let body = (last == nil ? ns as String
+                            : ns.substring(from: (last!.range.location + last!.range.length)))
+                    .trimmingCharacters(in: .whitespaces)
+                if body.isEmpty { continue }
+                out.append(MusicLyricLine(id: out.count, time: t0, text: body))
+            }
+            if !out.isEmpty { return out.sorted { $0.time < $1.time } }
+        }
+
+        /* 没时间戳：一行一句，按总时长均分（前 8% 留给前奏） */
+        let plain = rows.filter { !$0.isEmpty && !$0.hasPrefix("[") }
+        guard !plain.isEmpty else { return [] }
+        let span = duration > 1 ? duration : Double(plain.count) * 4
+        let lead = span * 0.08
+        let step = (span - lead) / Double(plain.count)
+        return plain.enumerated().map { i, s in
+            MusicLyricLine(id: i, time: lead + step * Double(i), text: s)
+        }
+    }
+
+    /// 现在唱到第几行（-1 = 还没开始）
+    static func current(_ lines: [MusicLyricLine], at t: Double) -> Int {
+        guard !lines.isEmpty else { return -1 }
+        var idx = 0
+        for (i, l) in lines.enumerated() {
+            if l.time <= t + 0.2 { idx = i } else { break }
+        }
+        return idx
+    }
+}
+
+/* ---------------------------------------------------------- 歌词页 */
+
+/// 播放页右上角那个「词」：整页歌词，当前那句高亮 + 自动滚到中间
+struct MusicLyricsView: View {
+    let track: MusicTrack?
+    @ObservedObject private var player = MusicPlayer.shared
+    @Environment(\.dismiss) private var dismiss
+
+    private var lines: [MusicLyricLine] { MusicLyrics.parse(track?.lyrics ?? "", duration: player.total) }
+    private var cur: Int { MusicLyrics.current(lines, at: player.seconds) }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 0) {
+                Button { dismiss() } label: {
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundColor(C.label)
+                        .frame(width: 44, height: 44)
+                }
+                .buttonStyle(.plain)
+                Spacer(minLength: 0)
+                VStack(spacing: 2) {
+                    Text(track?.title ?? "").font(pf(15, .semibold)).foregroundColor(C.label).lineLimit(1)
+                    Text(track?.artistText ?? "").font(pf(12)).foregroundColor(C.subLabel).lineLimit(1)
+                }
+                Spacer(minLength: 0)
+                Color.clear.frame(width: 44, height: 44)
+            }
+            .padding(.top, 6)
+
+            if lines.isEmpty {
+                VStack(spacing: 10) {
+                    Image(systemName: "text.alignleft")
+                        .font(.system(size: 30)).foregroundColor(C.subLabel)
+                    Text(Tr("这首歌还没有歌词")).font(pf(15)).foregroundColor(C.label)
+                    Text(Tr("后台「音乐（听一听）」里，每首歌后面点「歌词」就能贴上去"))
+                        .font(pf(12.5)).foregroundColor(C.subLabel)
+                        .multilineTextAlignment(.center)
+                }
+                .padding(.horizontal, 30)
+                .padding(.top, 60)
+                Spacer(minLength: 0)
+            } else {
+                ScrollViewReader { sp in
+                    ScrollView(showsIndicators: false) {
+                        VStack(alignment: .leading, spacing: 18) {
+                            Color.clear.frame(height: 130)
+                            ForEach(lines) { l in
+                                Text(l.text)
+                                    .font(pf(l.id == cur ? 17.5 : 15, l.id == cur ? .semibold : .regular))
+                                    .foregroundColor(l.id == cur ? C.green : C.label.opacity(0.72))
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .fixedSize(horizontal: false, vertical: true)
+                                    .id(l.id)
+                            }
+                            Color.clear.frame(height: 180)
+                        }
+                        .padding(.horizontal, 26)
+                    }
+                    .onChange(of: cur) { i in
+                        guard i >= 0 else { return }
+                        withAnimation(.easeInOut(duration: 0.28)) { sp.scrollTo(i, anchor: .center) }
+                    }
+                }
+            }
+        }
+        .background(C.cardBg.ignoresSafeArea())
+    }
 }
 
 /// 音乐卡片里的内容（和 chat 里那条消息的 JSON 对应）
@@ -636,6 +775,8 @@ struct MusicPlayingView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var dragging = false
     @State private var dragValue: Double = 0
+    /// 歌词页（右上角那个「词」）
+    @State private var showLyrics = false
 
     private var t: MusicTrack? { sheet.track ?? player.current }
 
@@ -652,7 +793,14 @@ struct MusicPlayingView: View {
                 Spacer()
                 Text(Tr("正在播放")).font(pf(14)).foregroundColor(C.subLabel)
                 Spacer()
-                Color.clear.frame(width: 44, height: 44)
+                /* 歌词（后台「音乐（听一听）」里贴的；没有歌词时这一页会提示去哪儿加） */
+                Button { showLyrics = true } label: {
+                    Text(Tr("词"))
+                        .font(pf(15, .medium))
+                        .foregroundColor(C.label)
+                        .frame(width: 44, height: 44)
+                }
+                .buttonStyle(.plain)
             }
 
             Spacer(minLength: 10)
@@ -721,6 +869,7 @@ struct MusicPlayingView: View {
             Spacer(minLength: 30)
         }
         .background(C.cardBg.ignoresSafeArea())
+        .sheet(isPresented: $showLyrics) { MusicLyricsView(track: t) }
         .onAppear {
             /* 只有「换了一首」才从头播；同一首进进出出别打断（以前每次进这页都重播一遍） */
             if let t, player.current?.id != t.id { MusicPlayer.shared.play(t) }
