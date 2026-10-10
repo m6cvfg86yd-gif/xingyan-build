@@ -257,7 +257,8 @@ struct StorageSpaceView: View {
                             Text(Tr("聊天记录")).font(pf(16)).foregroundColor(C.label)
                             Spacer(minLength: 8)
                             Text(LocalStore.text(chatBytes)).font(pf(14)).foregroundColor(C.subLabel)
-                            Button { showManageChats = true } label: {
+                            /* 「管理」也整页进（以前是 sheet） */
+                            NavigationLink(value: "storage.manage") {
                                 Text(Tr("管理")).font(pf(14)).foregroundColor(C.green)
                             }
                             .buttonStyle(.plain)
@@ -337,10 +338,6 @@ struct StorageSpaceView: View {
                     rows = LocalStore.usage()
                 }
                 Button(Tr("取消"), role: .cancel) { }
-            }
-            /* 微信那套「聊天记录管理」：一条会话一行、多选、底下删除 */
-            .sheet(isPresented: $showManageChats) {
-                ChatStorageManageView().environmentObject(app)
             }
         }
         .onAppear {

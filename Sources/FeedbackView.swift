@@ -57,7 +57,7 @@ struct FeedbackView: View {
                     .padding(.top, 8)
 
                 VStack(spacing: 10) {
-                    Button { showMine = true } label: {
+                    NavigationLink(value: "feedback.history") {
                         Text(Tr("查看我的反馈"))
                             .font(pf(16, .medium))
                             .foregroundColor(C.green)
@@ -87,9 +87,6 @@ struct FeedbackView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(C.pageBg.ignoresSafeArea())
-            .sheet(isPresented: $showMine) {
-                FeedbackHistoryView().environmentObject(app)
-            }
         } else {
             VStack(spacing: 0) {
                 NavBar(title: Tr("意见反馈"), back: { dismiss() }) {
@@ -272,7 +269,7 @@ struct FeedbackView: View {
                         .padding(.top, 10)
 
                         /* ④ 我的反馈 */
-                        Button { showMine = true } label: {
+                        NavigationLink(value: "feedback.history") {
                             HStack(spacing: 10) {
                                 ZStack {
                                     RoundedRectangle(cornerRadius: 10, style: .continuous)
@@ -322,9 +319,6 @@ struct FeedbackView: View {
                 CameraPicker { img in
                     if picked.count < 3 { picked.append(img) }
                 }
-            }
-            .sheet(isPresented: $showMine) {
-                FeedbackHistoryView().environmentObject(app)
             }
         }
     }

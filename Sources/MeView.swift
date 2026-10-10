@@ -148,6 +148,24 @@ struct MeView: View {
                     AboutView()
                 } else if key == "chatbg" {
                     ChatBackgroundSheet()
+                } else if key == "changepwd" {
+                    ChangePasswordSheet()
+                } else if key == "g.theme" {
+                    AppearanceView()
+                } else if key == "g.lang" {
+                    LanguageView()
+                } else if key == "g.chatbg" {
+                    ChatBackgroundSheet()
+                } else if key == "g.storage" {
+                    StorageView()
+                } else if key == "g.history" {
+                    ChatHistoryView()
+                } else if key == "g.voice" {
+                    VoiceChangerView()
+                } else if key == "storage.manage" {
+                    ChatStorageManageView()
+                } else if key == "feedback.history" {
+                    FeedbackHistoryView()
                 } else {
                     ComingSoonView(title: String(key.dropFirst(5)))
                 }

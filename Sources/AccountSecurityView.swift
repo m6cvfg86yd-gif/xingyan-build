@@ -54,7 +54,8 @@ struct AccountSecurityView: View {
                     Spacer().frame(height: 8)
 
                     GroupCard {
-                        Button { showChangePwd = true } label: {
+                        /* 二级菜单整页进（以前是 sheet 从底下冒出来） */
+                        NavigationLink(value: "changepwd") {
                             row(Tr("修改登录密码"), "", chevron: true)
                         }
                         .buttonStyle(.plain)
@@ -131,9 +132,6 @@ struct AccountSecurityView: View {
             let rn = await API.shared.realNameStatus()
             realNameText = rn.verified ? Tr("已实名") : Tr("未实名")
             hasPay = await API.shared.hasPayPassword()
-        }
-        .sheet(isPresented: $showChangePwd) {
-            ChangePasswordSheet().environmentObject(app)
         }
         .confirmationDialog(Tr("退出其他设备？"), isPresented: $confirmLogoutOthers, titleVisibility: .visible) {
             Button(Tr("退出"), role: .destructive) {

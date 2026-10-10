@@ -266,22 +266,27 @@ struct GeneralView: View {
             ScrollView {
                 VStack(spacing: 0) {
                     GroupCard {
-                        row(Tr("外观"),
-                            app.appearance == "dark" ? Tr("深色")
-                                : (app.appearance == "light" ? Tr("浅色") : Tr("跟随系统"))) { showTheme = true }
+                        /* 二级菜单一律**整页 push**（微信也是这样）：外观 / 语言 / 聊天背景 /
+                           存储空间 / 聊天记录管理 / 语音变声 —— 落点都在「我」页那条
+                           navigationDestination 上，不再是 sheet / 半屏。 */
+                        link(Tr("外观"),
+                             app.appearance == "dark" ? Tr("深色")
+                                 : (app.appearance == "light" ? Tr("浅色") : Tr("跟随系统")),
+                             key: "g.theme")
                         HairLine(inset: 16)
-                        row(Tr("界面语言"), Lang.name) { showLang = true }
+                        link(Tr("界面语言"), Lang.name, key: "g.lang")
                         HairLine(inset: 16)
-                        row(Tr("聊天背景"),
-                            (app.me?.chatBackground ?? "auto") == "auto" ? Tr("恢复默认") : Tr("自定义")) { showBg = true }
+                        link(Tr("聊天背景"),
+                             (app.me?.chatBackground ?? "auto") == "auto" ? Tr("恢复默认") : Tr("自定义"),
+                             key: "g.chatbg")
                         HairLine(inset: 16)
                         /* 微信「通用 → 存储空间」：看占用 + 清缓存 + 清某个会话的记录 */
-                        row(Tr("存储空间"), "") { showStorage = true }
+                        link(Tr("存储空间"), "", key: "g.storage")
                         HairLine(inset: 16)
-                        row(Tr("聊天记录管理"), "") { showHistory = true }
+                        link(Tr("聊天记录管理"), "", key: "g.history")
                         HairLine(inset: 16)
                         /* 真人变声：发语音和打电话共用一个预设 */
-                        row(Tr("语音变声"), voiceStore.current.name) { showVoice = true }
+                        link(Tr("语音变声"), voiceStore.current.name, key: "g.voice")
                     }
                     .padding(.top, 8)
                     Spacer().frame(height: 30)
@@ -293,40 +298,22 @@ struct GeneralView: View {
         .toolbar(.hidden, for: .navigationBar)
         .swipeBack { dismiss() }
         .hidesTabBar()
-        .confirmationDialog(Tr("外观"), isPresented: $showTheme, titleVisibility: .visible) {
-            Button(Tr("跟随系统")) { app.setAppearance("auto") }
-            Button(Tr("浅色")) { app.setAppearance("light") }
-            Button(Tr("深色")) { app.setAppearance("dark") }
-            Button(Tr("取消"), role: .cancel) { }
-        }
-        .confirmationDialog(Tr("界面语言"), isPresented: $showLang, titleVisibility: .visible) {
-            Button("简体中文") { setLang("zh") }
-            Button("English") { setLang("en") }
-            Button(Tr("取消"), role: .cancel) { }
-        }
-        .confirmationDialog(Tr("聊天背景"), isPresented: $showBg, titleVisibility: .visible) {
-            Button(Tr("从相册选一张")) { showBgPick = true }
-            Button(Tr("恢复默认")) {
-                Task {
-                    await API.shared.changeBackground("auto")
-                    app.me = try? await API.shared.me()
-                    app.show(Tr("已恢复默认背景"))
-                }
+    }
+
+    /// 和 row 长得一样，但点进去是下一个**整页**（用导航，不是 sheet）
+    private func link(_ title: String, _ value: String, key: String) -> some View {
+        NavigationLink(value: key) {
+            HStack(spacing: 12) {
+                Text(title).font(pf(17)).foregroundColor(C.label)
+                Spacer(minLength: 8)
+                Text(value).font(pf(15)).foregroundColor(C.subLabel)
+                Chevron(size: 9, line: 1.6).padding(.trailing, 3)
             }
-            Button(Tr("取消"), role: .cancel) { }
+            .padding(.horizontal, 16)
+            .frame(height: 52)
+            .contentShape(Rectangle())
         }
-        .sheet(isPresented: $showBgPick) {
-            PhotoPicker { image in changeBg(image) }
-        }
-        .sheet(isPresented: $showStorage) {
-            StorageView().environmentObject(app)
-        }
-        .sheet(isPresented: $showHistory) {
-            ChatHistoryView().environmentObject(app)
-        }
-        .sheet(isPresented: $showVoice) {
-            VoiceChangerView()
-        }
+        .buttonStyle(.plain)
     }
 
     private func row(_ title: String, _ value: String, _ tap: @escaping () -> Void) -> some View {
@@ -360,6 +347,114 @@ struct GeneralView: View {
                 app.show(Tr("聊天背景换好了"))
             }
         }
+    }
+}
+
+/* ============================================================
+   通用 → 外观（微信也是一整页三个选项，不是底下冒出来的半屏）
+   ============================================================ */
+struct AppearanceView: View {
+    @ObservedObject private var lang = LangStore.shared
+    @EnvironmentObject var app: AppState
+    @Environment(\.dismiss) private var dismiss
+
+    private let opts: [(String, String)] = [("auto", "跟随系统"), ("light", "浅色"), ("dark", "深色")]
+
+    var body: some View {
+        VStack(spacing: 0) {
+            NavBar(title: Tr("外观"), back: { dismiss() })
+            ScrollView {
+                VStack(spacing: 0) {
+                    GroupCard {
+                        ForEach(opts.indices, id: \.self) { i in
+                            if i > 0 { HairLine(inset: 16) }
+                            Button { app.setAppearance(opts[i].0) } label: {
+                                HStack(spacing: 12) {
+                                    Text(Tr(opts[i].1)).font(pf(17)).foregroundColor(C.label)
+                                    Spacer(minLength: 8)
+                                    if app.appearance == opts[i].0 {
+                                        Image(systemName: "checkmark")
+                                            .font(.system(size: 15, weight: .semibold))
+                                            .foregroundColor(C.green)
+                                    }
+                                }
+                                .padding(.horizontal, 16)
+                                .frame(height: 54)
+                                .background(C.cardBg)
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .padding(.top, 8)
+                    Spacer().frame(height: 30)
+                }
+            }
+            .background(C.pageBg)
+        }
+        .background(C.pageBg.ignoresSafeArea())
+        .toolbar(.hidden, for: .navigationBar)
+        .swipeBack { dismiss() }
+        .hidesTabBar()
+    }
+}
+
+/* ============================================================
+   通用 → 界面语言（同样整页两个选项）
+   ============================================================ */
+struct LanguageView: View {
+    @ObservedObject private var lang = LangStore.shared
+    @EnvironmentObject var app: AppState
+    @Environment(\.dismiss) private var dismiss
+
+    private let opts: [(String, String)] = [("zh", "简体中文"), ("en", "English")]
+
+    var body: some View {
+        VStack(spacing: 0) {
+            NavBar(title: Tr("界面语言"), back: { dismiss() })
+            ScrollView {
+                VStack(spacing: 0) {
+                    GroupCard {
+                        ForEach(opts.indices, id: \.self) { i in
+                            if i > 0 { HairLine(inset: 16) }
+                            Button {
+                                Lang.code = opts[i].0
+                                app.show(opts[i].0 == "en" ? "Language switched to English"
+                                                           : "界面语言已切成中文")
+                            } label: {
+                                HStack(spacing: 12) {
+                                    Text(opts[i].1).font(pf(17)).foregroundColor(C.label)
+                                    Spacer(minLength: 8)
+                                    if Lang.code == opts[i].0 {
+                                        Image(systemName: "checkmark")
+                                            .font(.system(size: 15, weight: .semibold))
+                                            .foregroundColor(C.green)
+                                    }
+                                }
+                                .padding(.horizontal, 16)
+                                .frame(height: 54)
+                                .background(C.cardBg)
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .padding(.top, 8)
+                    Text(Tr("换完语言把 App 从后台划掉重开，全部界面文字才是新语言。"))
+                        .font(pf(12.5))
+                        .foregroundColor(C.subLabel)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 22)
+                        .padding(.top, 10)
+                    Spacer().frame(height: 30)
+                }
+            }
+            .background(C.pageBg)
+        }
+        .background(C.pageBg.ignoresSafeArea())
+        .toolbar(.hidden, for: .navigationBar)
+        .swipeBack { dismiss() }
+        .hidesTabBar()
     }
 }
 
