@@ -664,6 +664,9 @@ struct ListenView: View {
 
     @ViewBuilder
     private var content: some View {
+        /* ⚠ 包一层 Group：.task/.onChange 得挂在**一个视图**上，
+           直接跟在 if/else 后面是编不过的（instance member 'task' cannot be used on type 'View'） */
+        Group {
         if loading {
             HStack(spacing: 10) { ProgressView(); Text(Tr("正在加载…")).font(pf(15)).foregroundColor(C.subLabel) }
                 .frame(maxWidth: .infinity).frame(height: 100)
@@ -756,6 +759,7 @@ struct ListenView: View {
                 }
             }
             .background(C.pageBg)
+        }
         }
         /* 进来先拉一次好友在听什么；点到「朋友推荐」那一栏再拉一次（要最新的） */
         .task { await loadFriends() }
