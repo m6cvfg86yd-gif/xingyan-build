@@ -693,11 +693,6 @@ struct ChatsView: View {
             /* 二楼是**全屏**的：顶上连状态栏那一条（时间 / 信号 / Wi-Fi）也要铺这层烟的颜色，
                不能让那里露出会话列表的底色。 */
             .ignoresSafeArea(edges: .top)
-            /* 用户要求：二楼铺满全屏时**把底栏也盖住**（拉开时自动收起底栏，
-               收起二楼时底栏自己回来）。 */
-            .onChange(of: floorUp) { v in
-                withAnimation(.easeOut(duration: 0.2)) { app.floorFull = v }
-            }
         )
         /* 二楼**顶上那条遮罩**：状态栏那一条压得最重、往下化开 ——
            微信二楼顶上也是这么压一条，内容就不会顶着时间/信号图标。
@@ -1045,6 +1040,12 @@ struct ChatsView: View {
                让底栏跟着返回动画一起滑上来；之后那些迟到的 onDisappear 再扣也只是减到 0。 */
             .onChange(of: path.count) { n in
                 if n == 0 { app.tabBarDepth = 0 }
+            }
+            /* 二楼铺满全屏时**把底栏也盖住**（拉开时收起底栏，收起二楼时底栏自己回来）。
+               ⚠ 这条必须挂在**外面这一层**：以前挂在二楼的子树里，二楼一收整棵子树就被移除，
+               回调不触发 → floorFull 一直停在 true，底栏再也不回来了（用户反馈「底栏又没了」）。 */
+            .onChange(of: floorUp) { v in
+                withAnimation(.easeOut(duration: 0.2)) { app.floorFull = v }
             }
             .navigationDestination(for: Chat.self) { chat in
                 ChatDetailView(chat: chat)
