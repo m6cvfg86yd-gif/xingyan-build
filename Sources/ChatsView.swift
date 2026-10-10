@@ -601,6 +601,26 @@ struct ChatsView: View {
                 }
             }
             Spacer(minLength: 0)
+            /* 最底那一条：跟微信一样 —— 二楼底下露出被它顶下去的**会话列表开头**，
+               就是「星言（2272）」这一行（截图里那条「微信（2233）」）。点一下收起二楼。 */
+            Button {
+                withAnimation(.spring(response: 0.46, dampingFraction: 0.70)) { floorUp = false }
+            } label: {
+                HStack(spacing: 0) {
+                    Text(navTitle)
+                        .font(pf(16))
+                        .foregroundColor(C.label)
+                        .lineLimit(1)
+                    Spacer(minLength: 0)
+                }
+                .padding(.horizontal, 16)
+                .frame(height: 54)
+                .frame(maxWidth: .infinity)
+                .background(C.chatsRowBg)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .modifier(FloorPop(up: floorUp, t: t, delay: 0.24))
         }
         .padding(.top, 8)
         .frame(maxWidth: .infinity)
