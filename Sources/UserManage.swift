@@ -65,7 +65,12 @@ struct UserManageView: View {
         .task { await load() }
         /* 选音频文件：mp3 / m4a / wav 都行（服务器那边收下就存成 /uploads/xxx） */
         .fileImporter(isPresented: $showAudioPick,
-                      allowedContentTypes: [.audio, .mp3, .mpeg4Audio, .wav, .aiff],
+                      /* ⚠ 这里**不能只写音频类型**：从别处下载来的歌后缀五花八门
+                         （flac / ape / wma / opus / 甚至认不出来的），只写 .audio 的话
+                         这些文件在选择器里是灰的、根本点不了（用户反馈的
+                         「我要上传的是昨天下载那种格式」就是这个）。
+                         放开成 .item = 什么文件都能选，服务器那边会用 ffmpeg 转成 mp3。 */
+                      allowedContentTypes: [.item],
                       allowsMultipleSelection: false) { result in
             uploadAudio(result)
         }
@@ -79,6 +84,10 @@ struct UserManageView: View {
     private var addSection: some View {
         card(Tr("上线新音乐")) {
             row(Tr("音频文件"), audioName.isEmpty ? Tr("未选择") : audioName) { showAudioPick = true }
+            Text(Tr("mp3 / m4a / flac / wma …什么格式都行，服务器会自动转成 mp3"))
+                .font(pf(11.5)).foregroundColor(C.subLabel)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 16).padding(.bottom, 8)
             HairLine(inset: 16)
             HStack {
                 Text(Tr("歌名")).font(pf(16)).foregroundColor(C.label)
@@ -247,7 +256,8 @@ struct UserManageView: View {
         Task {
             do {
                 let b64 = raw.base64EncodedString()
-                let payload: [String: Any] = ["dataUrl": "data:audio/mpeg;base64," + b64, "filename": name]
+                let payload: [String: Any] = ["dataUrl": "data:" + mimeFor(name) + ";base64," + b64,
+                                              "filename": name]
                 let r = try await API.shared.rawUpload(payload)
                 audioURL = r.url
                 audioName = name
@@ -256,6 +266,22 @@ struct UserManageView: View {
                 msg = (error as? APIError)?.errorDescription ?? "音频上传失败"
             }
             busy = ""
+        }
+    }
+
+    /// 按后缀报正确的 mime（以前不管什么文件都报 audio/mpeg，
+    /// 结果服务器把 m4a 也存成 .mp3，扩展名和内容对不上）。认不出来就 octet-stream，
+    /// 服务器照样收，并在入库时用 ffmpeg 嗅探真实格式转成 mp3。
+    private func mimeFor(_ name: String) -> String {
+        switch (name as NSString).pathExtension.lowercased() {
+        case "mp3": return "audio/mpeg"
+        case "m4a", "m4r", "mp4", "aac": return "audio/mp4"
+        case "wav": return "audio/wav"
+        case "flac": return "audio/flac"
+        case "ogg", "oga", "opus": return "audio/ogg"
+        case "aiff", "aif": return "audio/aiff"
+        case "webm": return "audio/webm"
+        default: return "application/octet-stream"
         }
     }
 
