@@ -92,14 +92,12 @@ struct AccountSecurityView: View {
                     Spacer().frame(height: 8)
 
                     GroupCard {
-                        /* 微信这一页是「登录设备」：列出所有登录过的手机（真设备名 + 系统 + 最后登录时间） */
+                        /* 微信这一页就是「登录设备管理」：列出所有登录过的手机
+                           （真设备名 + 系统 + 最后登录时间 + 本机）。
+                           以前这里还有一行「登录设备确认」——点进去是一串 6 位数字，
+                           用户看着跟微信对不上，现在把它收进「登录设备管理」页里了。 */
                         NavigationLink(value: "devices") {
                             row(Tr("登录设备管理"), "", chevron: true)
-                        }
-                        .buttonStyle(.plain)
-                        HairLine(inset: 16)
-                        NavigationLink(value: "pair") {
-                            row(Tr("登录设备确认"), "", chevron: true)
                         }
                         .buttonStyle(.plain)
                         HairLine(inset: 16)

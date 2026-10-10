@@ -47,6 +47,32 @@ struct LoginDevicesView: View {
 
                     Spacer().frame(height: 8)
 
+                    /* 别的设备（网页版 / 新手机）要登录时，会显示一个 6 位数字，
+                       在这台手机上输进去就能放行 —— 微信的「扫码确认」没有 SDK 时用它代替。 */
+                    GroupCard {
+                        NavigationLink(value: "pair") {
+                            HStack(spacing: 12) {
+                                Text(Tr("确认新设备登录")).font(pf(17)).foregroundColor(C.label)
+                                Spacer(minLength: 8)
+                                Chevron(size: 9, line: 1.6).padding(.trailing, 3)
+                            }
+                            .padding(.horizontal, 16)
+                            .frame(height: 56)
+                            .background(C.cardBg)
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                    }
+
+                    Text(Tr("别的设备（网页版 / 换新手机）登录时会显示一个 6 位数字，点上面那一行输进去就能放行。"))
+                        .font(pf(12.5))
+                        .foregroundColor(C.subLabel)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 22)
+                        .padding(.top, 10)
+
+                    Spacer().frame(height: 8)
+
                     Button { confirmLogoutOthers = true } label: {
                         HStack(spacing: 12) {
                             Text(Tr("退出其他设备")).font(pf(17)).foregroundColor(C.label)
