@@ -124,8 +124,10 @@ enum MusicLyrics {
 /// 播放页右上角那个「词」：整页歌词，当前那句高亮 + 自动滚到中间
 struct MusicLyricsView: View {
     let track: MusicTrack?
+    /// 关掉（由播放页那边把 showLyrics 置回 false —— 这一页现在是**整屏覆盖**，
+    /// 不是 sheet，所以不用 dismiss）
+    var onClose: () -> Void = { }
     @ObservedObject private var player = MusicPlayer.shared
-    @Environment(\.dismiss) private var dismiss
 
     private var lines: [MusicLyricLine] { MusicLyrics.parse(track?.lyrics ?? "", duration: player.total) }
     private var cur: Int { MusicLyrics.current(lines, at: player.seconds) }
@@ -133,7 +135,7 @@ struct MusicLyricsView: View {
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 0) {
-                Button { dismiss() } label: {
+                Button { onClose() } label: {
                     Image(systemName: "chevron.down")
                         .font(.system(size: 16, weight: .semibold))
                         .foregroundColor(C.label)
@@ -870,7 +872,6 @@ struct MusicPlayingView: View {
     /// 标记还立着，下一次界面刷新又会把它弹回来（用户说的"关不掉"）。
     private func closeMe() {
         MusicSheet.shared.close()
-        dismiss()
     }
 
     var body: some View {
@@ -977,7 +978,13 @@ struct MusicPlayingView: View {
                 closeMe()
             }
         })
-        .sheet(isPresented: $showLyrics) { MusicLyricsView(track: t) }
+        /* 歌词页也当整屏覆盖（和播放页一套逻辑，不再走 sheet） */
+        .overlay {
+            if showLyrics {
+                MusicLyricsView(track: t) { showLyrics = false }
+                    .transition(.opacity)
+            }
+        }
         .onAppear {
             /* 只有「换了一首」才从头播；同一首进进出出别打断（以前每次进这页都重播一遍） */
             if let t, player.current?.id != t.id { MusicPlayer.shared.play(t) }

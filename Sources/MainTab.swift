@@ -155,15 +155,24 @@ struct MainTabView: View {
         }
         /* 音乐播放页：**最外层**挂一次就行 —— 聊天里点音乐卡片、
            听一听里点一首歌，都弹这一页（大封面 + 进度 + 播放/暂停） */
-        /* 播放页：用**标准双向绑定**（$ 那个），往下划掉 / 点左上角关掉
-           都会把 open 归位，不会再"自己弹回来" */
-        .sheet(isPresented: $musicSheet.open) { MusicPlayingView() }
+        /* 播放页：**不用系统 sheet 了**。
+           sheet 那种"关掉又自己弹回来"在真机上反复出现（用户反馈了三次），
+           改成自己的一层整屏覆盖：关掉就是 open = false，没有第二套状态能把它顶回来。
+           关的方式：左上角那颗 ⌄、顶栏往下拖、整页往下拖。 */
+        .overlay {
+            if musicSheet.open {
+                MusicPlayingView()
+                    .transition(.move(edge: .bottom))
+                    .zIndex(60)
+            }
+        }
+        .animation(.easeOut(duration: 0.22), value: musicSheet.open)
         /* 小图标（迷你播放球）：有歌在放就常驻在屏幕上（用户要求"要有个小图标
            可以在后台挂起"）—— 挂在最外层，四个 tab 和它们推进去的二级页都能看到。
            聊天页那条路径（openChat 整页打开）在下面单独再挂一份。 */
         /* ⚠ 全屏聊天弹出来的时候，这份先让位：不然两层各画一颗，
            过渡动画里会看到球在飘（用户反馈的"音乐图标在乱跳"）。 */
-        .overlay(MiniPlayerBall(hidden: app.openChat != nil))
+        .overlay(MiniPlayerBall(hidden: app.openChat != nil || musicSheet.open))
         /* 全局打开聊天：扫码进群 / 建完群 / 点推送都走这里（整页打开，不受当前在哪个 tab 影响） */
         .fullScreenCover(item: $app.openChat) { c in
             /* 外面套一层 NavigationStack：聊天页里的二级页（聊天信息）现在是 push 打开的，
@@ -173,6 +182,15 @@ struct MainTabView: View {
             }
             /* 聊天页也留一份小播放球（两边位置共用同一个键） */
             .overlay(MiniPlayerBall())
+            /* 聊天里点音乐卡片 / 点小球，播放页也在这条路径上盖出来 */
+            .overlay {
+                if musicSheet.open {
+                    MusicPlayingView()
+                        .transition(.move(edge: .bottom))
+                        .zIndex(60)
+                }
+            }
+            .animation(.easeOut(duration: 0.22), value: musicSheet.open)
         }
         /* 点推送通知 → 直接进那个会话（服务器在通知里带了 chatId） */
         .onReceive(NotificationCenter.default.publisher(for: .chrisOpenChat)) { note in

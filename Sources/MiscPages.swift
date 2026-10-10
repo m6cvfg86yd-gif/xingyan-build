@@ -1024,6 +1024,95 @@ struct FriendStatusView: View {
 
 /* ============================================================ 卡包 / 作品 */
 
+/* ============================================================
+   朋友们现在的状态（「我」页那颗状态胶囊**旁边**的按钮进来的）
+   微信那一栏就是这个：所有好友当前挂着的状态，头像 + 名字 + 状态，
+   点一条就进那个人的状态页。
+   ============================================================ */
+
+struct FriendsStatusView: View {
+    @EnvironmentObject var app: AppState
+    @Environment(\.dismiss) private var dismiss
+    /// 点开某一个好友的状态页
+    @State private var picked: User? = nil
+
+    /// 挂着状态的好友（没挂的不列 —— 微信也只列有状态的）
+    private var list: [User] {
+        app.contacts.filter { u in
+            !((u.moodText ?? "").isEmpty && (u.moodIcon ?? "").isEmpty)
+        }
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            NavBar(title: Tr("朋友的状态"), back: { dismiss() })
+
+            if list.isEmpty {
+                VStack(spacing: 10) {
+                    Text("🙂").font(pf(30))
+                    Text(Tr("朋友们现在都没挂状态")).font(pf(15)).foregroundColor(C.label)
+                    Text(Tr("等好友在「我 → 状态」里挂一个，这里就会显示"))
+                        .font(pf(12.5)).foregroundColor(C.subLabel)
+                        .multilineTextAlignment(.center)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.top, 70)
+                Spacer(minLength: 0)
+            } else {
+                ScrollView {
+                    LazyVStack(spacing: 0) {
+                        ForEach(list) { u in
+                            Button { picked = u } label: { row(u) }
+                                .buttonStyle(.plain)
+                            HairLine(inset: 72)
+                        }
+                    }
+                    Spacer().frame(height: 30)
+                }
+                .background(C.pageBg)
+            }
+        }
+        .background(C.pageBg.ignoresSafeArea(edges: .top))
+        .toolbar(.hidden, for: .navigationBar)
+        .swipeBack { dismiss() }
+        .hidesTabBar()
+        .sheet(item: $picked) { u in
+            NavigationStack { FriendStatusView(user: u).environmentObject(app) }
+        }
+    }
+
+    private func row(_ u: User) -> some View {
+        let tint = MoodColor.clean(u.moodColor)
+        return HStack(spacing: 12) {
+            Avatar(path: u.avatarPath, size: 44, radius: 6)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(u.name).font(pf(16)).foregroundColor(C.label).lineLimit(1)
+                HStack(spacing: 5) {
+                    Text(u.moodIcon ?? "").font(pf(13))
+                    Text(u.moodLabel ?? u.moodText ?? "")
+                        .font(pf(12.5)).foregroundColor(tint.isEmpty ? C.subLabel : Color(hexString: tint))
+                        .lineLimit(1)
+                    Text(left(u))
+                        .font(pf(11.5)).foregroundColor(C.subLabel).lineLimit(1)
+                }
+            }
+            Spacer(minLength: 6)
+        }
+        .padding(.horizontal, 16)
+        .frame(height: 68)
+        .contentShape(Rectangle())
+    }
+
+    private func left(_ u: User) -> String {
+        let exp = Double(u.moodExpiresAt ?? 0)
+        guard exp > 0 else { return "" }
+        let h = (exp - Date().timeIntervalSince1970 * 1000) / 3600000
+        if h <= 0 { return "" }
+        if h < 1 { return Tr("(不到 1 小时)") }
+        return "(" + String(Int(h.rounded())) + Tr(" 小时)")
+    }
+}
+
 struct WalletCardView: View {
     @EnvironmentObject var app: AppState
     @Environment(\.dismiss) private var dismiss

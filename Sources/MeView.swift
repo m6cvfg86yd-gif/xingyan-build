@@ -109,6 +109,9 @@ struct MeView: View {
                     } else {
                         StatusDetailView()
                     }
+                } else if key == "friendsStatus" {
+                    /* 状态旁边那颗：所有好友现在挂的状态（微信那一栏） */
+                    FriendsStatusView()
                 } else if key == "paypwd" {
                     PayPasswordView()
                 } else if key == "gesture" {
@@ -418,6 +421,7 @@ struct MeView: View {
             HStack(spacing: 8) {
                 memberPill
                 statusChip
+                friendsStatusChip
             }
             .padding(.top, 14)
             .padding(.bottom, 16)
@@ -536,6 +540,16 @@ struct MeView: View {
             .overlay(Capsule().stroke(C.hairline, lineWidth: 0.5))
         }
         .buttonStyle(.plain)
+    }
+
+    /// 状态**旁边**那颗：点进去是**所有好友现在的状态**（微信那一栏）
+    private var friendsStatusChip: some View {
+        chip {
+            Text("👥")
+            Text(Tr("朋友的状态"))
+        } action: {
+            path.append("friendsStatus")
+        }
     }
 
     /// 状态那一条：选了状态就跟着状态的颜色走（两个色就是渐变），没选就是普通白条
