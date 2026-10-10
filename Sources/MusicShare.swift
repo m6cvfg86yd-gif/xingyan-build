@@ -1,5 +1,6 @@
 import SwiftUI
 import AVFoundation
+import UniformTypeIdentifiers
 
 /* ============================================================
    音乐（App 里的「听一听」）
@@ -549,6 +550,12 @@ struct ListenView: View {
     /// 换图标（只有 ops 账号看得到那个小按钮）
     @State private var iconPickFor = ""
     @State private var showIconPick = false
+    /// ops 账号在听一听里**直接管理**：多选删除 / 批量导入（用户要求做在这一页）
+    @State private var manageMode = false
+    @State private var pickedTracks: Set<String> = []
+    @State private var showBatchPick = false
+    @State private var showFolderPick = false
+    @State private var busyText = ""
     @ObservedObject private var player = MusicPlayer.shared
 
     private var sendMode: Bool { sendTo != nil }
@@ -593,13 +600,31 @@ struct ListenView: View {
         VStack(spacing: 0) {
             NavBar(title: Tr(sendMode ? "选择音乐" : "听一听"), back: { dismiss() }) {
                 if !sendMode {
-                    Button { showSearch.toggle() } label: {
-                        Image(systemName: "magnifyingglass")
-                            .font(.system(size: 16, weight: .medium))
-                            .foregroundColor(C.label)
-                            .frame(width: 44, height: 44)
+                    HStack(spacing: 0) {
+                        /* ops 账号：右上角一个「管理」——多选删除、批量导入都在这页直接做 */
+                        if app.me?.ops == true {
+                            Button {
+                                withAnimation(.easeOut(duration: 0.15)) {
+                                    manageMode.toggle()
+                                    pickedTracks = []
+                                }
+                            } label: {
+                                Text(manageMode ? Tr("完成") : Tr("管理"))
+                                    .font(pf(15, .medium))
+                                    .foregroundColor(C.green)
+                                    .frame(height: 44)
+                                    .padding(.horizontal, 8)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                        Button { showSearch.toggle() } label: {
+                            Image(systemName: "magnifyingglass")
+                                .font(.system(size: 16, weight: .medium))
+                                .foregroundColor(C.label)
+                                .frame(width: 44, height: 44)
+                        }
+                        .buttonStyle(.plain)
                     }
-                    .buttonStyle(.plain)
                 }
             }
 
@@ -629,6 +654,41 @@ struct ListenView: View {
             content
 
             if !sendMode, let cur = player.current { miniBar(cur) }
+            /* 管理模式底下那条：批量导入 + 删除选中（都在这一页里做完） */
+            if manageMode {
+                HStack(spacing: 8) {
+                    Button { showBatchPick = true } label: {
+                        Text(Tr("导入文件")).font(pf(13.5, .medium)).foregroundColor(C.label)
+                            .padding(.horizontal, 12).frame(height: 34)
+                            .background(Capsule().fill(C.pageBg))
+                    }
+                    .buttonStyle(.plain)
+                    Button { showFolderPick = true } label: {
+                        Text(Tr("导入文件夹")).font(pf(13.5, .medium)).foregroundColor(C.label)
+                            .padding(.horizontal, 12).frame(height: 34)
+                            .background(Capsule().fill(C.pageBg))
+                    }
+                    .buttonStyle(.plain)
+                    Spacer(minLength: 0)
+                    Button { Task { await deletePicked() } } label: {
+                        Text(Tr("删除选中") + " \(pickedTracks.count)")
+                            .font(pf(13.5, .medium))
+                            .foregroundColor(.white)
+                            .padding(.horizontal, 14).frame(height: 34)
+                            .background(Capsule().fill(pickedTracks.isEmpty ? C.subLabel : C.red))
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(pickedTracks.isEmpty)
+                }
+                .padding(.horizontal, 14).padding(.vertical, 8)
+                .background(C.cardBg)
+            }
+            if !busyText.isEmpty {
+                Text(busyText).font(pf(12)).foregroundColor(C.subLabel)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 16).padding(.bottom, 6)
+                    .background(C.cardBg)
+            }
         }
         .background(C.pageBg.ignoresSafeArea())
         .toolbar(.hidden, for: .navigationBar)
@@ -779,6 +839,96 @@ struct ListenView: View {
                 }
             }
         }
+        /* 批量导入：文件（可多选）/ 整个文件夹 —— 就在听一听这一页做 */
+        .fileImporter(isPresented: $showBatchPick, allowedContentTypes: [.item],
+                      allowsMultipleSelection: true) { result in
+            if case .success(let urls) = result { importFiles(urls) }
+        }
+        .fileImporter(isPresented: $showFolderPick, allowedContentTypes: [.folder],
+                      allowsMultipleSelection: false) { result in
+            if case .success(let urls) = result, let dir = urls.first { importFolder(dir) }
+        }
+    }
+
+    /* ---------------- 听一听页里的管理（ops 账号） ---------------- */
+
+    private let audioExts: Set<String> = ["mp3", "m4a", "flac", "wav", "aac", "ogg", "oga",
+                                          "opus", "ape", "wma", "aiff", "aif", "amr", "mka", "mp4"]
+
+    private func deletePicked() async {
+        let ids = Array(pickedTracks)
+        guard !ids.isEmpty else { return }
+        do {
+            try await API.shared.manageRemoveMusic(ids: ids)
+            pickedTracks = []
+            busyText = Tr("已删除 ") + "\(ids.count)" + Tr(" 首")
+            tracks = await API.shared.musicTracks()
+        } catch {
+            busyText = (error as? APIError)?.errorDescription ?? "删除失败"
+        }
+    }
+
+    private func importFolder(_ dir: URL) {
+        let ok = dir.startAccessingSecurityScopedResource()
+        if !ok { busyText = Tr("读不到这个文件夹"); return }
+        var files: [URL] = []
+        if let e = FileManager.default.enumerator(at: dir, includingPropertiesForKeys: nil) {
+            for case let u as URL in e where audioExts.contains(u.pathExtension.lowercased()) {
+                files.append(u)
+            }
+        }
+        guard !files.isEmpty else {
+            dir.stopAccessingSecurityScopedResource()
+            busyText = Tr("这个文件夹里没找到音频文件")
+            return
+        }
+        importFiles(files, holding: dir)
+    }
+
+    /// 一首一首来：上传 → 入库（歌名用文件名；服务器会把非 mp3 转码）
+    private func importFiles(_ urls: [URL], holding: URL? = nil) {
+        let list = urls.filter { audioExts.contains($0.pathExtension.lowercased()) }
+        guard !list.isEmpty else {
+            holding?.stopAccessingSecurityScopedResource()
+            busyText = Tr("没找到能导入的音频文件")
+            return
+        }
+        Task {
+            defer { holding?.stopAccessingSecurityScopedResource() }
+            var done = 0
+            for u in list {
+                let scoped = u.startAccessingSecurityScopedResource()
+                defer { if scoped { u.stopAccessingSecurityScopedResource() } }
+                do {
+                    let raw = try Data(contentsOf: u)
+                    if raw.count > 60 * 1024 * 1024 { done += 1; continue }
+                    let payload: [String: Any] = [
+                        "dataUrl": "data:" + musicMimeFor(u.lastPathComponent) + ";base64," + raw.base64EncodedString(),
+                        "filename": u.lastPathComponent
+                    ]
+                    let r = try await API.shared.rawUpload(payload)
+                    try await API.shared.manageSaveMusic(id: "",
+                                                         title: u.deletingPathExtension().lastPathComponent,
+                                                         artist: "", cover: "", url: r.url, lyrics: "")
+                } catch { }
+                done += 1
+                busyText = Tr("正在导入 ") + "\(done)/\(list.count)"
+            }
+            busyText = Tr("导入完成 ") + "\(done)/\(list.count)"
+            tracks = await API.shared.musicTracks()
+        }
+    }
+
+    private func musicMimeFor(_ name: String) -> String {
+        switch (name as NSString).pathExtension.lowercased() {
+        case "mp3": return "audio/mpeg"
+        case "m4a", "m4r", "mp4", "aac": return "audio/mp4"
+        case "wav": return "audio/wav"
+        case "flac": return "audio/flac"
+        case "ogg", "oga", "opus": return "audio/ogg"
+        case "aiff", "aif": return "audio/aiff"
+        default: return "application/octet-stream"
+        }
     }
 
     /* 好友在听的一行：头像 + 名字 + 在听什么 + 一起听（点了直接播这首） */
@@ -810,7 +960,10 @@ struct ListenView: View {
 
     private func row(_ t: MusicTrack) -> some View {
         Button {
-            if let onSend, sendMode {
+            if manageMode {
+                if pickedTracks.contains(t.id) { pickedTracks.remove(t.id) }
+                else { pickedTracks.insert(t.id) }
+            } else if let onSend, sendMode {
                 onSend(t)
                 dismiss()
             } else {
@@ -820,6 +973,11 @@ struct ListenView: View {
             }
         } label: {
             HStack(spacing: 12) {
+                if manageMode {
+                    Image(systemName: pickedTracks.contains(t.id) ? "checkmark.circle.fill" : "circle")
+                        .font(.system(size: 21))
+                        .foregroundColor(pickedTracks.contains(t.id) ? C.green : C.subLabel)
+                }
                 ZStack(alignment: .bottomTrailing) {
                     MusicCover(path: t.cover ?? "", size: 46, radius: 7)
                     MusicPlayButton(playing: player.isPlaying(t.id), loading: player.loadingId == t.id, size: 20)
@@ -832,7 +990,7 @@ struct ListenView: View {
                 Spacer(minLength: 8)
                 /* 有管理权限的账号：在听一听列表里直接点一下就能给这首歌换图标
                    （后台、App 管理页里也都能换，这里最顺手） */
-                if app.me?.ops == true {
+                if app.me?.ops == true && !manageMode {
                     Button {
                         iconPickFor = t.id
                         showIconPick = true
