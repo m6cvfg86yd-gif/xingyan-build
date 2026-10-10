@@ -1,0 +1,219 @@
+import SwiftUI
+import WebKit
+
+/* ============================================================
+   游戏（发现 → 游戏）
+   四款小游戏都是**网页小游戏**（服务器 /games/ 下面那几套，后台能改 data/games.json）：
+      · 跳一跳 / 2048 / 飞机大战 / 贪吃蛇
+   点一下就在 App **内置的浏览器**里全屏玩（左上角一颗关闭）。
+   ⚠ 以前「掷骰子 / 石头剪刀布 / 抽签 / 大转盘」那 4 个原生小游戏已经删掉了（用户要求换成这 4 款）。
+   ============================================================ */
+
+struct GamesPageView: View {
+    @EnvironmentObject var app: AppState
+    @Environment(\.dismiss) private var dismiss
+    @State private var games: [MiniApp] = []
+    @State private var playing: MiniApp?
+
+    private let pageBg = Color.dyn(0x111111, 0x141419)
+    private let cardBg = Color(hex: 0x1B1B1D)
+    private let ink = Color.white
+    private let subInk = Color(hex: 0x929292)
+
+    @State private var loading = true
+
+    var body: some View {
+        VStack(spacing: 0) {
+            ZStack {
+                Text(Tr("游戏")).font(pf(17, .semibold)).foregroundColor(ink)
+                HStack(spacing: 0) {
+                    Button { dismiss() } label: {
+                        Image(systemName: "chevron.left")
+                            .font(.system(size: 19, weight: .medium))
+                            .foregroundColor(ink)
+                            .frame(width: 44, height: L.navH)
+                    }
+                    .buttonStyle(.plain)
+                    Spacer(minLength: 0)
+                }
+            }
+            .frame(height: L.navH)
+            .background(pageBg)
+
+            ScrollView {
+                LazyVGrid(columns: [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)], spacing: 12) {
+                    ForEach(list) { g in
+                        Button { playing = g } label: { card(g) }
+                            .buttonStyle(.plain)
+                    }
+                }
+                .padding(16)
+
+                if loading {
+                    HStack(spacing: 10) {
+                        ProgressView().tint(subInk)
+                        Text(Tr("正在加载…")).font(pf(14)).foregroundColor(subInk)
+                    }
+                    .frame(maxWidth: .infinity).padding(.top, 30)
+                } else if list.isEmpty {
+                    Text(Tr("游戏加载失败，检查一下网络"))
+                        .font(pf(14)).foregroundColor(subInk)
+                        .frame(maxWidth: .infinity).padding(.top, 30)
+                }
+            }
+        }
+        .background(pageBg.ignoresSafeArea())
+        .toolbar(.hidden, for: .navigationBar)
+        .hidesTabBar()
+        .swipeBack { dismiss() }
+        /* 点开一款：**内置浏览器全屏**玩（网页小游戏在服务器上） */
+        .fullScreenCover(item: $playing) { g in
+            GameWebPage(game: g)
+        }
+        .task {
+            /* 和「发现 → 小程序」同一个源：后台「小程序 / 小游戏」里 kind=小游戏 的那些。
+               这样后台加一款游戏，App 不用出包。 */
+            games = await API.shared.miniApps(kind: "game")
+            loading = false
+        }
+    }
+
+    private var list: [MiniApp] { games }
+
+    private func card(_ g: MiniApp) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(g.iconText).font(.system(size: 34))
+            Text(g.name).font(pf(15, .medium)).foregroundColor(ink)
+            Text(g.desc ?? "").font(pf(12.5)).foregroundColor(subInk).lineLimit(1)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(14)
+        .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(cardBg))
+    }
+}
+/* ---------------------------------------------------------- 内置浏览器玩小游戏 */
+
+/// 小游戏页面：**全屏 + 内置浏览器**（WKWebView）。
+/// 左上角一颗「✕」退出，页面本身就是 canvas 全屏，不做别的栏，免得挡着玩。
+struct GameWebPage: View {
+    let game: MiniApp
+    @Environment(\.dismiss) private var dismiss
+    /// 下到本机的那份 index.html（见 prepare()）
+    @State private var localIndex: URL?
+    @State private var localDir: URL?
+    @State private var loading = true
+    @State private var errorText = ""
+
+    var body: some View {
+        VStack(spacing: 0) {
+            ZStack {
+                Text(game.name)
+                    .font(pf(16.5, .semibold))
+                    .foregroundColor(.white)
+                HStack(spacing: 0) {
+                    Button { dismiss() } label: {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 16, weight: .semibold))
+                            .foregroundColor(.white)
+                            .frame(width: 48, height: L.navH)
+                    }
+                    .buttonStyle(.plain)
+                    Spacer(minLength: 0)
+                }
+            }
+            .frame(height: L.navH)
+            .background(Color(hex: 0x111318))
+
+            if let localIndex {
+                GameWebView(index: localIndex, dir: localDir)
+            } else if loading {
+                VStack(spacing: 10) {
+                    ProgressView().tint(.white)
+                    Text(Tr("正在准备游戏…")).font(pf(13.5)).foregroundColor(.white.opacity(0.7))
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                VStack(spacing: 12) {
+                    Text(errorText.isEmpty ? Tr("游戏打不开") : errorText)
+                        .font(pf(14)).foregroundColor(.white.opacity(0.8))
+                        .multilineTextAlignment(.center).padding(.horizontal, 30)
+                    Button { Task { await prepare(force: true) } } label: {
+                        Text(Tr("重试"))
+                            .font(pf(15, .medium)).foregroundColor(.white)
+                            .padding(.horizontal, 22).frame(height: 40)
+                            .background(Capsule().fill(C.green))
+                    }
+                    .buttonStyle(.plain)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+        }
+        .background(Color(hex: 0x0B0E17).ignoresSafeArea())
+        .statusBarHidden(true)
+        .task { await prepare() }
+    }
+
+    /// 一款小游戏要的那几个文件（服务器上 /games/xxx/ 下面就是这套）
+    private var gameFiles: [String] {
+        ["index.html", "js/adapter.js", "js/engine.js", "js/sound.js", "js/main.js"]
+    }
+
+    /// ⚠ 关键：**不要**让内置浏览器自己去连服务器 ——
+    /// App 默认连的是 IP（https://43.242.194.89），那个证书 App 自己的网络层是放过的，
+    /// 但 WKWebView 不认，页面会直接加载失败（用户看到的「游戏都打不开」就是这个）。
+    /// 所以这里用 App 自己的通道把文件下到本机，再从本地文件跑；顺带离线也能玩。
+    private func prepare(force: Bool = false) async {
+        loading = true
+        errorText = ""
+        guard let path = game.url, !path.isEmpty, let remoteIndex = API.shared.assetURL(path) else {
+            loading = false
+            errorText = Tr("这款游戏还没配地址（后台「游戏」里填 url）")
+            return
+        }
+        let remoteDir = remoteIndex.deletingLastPathComponent()
+        let fm = FileManager.default
+        guard let caches = fm.urls(for: .cachesDirectory, in: .userDomainMask).first else {
+            loading = false
+            return
+        }
+        let root = caches.appendingPathComponent("games/\(game.id)", isDirectory: true)
+        do {
+            try fm.createDirectory(at: root, withIntermediateDirectories: true)
+            for f in gameFiles {
+                let dst = root.appendingPathComponent(f)
+                if !force, let sz = try? dst.resourceValues(forKeys: [.fileSizeKey]).fileSize, sz > 0 { continue }
+                try fm.createDirectory(at: dst.deletingLastPathComponent(), withIntermediateDirectories: true)
+                let data = try await API.shared.assetData(remoteDir.appendingPathComponent(f))
+                try data.write(to: dst, options: .atomic)
+            }
+            localDir = root
+            localIndex = root.appendingPathComponent("index.html")
+        } catch {
+            errorText = Tr("游戏下载失败：") + error.localizedDescription
+        }
+        loading = false
+    }
+}
+
+/// WKWebView 包一层：禁掉滚动/回弹，全屏铺满，画布自己吃手势
+struct GameWebView: UIViewRepresentable {
+    let index: URL
+    /// 允许读取的目录（游戏自己那几个 js 就在这里面）
+    let dir: URL?
+
+    func makeUIView(context: Context) -> WKWebView {
+        let cfg = WKWebViewConfiguration()
+        cfg.allowsInlineMediaPlayback = true
+        cfg.mediaTypesRequiringUserActionForPlayback = []
+        let v = WKWebView(frame: .zero, configuration: cfg)
+        v.isOpaque = false
+        v.backgroundColor = UIColor(red: 0.043, green: 0.055, blue: 0.09, alpha: 1)
+        v.scrollView.bounces = false
+        v.scrollView.isScrollEnabled = false
+        v.scrollView.contentInsetAdjustmentBehavior = .never
+        v.loadFileURL(index, allowingReadAccessTo: dir ?? index.deletingLastPathComponent())
+        return v
+    }
+
+    func updateUIView(_ v: WKWebView, context: Context) { }
+}
