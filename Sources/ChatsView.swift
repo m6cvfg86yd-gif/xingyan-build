@@ -562,7 +562,9 @@ struct ChatsView: View {
         let full = UIScreen.main.bounds.height
         /* 但**最底下要留一条**：露出会话列表最后一行 + 底栏（微信就是这么做的，
            截图里底上那条「微信（2233）」就是它），点那一条 / 往上滑就收起二楼。 */
-        let top = max(240, full - 132)
+        /* 二楼是**全屏**下来的（用户要求）：连底部导航那一条也盖住 ——
+           底下只留一点点"两页叠在一起"的露出（在 miniFloor 里画那个小尖）。 */
+        let top = max(240, full)
         if floorUp { return top }
         if pullDown > 0.5 { return min(pullDown, top) }
         return 0
@@ -629,19 +631,19 @@ struct ChatsView: View {
                 /* 参考图里那一条正好是 **80pt 高、文字居中** ——
                    而且它看着像"被二楼压着一层"：行底再罩一层淡紫（就是二楼那层烟透下来），
                    顶上加一道渐隐，让二楼和这一条连在一起（不是突然断开）。 */
-                .frame(height: 80)
+                /* 「两页叠一起一点点」：这一条做成**从二楼底下露出来的一层页**——
+                   上面两个角是圆的、比二楼收窄一点，看着就是底下还压着另一页。 */
+                .frame(height: 46)
                 .frame(maxWidth: .infinity)
                 .background(
                     ZStack {
                         C.chatsRowBg
                         Color(hex: 0x8E86C8).opacity(0.55)
-                        LinearGradient(colors: [Color(hex: 0x322F44).opacity(0.9),
-                                                Color.clear],
-                                       startPoint: .top, endPoint: .bottom)
-                            .frame(height: 22)
-                            .frame(maxHeight: .infinity, alignment: .top)
                     }
                 )
+                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .padding(.horizontal, 10)
+                .shadow(color: .black.opacity(0.25), radius: 8, y: -3)
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
@@ -679,6 +681,10 @@ struct ChatsView: View {
             /* 二楼是**全屏**的：顶上连状态栏那一条（时间 / 信号 / Wi-Fi）也要铺这层烟的颜色，
                不能让那里露出会话列表的底色。 */
             .ignoresSafeArea(edges: .top)
+            /* 二楼铺满全屏时要**盖住底部导航**（用户要求），所以二楼一拉开就把底栏藏起来 */
+            .onChange(of: floorUp) { v in
+                withAnimation(.easeOut(duration: 0.2)) { app.tabBarHidden = v }
+            }
         )
         /* 二楼**顶上那条遮罩**：状态栏那一条压得最重、往下化开 ——
            微信二楼顶上也是这么压一条，内容就不会顶着时间/信号图标。
@@ -926,7 +932,8 @@ struct ChatsView: View {
 
                 VStack(spacing: 0) {
                     NavBar(title: navTitle,
-                           leftExtra: AnyView(
+                           /* 二楼拉开时，**顶栏那两块（小星眼睛 / 放大镜）不在二楼里显示**（用户要求） */
+                           leftExtra: floorUp ? nil : AnyView(
                             /* 左边两块独立玻璃：小星眼睛 + 放大镜（放大镜就在眼睛右边） */
                             HStack(spacing: 8) {
                                 Button {
