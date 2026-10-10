@@ -564,6 +564,21 @@ struct ChatsView: View {
     /// 只做缩放 + 淡入淡出（用户："关闭的时候文字不要弹 / 不要上下弹一下"）。
     private var floorBounce: Bool { UIConfig.num("floorPopBounce", 1) > 0 }
 
+    /// 二楼下来 / 收上去的动画时长（后台键 floorAnim，默认 0.42 秒）
+    private var floorAnimDur: Double { max(0.08, Double(UIConfig.num("floorAnim", 0.42))) }
+    /// 下拉振动强度：后台键 floorHaptic，0 关 / 1 轻 / 2 中 / 3 重（默认 3）
+    private var floorHaptic: Int { Int(UIConfig.num("floorHaptic", 3)) }
+
+    /// 按后台设的强度震一下（level 是这一下"本来"该多重，最终取 min(level, 设定值)）
+    private func floorImpact(_ level: Int) {
+        guard floorHaptic > 0 else { return }
+        switch min(level, floorHaptic) {
+        case 1: UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        case 2: UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+        default: UIImpactFeedbackGenerator(style: .heavy).impactOccurred()
+        }
+    }
+
     /// 二楼内容的**顶部内缩**（状态栏 + 顶栏那一段的位置）。
     /// 关键点在「跟手指一起动」：以前这里是 `floorUp ? 0 : safeTop + navH`，
     /// 松手那一瞬间才从 99pt 变成 0，整页文字会往上跳一截 ——
@@ -576,8 +591,8 @@ struct ChatsView: View {
 
     private var floorAnim: Animation {
         floorBounce
-            ? .spring(response: 0.52, dampingFraction: 0.76)
-            : .easeOut(duration: 0.30)
+            ? .spring(response: floorAnimDur, dampingFraction: 0.76)
+            : .easeOut(duration: floorAnimDur)
     }
 
     /// 二楼现在露出多高（下拉跟着手指，箭头展开固定 150）
@@ -656,7 +671,8 @@ struct ChatsView: View {
                    顶上加一道渐隐，让二楼和这一条连在一起（不是突然断开）。 */
                 /* 「两页叠一起一点点」：这一条做成**从二楼底下露出来的一层页**——
                    上面两个角是圆的、比二楼收窄一点，看着就是底下还压着另一页。 */
-                .frame(height: 46)
+                /* 底下"两页叠一起"那一条的高度：后台键 floorBottomH（默认 46pt） */
+                .frame(height: max(20, UIConfig.num("floorBottomH", 46)))
                 .frame(maxWidth: .infinity)
                 .background(
                     ZStack {
@@ -701,8 +717,10 @@ struct ChatsView: View {
                 /* 二楼现在是常驻的（收起来只是高度 0），所以这层会飘的烟只在
                    看得见的时候才开 —— 否则一直在后台跑动画白耗电。 */
                 if floorUp || pullDown > 0.5 {
-                    FloorSmoke(color: Color(hexString: UIConfig.text("floorSmokeColor", "8E86C8"),
-                                            fallback: 0x8E86C8),
+                    /* 颜色走后台键 floorSmokeColor：既能写「6A6396」单值，
+                       也能写「#6A6396|#5A5480」这种浅色|深色两份（后台面板就是后者） */
+                    FloorSmoke(color: UIConfig.colorIfSet("floorSmokeColor")
+                                      ?? Color(hexString: "8E86C8", fallback: 0x8E86C8),
                                intensity: UIConfig.num("floorSmokeFlow", 0.16),
                                speed: UIConfig.num("floorSmokeSpeed", 1))
                         .opacity(floorUp ? 1 : t)
@@ -863,8 +881,9 @@ struct ChatsView: View {
                                     if lit != floorTick {
                                         floorTick = lit
                                         if lit > 0 {
-                                            /* 用户要求"拉下来再加重"：前两颗 medium、第三颗 heavy */
-                                            UIImpactFeedbackGenerator(style: lit >= 3 ? .heavy : .medium).impactOccurred()
+                                            /* 用户要求"拉下来再加重"：前两颗 medium、第三颗 heavy；
+                                               整体轻重走后台键 floorHaptic（0 关 / 1 轻 / 2 中 / 3 重） */
+                                            floorImpact(lit >= 3 ? 3 : 2)
                                         }
                                     }
                                 } else if !floorUp {
@@ -886,9 +905,11 @@ struct ChatsView: View {
                                 /* 二楼下来那一下**振动加强**（用户要求）：heavy + 80ms 后再补一下 medium，
                                    摸着是"咚"的一下，比原来的 light 明显得多。 */
                                 if open {
-                                    UIImpactFeedbackGenerator(style: .heavy).impactOccurred()
-                                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
-                                        UIImpactFeedbackGenerator(style: .rigid).impactOccurred()
+                                    floorImpact(3)
+                                    if floorHaptic >= 2 {
+                                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
+                                            UIImpactFeedbackGenerator(style: .rigid).impactOccurred()
+                                        }
                                     }
                                 }
                                 floorTick = 0
