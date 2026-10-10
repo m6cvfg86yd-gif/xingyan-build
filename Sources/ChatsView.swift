@@ -560,8 +560,11 @@ struct ChatsView: View {
        用户反馈「字还是会弹」—— 弹簧一直在这里：松手时用的是 dampingFraction 0.76，
        会过冲，整页（连同里面的字）都会回弹一下。
        后台 floorPopBounce 写 0 就换成**纯缓动**：一点回弹都没有（不是把弹簧调稳）。 */
+    /// 后台 floorPopBounce：写 0 = 二楼开/收、以及里面每一块，**都不走弹簧、也不上下滑**，
+    /// 只做缩放 + 淡入淡出（用户："关闭的时候文字不要弹 / 不要上下弹一下"）。
+    private var floorBounce: Bool { UIConfig.num("floorPopBounce", 1) > 0 }
     private var floorAnim: Animation {
-        UIConfig.num("floorPopBounce", 1) > 0
+        floorBounce
             ? .spring(response: 0.52, dampingFraction: 0.76)
             : .easeOut(duration: 0.30)
     }
@@ -922,8 +925,12 @@ struct ChatsView: View {
                         if floorUp || pullDown >= floorPull {
                             miniFloor
                                 .frame(maxWidth: .infinity, alignment: .top)
-                                /* 铺出来那一下：从顶上一路**放大 + 淡入**（更活一点） */
-                                .transition(.opacity.combined(with: .scale(scale: 0.93, anchor: .top)))
+                                /* 铺出来那一下：从顶上一路**放大 + 淡入**（更活一点）。
+                                   floorPopBounce=0 时改成纯淡入淡出 —— 缩放/位移一点都不做，
+                                   用户要的"不要上下弹一下"。 */
+                                .transition(floorBounce
+                                            ? .opacity.combined(with: .scale(scale: 0.93, anchor: .top))
+                                            : .opacity)
                         }
                     }
                         .frame(height: floorReveal)
@@ -932,10 +939,12 @@ struct ChatsView: View {
                         .padding(.top, floorUp ? 0 : L.safeTop + L.navH)
                         .clipped()
                         .allowsHitTesting(floorOn && (pullDown > floorPull * 0.6 || floorUp))
-                        /* 二楼本身也是弹簧 + 阻尼地滑出来（不是一下跳出来） */
-                        /* 弹簧**不带回弹**（damping 1.0）：二楼停住之后文字不会再抖一下 ——
-                           0.70 那种会冲过目标再弹回来，字看着就在抖。 */
-                        .animation(.spring(response: 0.42, dampingFraction: 1.0), value: floorUp)
+                        /* 二楼本身滑出来那一下：floorPopBounce=0 用纯缓动（一点都不弹），
+                           开着的时候才是弹簧（damping 1.0，不带过冲）。 */
+                        .animation(floorBounce
+                                   ? .spring(response: 0.42, dampingFraction: 1.0)
+                                   : .easeOut(duration: 0.28),
+                                   value: floorUp)
                 }
 
                 VStack(spacing: 0) {
@@ -1217,7 +1226,9 @@ private struct FloorPop: ViewModifier {
                带着一点点过冲的弹簧 —— 像从屏幕里弹出来，而不是页面那样滑出来。
                只改 scale（渲染层），不动布局，所以不会把文字抖移位（上次那个抖动是 offset 引起的）。 */
             .scaleEffect(up ? 1 : popScale + (1 - popScale) * t, anchor: .center)
-            .offset(y: up ? 0 : (1 - t) * 18)
+            /* 用户又提「不要上下弹一下」：floorPopBounce=0 时**连上下位移也去掉**，
+               只留缩放 + 淡入淡出 —— 屏幕上不会有任何上下动的东西。 */
+            .offset(y: bounce ? (up ? 0 : (1 - t) * 18) : 0)
             .animation(bounce
                        ? .spring(response: 0.34, dampingFraction: 0.72).delay(delay)
                        /* 用户说「二楼出来不要有弹簧感」：后台 floorPopBounce 写 0 时走这条 ——
