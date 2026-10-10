@@ -355,6 +355,9 @@ struct MomentsView: View {
     @ObservedObject private var realtime = Realtime.shared
     /// 微信那个「余下 x 条」：哪些好友那组已经被点开（key = 那一组第一条的 id）
     @State private var expandedGroups: Set<String> = []
+    /// 点「余下 x 条」进的那一页（用户要求：单独一整页看那一串）
+    @State private var groupPage: MomentGroup?
+    @State private var showGroupPage = false
 
     /// 和网页版一致：往下滚过「封面高度 - 52」时，顶部出现「朋友圈」三个字
     /// 两路测量 + LazyVStack 哨兵兜底，哪个先到算哪个
@@ -501,6 +504,12 @@ struct MomentsView: View {
         .toolbar(.hidden, for: .navigationBar)
         .swipeBack { dismiss() }
         .hidesTabBar()
+        /* 点「余下 x 条」→ 单独一整页看那一串（用户要求） */
+        .navigationDestination(isPresented: $showGroupPage) {
+            if let g = groupPage {
+                MomentGroupPage(title: g.title, moments: g.moments)
+            }
+        }
         .modifier(TapAvatarCard(cardUser: $cardUser))
         .hidesTabBar()
         /* 朋友圈视频：点封面 → 全屏播（复用聊天里那个播放器；它的关闭按钮走 dismiss，
@@ -788,7 +797,11 @@ struct MomentsView: View {
     /// 那一行「余下 x 条」（微信就是一行灰字，点一下展开）
     private func packedRow(_ row: FoldRow) -> some View {
         Button {
-            withAnimation(.easeOut(duration: 0.18)) { _ = expandedGroups.insert(row.first.id) }
+            /* 用户要求：点它是**单独一整页**（不是就地展开） */
+            groupPage = MomentGroup(id: row.first.id,
+                                    title: row.first.author?.name ?? Tr("朋友圈"),
+                                    moments: row.rest)
+            showGroupPage = true
         } label: {
             HStack(spacing: 6) {
                 Text(Tr("余下") + " \(row.rest.count) " + Tr("条"))
@@ -842,15 +855,8 @@ struct MomentsView: View {
                 }
                 momentRow(row.first)
                 if !row.rest.isEmpty {
-                    if expandedGroups.contains(row.first.id) {
-                        /* 展开状态：把这个人这一串剩下的都画出来 */
-                        ForEach(Array(row.rest.enumerated()), id: \.element.id) { _, m in
-                            HairLine(inset: divInset, trailingInset: divTrail)
-                            momentRow(m)
-                        }
-                    } else {
-                        packedRow(row)
-                    }
+                    /* 微信那行「余下 x 条」：点一下进**单独一整页**看这个人这段时间发的全部 */
+                    packedRow(row)
                 }
                 /* 最后一条底下不画线（微信也是，末尾直接接「没有更多了」） */
                 if i < foldRows.count - 1 {
@@ -1508,6 +1514,64 @@ struct MomentsView: View {
     }
 }
 
+/* ============================================================
+   「余下 x 条」那一页（单独一整页，用户要求）
+   ============================================================ */
+
+/// 点「余下 x 条」要带过去的东西：标题（是谁）+ 那一串动态
+struct MomentGroup: Identifiable {
+    var id: String
+    var title: String
+    var moments: [Moment]
+}
+
+struct MomentGroupPage: View {
+    let title: String
+    let moments: [Moment]
+    @Environment(\.dismiss) private var dismiss
+    @State private var viewerPaths: [String] = []
+    @State private var viewerIndex: Int?
+
+    var body: some View {
+        ZStack(alignment: .bottom) {
+            VStack(spacing: 0) {
+                NavBar(title: title, back: { dismiss() })
+                ScrollView {
+                    LazyVStack(spacing: 0) {
+                        ForEach(Array(moments.enumerated()), id: \.element.id) { i, m in
+                            MomentRow(moment: m, onOpenImage: { p in open(p, in: m) })
+                                .padding(.horizontal, L.momentPadH)
+                            if i < moments.count - 1 {
+                                HairLine(inset: L.momentPadH + L.momentAvatar + 9)
+                            }
+                        }
+                        Spacer().frame(height: 30)
+                    }
+                }
+                .background(Color.dyn(0xFFFFFF, 0x191919))
+            }
+
+            if let i = viewerIndex, !viewerPaths.isEmpty {
+                PhotoPager(paths: viewerPaths, startIndex: i, showActions: true) {
+                    viewerIndex = nil
+                }
+                .zIndex(40)
+            }
+        }
+        .background(C.pageBg.ignoresSafeArea(edges: .top))
+        .toolbar(.hidden, for: .navigationBar)
+        .swipeBack { dismiss() }
+        .hidesTabBar()
+    }
+
+    private func open(_ path: String, in m: Moment) {
+        let all = m.images ?? []
+        guard !all.isEmpty else { return }
+        viewerPaths = all
+        viewerIndex = all.firstIndex(of: path) ?? 0
+    }
+}
+
 struct MomentRow: View {
     let moment: Moment
     var onMore: (() -> Void)? = nil
@@ -1610,35 +1674,55 @@ struct MomentRow: View {
                 let likes = moment.likes ?? []
                 let comments = moment.comments ?? []
                 if !likes.isEmpty || !comments.isEmpty {
-                    VStack(alignment: .leading, spacing: 3) {
-                if !likes.isEmpty {
-                    /* 微信那套：一个红心 + 名字列表 */
-                    HStack(alignment: .top, spacing: 4) {
-                        Text("♥")
-                            .font(pf(13))
-                            .foregroundColor(Color(hex: 0xFF6B6B))
-                        Text(likes.compactMap { $0.nickname }.joined(separator: "、"))
-                            .font(pf(15))
-                            .foregroundColor(C.link)
-                    }
-                }
-                ForEach(comments.indices, id: \.self) { i in
-                    let c = comments[i]
-                    Text((c.nickname ?? "") + "：" + (c.content ?? ""))
-                        .font(pf(15))
-                        .foregroundColor(C.label)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .contentShape(Rectangle())
-                        /* 微信：点自己发的评论 → 问你要不要删除 */
-                        .onTapGesture {
-                            if onDeleteComment != nil, !myId.isEmpty, c.userId == myId {
-                                deletingComment = c.id
+                    /* ============ 微信那块的排版（用户要求照微信）============
+                       一整块**浅灰圆角底**，里面分两种行：
+                         · 点赞：一个小心形 + 蓝色的名字们（顿号隔开）
+                         · 评论：「名字：」蓝色 + 内容黑色，一条一条，之间画细分隔线
+                       块的内边距、圆角、分隔线内缩都照微信量：8 / 4 / 8。 */
+                    VStack(alignment: .leading, spacing: 0) {
+                        if !likes.isEmpty {
+                            HStack(alignment: .top, spacing: 4) {
+                                Image(systemName: "heart.fill")
+                                    .font(.system(size: 11.5))
+                                    .foregroundColor(Color(hex: 0x9A9A9A))
+                                    .padding(.top, 3)
+                                Text(likes.compactMap { $0.nickname }.joined(separator: "，"))
+                                    .font(pf(14.5))
+                                    .foregroundColor(C.link)
+                                    .fixedSize(horizontal: false, vertical: true)
                             }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.vertical, 5)
                         }
+                        if !likes.isEmpty && !comments.isEmpty {
+                            HairLine(inset: 0)
+                        }
+                        ForEach(comments.indices, id: \.self) { i in
+                            let c = comments[i]
+                            if i > 0 { HairLine(inset: 0) }
+                            /* 名字用蓝色、内容用正文色（微信就是两截颜色不同） */
+                            (Text(c.nickname ?? "")
+                                .foregroundColor(C.link)
+                             + Text("：" + (c.content ?? ""))
+                                .foregroundColor(C.label))
+                                .font(pf(14.5))
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .padding(.vertical, 5)
+                                .contentShape(Rectangle())
+                                /* 微信：点自己发的评论 → 问你要不要删除 */
+                                .onTapGesture {
+                                    if onDeleteComment != nil, !myId.isEmpty, c.userId == myId {
+                                        deletingComment = c.id
+                                    }
+                                }
+                        }
+                    }
+                    .padding(.horizontal, 8)
+                    .background(RoundedRectangle(cornerRadius: 4, style: .continuous)
+                        .fill(Color.dyn(0xF7F7F7, 0x2A2A2C)))
+                    .padding(.top, 8)
                 }
-            }
-            .padding(.top, 9)
-        }
             }
 
             Spacer(minLength: 0)
