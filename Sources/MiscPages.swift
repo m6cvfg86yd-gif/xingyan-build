@@ -1061,10 +1061,19 @@ struct FriendsStatusView: View {
             } else {
                 ScrollView {
                     LazyVStack(spacing: 0) {
-                        ForEach(list) { u in
-                            Button { picked = u } label: { row(u) }
-                                .buttonStyle(.plain)
-                            HairLine(inset: 72)
+                        /* 微信那套排版（用户截了图）：先按**哪天挂的**分组（昨天 / 今天），
+                           同一天里再按**状态名**合起来，标题就是微信那句
+                           「N 个朋友在吸猫」，下面才是那几个人的头像名字。 */
+                        ForEach(sections) { sec in
+                            dayHeader(sec.day)
+                            ForEach(sec.groups) { g in
+                                groupHeader(g)
+                                ForEach(g.users) { u in
+                                    Button { picked = u } label: { row(u) }
+                                        .buttonStyle(.plain)
+                                    HairLine(inset: 72)
+                                }
+                            }
                         }
                     }
                     Spacer().frame(height: 30)
@@ -1082,25 +1091,104 @@ struct FriendsStatusView: View {
     }
 
     private func row(_ u: User) -> some View {
-        let tint = MoodColor.clean(u.moodColor)
         return HStack(spacing: 12) {
-            Avatar(path: u.avatarPath, size: 44, radius: 6)
+            Avatar(path: u.avatarPath, size: 40, radius: 5)
             VStack(alignment: .leading, spacing: 3) {
                 Text(u.name).font(pf(16)).foregroundColor(C.label).lineLimit(1)
-                HStack(spacing: 5) {
-                    Text(u.moodIcon ?? "").font(pf(13))
-                    Text(u.moodLabel ?? u.moodText ?? "")
-                        .font(pf(12.5)).foregroundColor(tint.isEmpty ? C.subLabel : Color(hexString: tint))
-                        .lineLimit(1)
-                    Text(left(u))
-                        .font(pf(11.5)).foregroundColor(C.subLabel).lineLimit(1)
-                }
+                Text(left(u)).font(pf(12)).foregroundColor(C.subLabel).lineLimit(1)
             }
             Spacer(minLength: 6)
+            Text(u.moodIcon ?? "").font(pf(18))
         }
         .padding(.horizontal, 16)
-        .frame(height: 68)
+        .frame(height: 62)
         .contentShape(Rectangle())
+    }
+
+    /* ---------------- 分组（微信那套排版的骨架） ---------------- */
+
+    private struct StatusGroup: Identifiable {
+        var id: String { key }
+        var key: String          // 状态名（吸猫 / 搬砖…）
+        var icon: String
+        var users: [User]
+    }
+
+    private struct DaySection: Identifiable {
+        var id: String { day }
+        var day: String
+        var groups: [StatusGroup]
+    }
+
+    /// 先按天、再按状态名分组（都按"什么时候挂上去的"排）
+    private var sections: [DaySection] {
+        var order: [String] = []
+        var byDay: [String: [User]] = [:]
+        for u in list.sorted(by: { setAt($0) > setAt($1) }) {
+            let d = dayOf(setAt(u))
+            if byDay[d] == nil { byDay[d] = []; order.append(d) }
+            byDay[d]?.append(u)
+        }
+        return order.map { d in
+            let users = byDay[d] ?? []
+            var gOrder: [String] = []
+            var byKey: [String: StatusGroup] = [:]
+            for u in users {
+                let label = ((u.moodLabel ?? "").isEmpty ? (u.moodText ?? "") : (u.moodLabel ?? ""))
+                let key = label.isEmpty ? Tr("状态") : label
+                if byKey[key] == nil {
+                    byKey[key] = StatusGroup(key: key, icon: u.moodIcon ?? "", users: [])
+                    gOrder.append(key)
+                }
+                byKey[key]?.users.append(u)
+            }
+            return DaySection(day: d, groups: gOrder.compactMap { byKey[$0] })
+        }
+    }
+
+    /// 状态是**什么时候挂上的**：过期时间往回推 24 小时（服务器就是这么算的）
+    private func setAt(_ u: User) -> Double {
+        let exp = Double(u.moodExpiresAt ?? 0)
+        return exp > 0 ? (exp - 24 * 3600 * 1000) : 0
+    }
+
+    private func dayOf(_ ms: Double) -> String {
+        guard ms > 0 else { return Tr("更早") }
+        let d = Date(timeIntervalSince1970: ms / 1000)
+        let cal = Calendar.current
+        if cal.isDateInToday(d) { return Tr("今天") }
+        if cal.isDateInYesterday(d) { return Tr("昨天") }
+        let days = cal.dateComponents([.day], from: cal.startOfDay(for: d),
+                                      to: cal.startOfDay(for: Date())).day ?? 99
+        if days == 2 { return Tr("前天") }
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "zh_CN")
+        f.dateFormat = cal.isDate(d, equalTo: Date(), toGranularity: .year) ? "M月d日" : "yyyy年M月d日"
+        return f.string(from: d)
+    }
+
+    private func dayHeader(_ t: String) -> some View {
+        HStack {
+            Text(t).font(pf(13)).foregroundColor(C.subLabel)
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 16)
+        .padding(.top, 16)
+        .padding(.bottom, 6)
+    }
+
+    /// 微信那句「1 个朋友在吸猫」
+    private func groupHeader(_ g: StatusGroup) -> some View {
+        HStack(spacing: 5) {
+            if !g.icon.isEmpty { Text(g.icon).font(pf(14)) }
+            Text("\(g.users.count) " + Tr("个朋友在") + g.key)
+                .font(pf(14))
+                .foregroundColor(Color(hex: 0x576B95))
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 16)
+        .padding(.top, 10)
+        .padding(.bottom, 4)
     }
 
     private func left(_ u: User) -> String {
@@ -1108,8 +1196,8 @@ struct FriendsStatusView: View {
         guard exp > 0 else { return "" }
         let h = (exp - Date().timeIntervalSince1970 * 1000) / 3600000
         if h <= 0 { return "" }
-        if h < 1 { return Tr("(不到 1 小时)") }
-        return "(" + String(Int(h.rounded())) + Tr(" 小时)")
+        if h < 1 { return Tr("还剩不到 1 小时") }
+        return Tr("还剩 ") + String(Int(h.rounded())) + Tr(" 小时")
     }
 }
 

@@ -14,8 +14,6 @@ struct DiscoverView: View {
     /// 扫一扫（发现页 → 扫一扫）
     @State private var showScan = false
     @ObservedObject private var realtime = Realtime.shared
-    /// 微信那个「余下 x 条」：哪几条被折叠了、哪一组已经点开
-    @State private var expandedGroups: Set<String> = []
 
     private var latestThumb: String {
         for m in app.moments {
@@ -355,6 +353,8 @@ struct MomentsView: View {
     /// 最后一次拖动的时间：用来兜底收球（手指松开的手势回调有时候不会被叫到）
     @State private var lastDragAt = Date(timeIntervalSince1970: 0)
     @ObservedObject private var realtime = Realtime.shared
+    /// 微信那个「余下 x 条」：哪些好友那组已经被点开（key = 那一组第一条的 id）
+    @State private var expandedGroups: Set<String> = []
 
     /// 和网页版一致：往下滚过「封面高度 - 52」时，顶部出现「朋友圈」三个字
     /// 两路测量 + LazyVStack 哨兵兜底，哪个先到算哪个
