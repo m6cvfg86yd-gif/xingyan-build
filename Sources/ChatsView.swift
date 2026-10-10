@@ -644,6 +644,18 @@ struct ChatsView: View {
                                startRadius: 20, endRadius: 430)
             }
         )
+        /* 二楼**顶上那条遮罩**：状态栏那一条压得最重、往下化开 ——
+           微信二楼顶上也是这么压一条，内容就不会顶着时间/信号图标。
+           浓度后台可调：floorTopMask（默认 0.42，写 0 就不要这条）。 */
+        .overlay(alignment: .top) {
+            LinearGradient(colors: [Color.black.opacity(UIConfig.num("floorTopMask", 0.42)),
+                                    Color.black.opacity(0.14),
+                                    Color.clear],
+                           startPoint: .top, endPoint: .bottom)
+                .frame(height: L.safeTop + 46)
+                .frame(maxWidth: .infinity, alignment: .top)
+                .allowsHitTesting(false)
+        }
     }
 
     private func floorItem(_ title: String, _ symbol: String, _ tap: @escaping () -> Void) -> some View {
