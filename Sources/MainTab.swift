@@ -9,6 +9,9 @@ struct MainTabView: View {
     @State private var shownCrash = false
     /* 读一下语言状态：切语言时这一层会重画（不重建整棵树，避免闪退） */
     @ObservedObject private var lang = LangStore.shared
+    /* 音乐播放页那个开关（"要不要弹播放页"）：必须**这一层自己观察**它 ——
+       以前只读了一个快照，弹/收都可能慢半拍，表现就是"关掉又自己弹回来" */
+    @ObservedObject private var musicSheet = MusicSheet.shared
     /* 未实名动钱时的全局提示（和微信一样：聊天不受影响，只有钱的功能要求实名） */
     @ObservedObject private var realNameGate = RealNameGate.shared
 
@@ -152,12 +155,9 @@ struct MainTabView: View {
         }
         /* 音乐播放页：**最外层**挂一次就行 —— 聊天里点音乐卡片、
            听一听里点一首歌，都弹这一页（大封面 + 进度 + 播放/暂停） */
-        .sheet(isPresented: Binding(
-            get: { MusicSheet.shared.open },
-            set: { if !$0 { MusicSheet.shared.close() } }
-        )) {
-            MusicPlayingView()
-        }
+        /* 播放页：用**标准双向绑定**（$ 那个），往下划掉 / 点左上角关掉
+           都会把 open 归位，不会再"自己弹回来" */
+        .sheet(isPresented: $musicSheet.open) { MusicPlayingView() }
         /* 小图标（迷你播放球）：有歌在放就常驻在屏幕上（用户要求"要有个小图标
            可以在后台挂起"）—— 挂在最外层，四个 tab 和它们推进去的二级页都能看到。
            聊天页那条路径（openChat 整页打开）在下面单独再挂一份。 */

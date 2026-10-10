@@ -780,10 +780,17 @@ struct MusicPlayingView: View {
 
     private var t: MusicTrack? { sheet.track ?? player.current }
 
+    /// 关掉这一页：**先把这个开关归位再 dismiss** —— 只 dismiss 不归位的话
+    /// 标记还立着，下一次界面刷新又会把它弹回来（用户说的"关不掉"）。
+    private func closeMe() {
+        MusicSheet.shared.close()
+        dismiss()
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             HStack {
-                Button { dismiss() } label: {
+                Button { closeMe() } label: {
                     Image(systemName: "chevron.down")
                         .font(.system(size: 16, weight: .semibold))
                         .foregroundColor(C.label)
@@ -802,6 +809,14 @@ struct MusicPlayingView: View {
                 }
                 .buttonStyle(.plain)
             }
+            /* 顶栏往下拖一截 = 关掉这一页（有些系统手势在这页上不好使，
+               这里自己接一手，保证一定关得掉） */
+            .contentShape(Rectangle())
+            .gesture(DragGesture(minimumDistance: 10).onEnded { v in
+                if v.translation.height > 70 && abs(v.translation.height) > abs(v.translation.width) {
+                    closeMe()
+                }
+            })
 
             Spacer(minLength: 10)
 
@@ -869,6 +884,13 @@ struct MusicPlayingView: View {
             Spacer(minLength: 30)
         }
         .background(C.cardBg.ignoresSafeArea())
+        /* 整页往下拖也能关（拖得够远、方向是往下才关，横着拖进度条不受影响） */
+        .contentShape(Rectangle())
+        .simultaneousGesture(DragGesture(minimumDistance: 12).onEnded { v in
+            if v.translation.height > 90 && abs(v.translation.height) > abs(v.translation.width) * 1.2 {
+                closeMe()
+            }
+        })
         .sheet(isPresented: $showLyrics) { MusicLyricsView(track: t) }
         .onAppear {
             /* 只有「换了一首」才从头播；同一首进进出出别打断（以前每次进这页都重播一遍） */
