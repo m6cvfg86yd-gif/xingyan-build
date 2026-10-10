@@ -1184,15 +1184,25 @@ private struct FloorPop: ViewModifier {
     var t: CGFloat
     var delay: Double
 
+    /// 「缩放弹出」的起手大小（后台键 floorPopScale，默认 0.88）
+    private var popScale: CGFloat {
+        max(0.5, min(1, UIConfig.num("floorPopScale", 0.88)))
+    }
+    /// 要不要那一点点过冲（后台键 floorPopBounce：写 0 = 原来那种最稳、不回弹的）
+    private var bounce: Bool { UIConfig.num("floorPopBounce", 1) > 0 }
+
     func body(content: Content) -> some View {
         content
             .opacity(up ? 1 : 0.10 + 0.90 * t)
-            .scaleEffect(up ? 1 : 0.92 + 0.08 * t, anchor: .top)
-            .offset(y: up ? 0 : (1 - t) * 26)
-            /* 停住之后（up = 1）就是正位，**没有回弹、没有余震** ——
-               不然文字会抖一下（用户反馈"二楼出来后文字抖动"）。
-               错开入场靠 delay 就够，不需要弹簧过冲。 */
-            .animation(.spring(response: 0.40, dampingFraction: 1.0).delay(delay), value: up)
+            /* 用户要的是「**缩放弹出**」：整块从 0.88 放大到正位（锚点在中间），
+               带着一点点过冲的弹簧 —— 像从屏幕里弹出来，而不是页面那样滑出来。
+               只改 scale（渲染层），不动布局，所以不会把文字抖移位（上次那个抖动是 offset 引起的）。 */
+            .scaleEffect(up ? 1 : popScale + (1 - popScale) * t, anchor: .center)
+            .offset(y: up ? 0 : (1 - t) * 18)
+            .animation(bounce
+                       ? .spring(response: 0.34, dampingFraction: 0.72).delay(delay)
+                       : .spring(response: 0.40, dampingFraction: 1.0).delay(delay),
+                       value: up)
     }
 }
 
