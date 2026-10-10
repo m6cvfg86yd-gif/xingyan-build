@@ -297,7 +297,8 @@ final class MusicPlayer: NSObject, ObservableObject, AVAudioPlayerDelegate {
     }
 
     /// 本机缓存路径：一首歌一个文件（下载过就直接从本地放）
-    private func localURL(_ t: MusicTrack) -> URL? {
+    /* 不是 private：播放页那个「AI 识别歌词」要拿这个本地文件去喂语音识别 */
+    func localURL(_ t: MusicTrack) -> URL? {
         guard let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first else { return nil }
         let dir = caches.appendingPathComponent("music", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -1050,6 +1051,7 @@ final class MusicSheet: ObservableObject {
 }
 
 struct MusicPlayingView: View {
+    @EnvironmentObject private var app: AppState
     @ObservedObject private var player = MusicPlayer.shared
     @ObservedObject private var sheet = MusicSheet.shared
     @Environment(\.dismiss) private var dismiss
@@ -1057,6 +1059,11 @@ struct MusicPlayingView: View {
     @State private var dragValue: Double = 0
     /// 歌词页（右上角那个「词」）
     @State private var showLyrics = false
+    /// 大图翻转成玻璃卡（正面封面 / 背面歌词）
+    @State private var flipped = false
+    /// AI 识别歌词：识别中的文字 / 是不是在识别
+    @State private var aiText = ""
+    @State private var aiBusy = false
 
     private var t: MusicTrack? { sheet.track ?? player.current }
 
@@ -1064,6 +1071,135 @@ struct MusicPlayingView: View {
     /// 标记还立着，下一次界面刷新又会把它弹回来（用户说的"关不掉"）。
     private func closeMe() {
         MusicSheet.shared.close()
+    }
+
+    /* ---------------------------------------------------------- 可翻转的玻璃大卡 */
+
+    private var cardSide: CGFloat { min(288, L.width - 72) }
+
+    private var flipCard: some View {
+        ZStack {
+            /* 正面：封面 */
+            VStack(spacing: 0) {
+                MusicCover(path: t?.cover ?? "", size: cardSide - 18, radius: 14)
+                HStack(spacing: 5) {
+                    Image(systemName: "text.alignleft").font(.system(size: 11))
+                    Text(Tr("点一下看歌词")).font(pf(11.5))
+                }
+                .foregroundColor(C.subLabel)
+                .padding(.top, 8)
+            }
+            .padding(9)
+            .frame(width: cardSide, height: cardSide)
+            .background {
+                GlassBackground(shape: RoundedRectangle(cornerRadius: 20, style: .continuous),
+                                opacity: UIConfig.num("musicCardGlass", 0.9),
+                                edgeAlpha: 0.55, shadow: true, seed: 0.42)
+            }
+            .opacity(flipped ? 0 : 1)
+
+            /* 背面：歌词（还带一个「AI 识别歌词」） */
+            backFace
+                .padding(10)
+                .frame(width: cardSide, height: cardSide)
+                .background {
+                    GlassBackground(shape: RoundedRectangle(cornerRadius: 20, style: .continuous),
+                                    opacity: UIConfig.num("musicCardGlass", 0.9),
+                                    edgeAlpha: 0.55, shadow: true, seed: 0.42)
+                }
+                .opacity(flipped ? 1 : 0)
+                .rotation3DEffect(.degrees(180), axis: (x: 0, y: 1, z: 0))
+        }
+        .rotation3DEffect(.degrees(flipped ? 180 : 0), axis: (x: 0, y: 1, z: 0))
+        .animation(.spring(response: 0.55, dampingFraction: 0.85), value: flipped)
+        .shadow(color: .black.opacity(0.18), radius: 18, y: 8)
+        .onTapGesture { flipped.toggle() }
+    }
+
+    private var backFace: some View {
+        let raw = (t?.lyrics ?? "").isEmpty ? aiText : (t?.lyrics ?? "")
+        let lines = MusicLyrics.parse(raw, duration: player.total)
+        let cur = MusicLyrics.current(lines, at: player.seconds)
+        return VStack(spacing: 0) {
+            HStack(spacing: 6) {
+                Image(systemName: "text.alignleft").font(.system(size: 11)).foregroundColor(C.subLabel)
+                Text(t?.title ?? "").font(pf(12.5, .medium)).foregroundColor(C.label).lineLimit(1)
+                Spacer(minLength: 0)
+                if aiBusy {
+                    ProgressView().scaleEffect(0.6)
+                } else {
+                    Button { aiRecognize() } label: {
+                        Text(aiText.isEmpty ? Tr("AI 识别歌词") : Tr("重新识别"))
+                            .font(pf(11.5)).foregroundColor(C.green)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.bottom, 6)
+
+            if lines.isEmpty {
+                VStack(spacing: 8) {
+                    Image(systemName: "waveform").font(.system(size: 22)).foregroundColor(C.subLabel)
+                    Text(aiText.isEmpty ? Tr("这首歌还没有歌词") : aiText)
+                        .font(pf(12.5)).foregroundColor(C.subLabel)
+                        .multilineTextAlignment(.center)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                ScrollViewReader { sp in
+                    ScrollView(showsIndicators: false) {
+                        VStack(alignment: .leading, spacing: 9) {
+                            ForEach(lines) { l in
+                                Text(l.text)
+                                    .font(pf(l.id == cur ? 14 : 12.5, l.id == cur ? .semibold : .regular))
+                                    .foregroundColor(l.id == cur ? C.green : C.label.opacity(0.75))
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .fixedSize(horizontal: false, vertical: true)
+                                    .id(l.id)
+                            }
+                        }
+                        .padding(.vertical, 4)
+                    }
+                    .onChange(of: cur) { i in
+                        guard i >= 0 else { return }
+                        withAnimation(.easeInOut(duration: 0.25)) { sp.scrollTo(i, anchor: .center) }
+                    }
+                }
+            }
+        }
+    }
+
+    /// 「AI 识别歌词」：拿本机那份音频喂系统语音识别（本地跑），
+    /// 识别出来直接当歌词显示；管理账号顺手存到曲库（别人也能看到）。
+    private func aiRecognize() {
+        guard let track = t, !aiBusy else { return }
+        aiBusy = true
+        Task {
+            guard await FileSpeech.authorize() else {
+                aiText = Tr("需要先允许「语音识别」权限")
+                aiBusy = false
+                return
+            }
+            guard let url = MusicPlayer.shared.localURL(track) ?? API.shared.assetURL(track.url) else {
+                aiText = Tr("拿不到这首歌的音频")
+                aiBusy = false
+                return
+            }
+            if !FileManager.default.fileExists(atPath: url.path), let remote = API.shared.assetURL(track.url),
+               let data = try? await API.shared.assetData(remote), let local = MusicPlayer.shared.localURL(track) {
+                try? data.write(to: local, options: .atomic)
+            }
+            let file = MusicPlayer.shared.localURL(track) ?? url
+            let text = await FileSpeech.recognize(url: file, timeout: 90)
+            aiText = text.isEmpty ? Tr("没识别出来（歌曲背景音太吵时识别会比较难）") : text
+            if !text.isEmpty, app.me?.ops == true {
+                try? await API.shared.manageSaveMusic(id: track.id, title: track.title,
+                                                      artist: track.artist ?? "", cover: track.cover ?? "",
+                                                      url: track.url, lyrics: text)
+            }
+            aiBusy = false
+        }
     }
 
     var body: some View {
@@ -1099,8 +1235,8 @@ struct MusicPlayingView: View {
 
             Spacer(minLength: 10)
 
-            MusicCover(path: t?.cover ?? "", size: 240, radius: 16)
-                .shadow(color: .black.opacity(0.18), radius: 18, y: 8)
+            /* 大图 = 一张**可以翻转的玻璃卡**：正面封面，背面歌词（用户要求） */
+            flipCard
 
             VStack(spacing: 6) {
                 Text(t?.title ?? "").font(pf(19, .semibold)).foregroundColor(C.label).lineLimit(2)

@@ -1040,6 +1040,8 @@ struct FriendsStatusView: View {
     /// 本地先记一下赞/取消，省得等服务器回来才变
     @State private var localLikes: [String: Int] = [:]
     @State private var localMine: [String: Bool] = [:]
+    /// 谁在听什么（用户要求：把"在听"显示在那个人的状态上）
+    @State private var listening: [String: FriendNowPlaying] = [:]
 
     /// 挂着状态的好友（没挂的不列 —— 微信也只列有状态的）
     private var list: [User] {
@@ -1100,6 +1102,12 @@ struct FriendsStatusView: View {
         .sheet(item: $picked) { u in
             NavigationStack { FriendStatusView(user: u).environmentObject(app) }
         }
+        .task {
+            let list = await API.shared.friendsNowPlaying()
+            var m: [String: FriendNowPlaying] = [:]
+            for f in list { m[f.id] = f }
+            listening = m
+        }
     }
 
     private func row(_ u: User) -> some View {
@@ -1107,6 +1115,15 @@ struct FriendsStatusView: View {
             Avatar(path: u.avatarPath, size: 40, radius: 5)
             VStack(alignment: .leading, spacing: 3) {
                 Text(u.name).font(pf(16)).foregroundColor(C.label).lineLimit(1)
+                if let f = listening[u.id] {
+                    /* 在听什么：排在状态下面一行（微信听一听也是这么显示的） */
+                    HStack(spacing: 4) {
+                        Image(systemName: "music.note").font(.system(size: 10.5))
+                        Text(Tr("在听《") + f.title + "》").lineLimit(1)
+                    }
+                    .font(pf(12))
+                    .foregroundColor(Color(hex: 0x576B95))
+                }
                 Text(left(u)).font(pf(12)).foregroundColor(C.subLabel).lineLimit(1)
             }
             Spacer(minLength: 6)
