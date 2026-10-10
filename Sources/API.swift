@@ -20,6 +20,9 @@ struct User: Codable, Identifiable, Hashable {
     var moodCaption: String?
     /// 状态什么时候过期（毫秒时间戳，0 = 没有状态）
     var moodExpiresAt: Double?
+    /// 状态收到的赞（谁赞的）——「朋友的状态」那一页显示 + 判断我赞过没有
+    var moodLikes: [String]?
+    var moodLikeCount: Int?
     var username: String?
     var nickname: String?
     var avatar: String?
@@ -1867,6 +1870,13 @@ final class API {
     func friendsNowPlaying() async -> [FriendNowPlaying] {
         guard let p: NowPlayingPayload = try? await get("/api/music/friends", as: NowPlayingPayload.self) else { return [] }
         return p.list ?? []
+    }
+
+    /// 给好友的「状态」点赞 / 取消（朋友的状态那一页）
+    func statusLike(_ userId: String) async -> (liked: Bool, count: Int)? {
+        struct R: Decodable { var liked: Bool?; var count: Int? }
+        guard let r: R = try? await post("/api/status/like", ["id": userId], as: R.self) else { return nil }
+        return (r.liked ?? false, r.count ?? 0)
     }
 
     func branding() async -> BrandInfo? {

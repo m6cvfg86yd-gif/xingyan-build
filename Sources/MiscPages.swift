@@ -1035,6 +1035,11 @@ struct FriendsStatusView: View {
     @Environment(\.dismiss) private var dismiss
     /// 点开某一个好友的状态页
     @State private var picked: User? = nil
+    /// 正在放「爱心爆开」动画的那一行（点完 0.5 秒清掉）
+    @State private var bursting: String = ""
+    /// 本地先记一下赞/取消，省得等服务器回来才变
+    @State private var localLikes: [String: Int] = [:]
+    @State private var localMine: [String: Bool] = [:]
 
     /// 挂着状态的好友（没挂的不列 —— 微信也只列有状态的）
     private var list: [User] {
@@ -1045,7 +1050,8 @@ struct FriendsStatusView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            NavBar(title: Tr("朋友的状态"), back: { dismiss() })
+            /* 用户要求：标题不要那行字，改成一个**缺一丢丢的圆环**（状态那种图标） */
+            NavBar(title: "", back: { dismiss() })
 
             if list.isEmpty {
                 VStack(spacing: 10) {
@@ -1085,6 +1091,12 @@ struct FriendsStatusView: View {
         .toolbar(.hidden, for: .navigationBar)
         .swipeBack { dismiss() }
         .hidesTabBar()
+        /* 顶栏标题位置那个「缺一丢丢的圆环」 */
+        .overlay(alignment: .top) {
+            StatusRingIcon()
+                .padding(.top, (L.navH - 26) / 2)
+                .allowsHitTesting(false)
+        }
         .sheet(item: $picked) { u in
             NavigationStack { FriendStatusView(user: u).environmentObject(app) }
         }
@@ -1098,6 +1110,24 @@ struct FriendsStatusView: View {
                 Text(left(u)).font(pf(12)).foregroundColor(C.subLabel).lineLimit(1)
             }
             Spacer(minLength: 6)
+            /* 点赞：微信那套「爱心」，点了会爆开一下 */
+            Button { like(u) } label: {
+                ZStack {
+                    Image(systemName: liked(u) ? "heart.fill" : "heart")
+                        .font(.system(size: 17))
+                        .foregroundColor(liked(u) ? Color(hex: 0xFF5A5A) : C.subLabel)
+                    if bursting == u.id { HeartBurst() }
+                    if likeCount(u) > 0 {
+                        Text("\(likeCount(u))")
+                            .font(pf(10))
+                            .foregroundColor(C.subLabel)
+                            .offset(x: 13, y: 9)
+                    }
+                }
+                .frame(width: 42, height: 42)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
             Text(u.moodIcon ?? "").font(pf(18))
         }
         .padding(.horizontal, 16)
@@ -1106,6 +1136,36 @@ struct FriendsStatusView: View {
     }
 
     /* ---------------- 分组（微信那套排版的骨架） ---------------- */
+
+    /* ---------------- 点赞 ---------------- */
+
+    private func liked(_ u: User) -> Bool {
+        if let v = localMine[u.id] { return v }
+        return (u.moodLikes ?? []).contains(app.me?.id ?? "")
+    }
+
+    private func likeCount(_ u: User) -> Int {
+        if let n = localLikes[u.id] { return n }
+        return u.moodLikeCount ?? (u.moodLikes ?? []).count
+    }
+
+    /// 点爱心：本地先翻一下（马上有反应 + 爆开动画），再去服务器落定
+    private func like(_ u: User) {
+        let now = !liked(u)
+        localMine[u.id] = now
+        localLikes[u.id] = max(0, likeCount(u) + (now ? 1 : -1))
+        if now { bursting = u.id }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            if bursting == u.id { bursting = "" }
+        }
+        Task {
+            if let r = await API.shared.statusLike(u.id) {
+                localMine[u.id] = r.liked
+                localLikes[u.id] = r.count
+            }
+            await app.loadContacts()
+        }
+    }
 
     private struct StatusGroup: Identifiable {
         var id: String { key }
@@ -1198,6 +1258,51 @@ struct FriendsStatusView: View {
         if h <= 0 { return "" }
         if h < 1 { return Tr("还剩不到 1 小时") }
         return Tr("还剩 ") + String(Int(h.rounded())) + Tr(" 小时")
+    }
+}
+
+/* ============================================================
+   状态那个图标：一个**缺一丢丢的圆环**（用户说"字改成一个圆缺一丢丢"）
+   ============================================================ */
+
+struct StatusRingIcon: View {
+    var size: CGFloat = 26
+    var color: Color = C.label
+
+    var body: some View {
+        Circle()
+            .trim(from: 0.04, to: 0.96)          // 缺一丢丢
+            .stroke(color, style: StrokeStyle(lineWidth: 2.4, lineCap: .round))
+            .rotationEffect(.degrees(-90))
+            .frame(width: size, height: size)
+    }
+}
+
+/// 「爱心爆开」：一颗心放大淡出 + 一圈小点飞出去（点完 0.45 秒结束）
+struct HeartBurst: View {
+    @State private var t: CGFloat = 0
+
+    var body: some View {
+        ZStack {
+            Image(systemName: "heart.fill")
+                .font(.system(size: 20))
+                .foregroundColor(Color(hex: 0xFF5A5A))
+                .scaleEffect(1 + t * 1.5)
+                .opacity(Double(1 - t))
+            ForEach(0..<8, id: \.self) { i in
+                let a = Double(i) / 8 * 2 * Double.pi
+                Circle()
+                    .fill(Color(hex: 0xFF7A7A))
+                    .frame(width: 4, height: 4)
+                    .offset(x: CGFloat(cos(a)) * (8 + t * 26),
+                            y: CGFloat(sin(a)) * (8 + t * 26))
+                    .opacity(Double(1 - t))
+            }
+        }
+        .allowsHitTesting(false)
+        .onAppear {
+            withAnimation(.easeOut(duration: 0.45)) { t = 1 }
+        }
     }
 }
 

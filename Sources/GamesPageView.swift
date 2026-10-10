@@ -32,10 +32,12 @@ struct GamesPageView: View {
     @State private var iconPickFor = ""
     @State private var showIconPick = false
 
-    private let pageBg = Color.dyn(0x111111, 0x141419)
-    private let cardBg = Color(hex: 0x1B1B1D)
-    private let ink = Color.white
-    private let subInk = Color(hex: 0x929292)
+    /* 用户要求：游戏页的底色**跟着系统走**——白天白的、晚上深色。
+       以前写死深色，白天看着像另一个 App。 */
+    private let pageBg = Color.dyn(0xEDEDED, 0x111114)
+    private let cardBg = Color.dyn(0xFFFFFF, 0x1B1B1D)
+    private let ink = C.label
+    private let subInk = C.subLabel
 
     @State private var loading = true
 
