@@ -53,10 +53,16 @@ struct MiniPlayerBall: View {
             let cx = min(max((side == 0 ? pad : w - pad) + dx, pad), w - pad)
             let cy = min(max(h - bt + dy, L.safeTop + pad), h - pad)
 
+            /* ⚠ 手势必须挂在**球自己身上**，而且要在 .position **之前**：
+               .position 会把这一层的框撑成整屏，挂在它后面的点击/拖动
+               就等于"整个屏幕都是这颗球" —— 结果点哪儿都在点球、往下滑一下
+               播放页就又被弹回来（用户反馈的「大卡片一直跳出来 / 滑下去又弹上来」）。
+               顺序换成 手势 → position，命中区域就只剩那颗圆。 */
             ball
-                .position(x: cx, y: cy)
+                .contentShape(Circle())
                 .gesture(drag(w: w, h: h))
                 .onTapGesture { openPlayer() }
+                .position(x: cx, y: cy)
         }
         .ignoresSafeArea()
         .opacity(showing ? 1 : 0)

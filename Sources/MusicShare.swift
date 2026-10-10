@@ -725,6 +725,9 @@ struct MusicPlayingView: View {
             /* 只有「换了一首」才从头播；同一首进进出出别打断（以前每次进这页都重播一遍） */
             if let t, player.current?.id != t.id { MusicPlayer.shared.play(t) }
         }
+        /* 这一页被往下划掉 / 点左上角关掉之后，把"要弹播放页"这个标记也清掉 ——
+           不然标记还立着，下一次任何一次打开都会又弹一遍（"关不掉"的一种情况） */
+        .onDisappear { MusicSheet.shared.close() }
     }
 }
 
