@@ -667,6 +667,9 @@ struct ChatsView: View {
                            speed: UIConfig.num("floorSmokeSpeed", 1))
                     .opacity(floorUp ? 1 : t)
             }
+            /* 二楼是**全屏**的：顶上连状态栏那一条（时间 / 信号 / Wi-Fi）也要铺这层烟的颜色，
+               不能让那里露出会话列表的底色。 */
+            .ignoresSafeArea(edges: .top)
         )
         /* 二楼**顶上那条遮罩**：状态栏那一条压得最重、往下化开 ——
            微信二楼顶上也是这么压一条，内容就不会顶着时间/信号图标。
