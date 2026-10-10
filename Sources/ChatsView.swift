@@ -464,6 +464,8 @@ struct ChatsView: View {
     /// 「二楼」的下拉阈值（pt）：拉过这么多才算"想开二楼"。
     /// 默认 **120**（原来 70 太浅，用户反馈"二楼一直误触"）。
     private var floorPull: CGFloat { max(40, UIConfig.num("chatsFloorPull", 120)) }
+    /// 下拉时三颗"压感点"已经点亮了几颗（每亮一颗震一下；用户要求振动加强）
+    @State private var floorTick = 0
     @State private var path = NavigationPath()
     /// 点公众号那两条会话：直接开公众号页面
     @State private var oaOpenId = ""
@@ -789,8 +791,18 @@ struct ChatsView: View {
                                 let dy = g.translation.height
                                 if floorOn, dy > 0 {
                                     pullDown = dy
+                                    /* 每点亮一颗提示点震一下（越往后越重，像压感） */
+                                    let step = max(1, floorPull / 3)
+                                    let lit = min(3, Int(dy / step))
+                                    if lit != floorTick {
+                                        floorTick = lit
+                                        if lit > 0 {
+                                            UIImpactFeedbackGenerator(style: lit >= 3 ? .medium : .light).impactOccurred()
+                                        }
+                                    }
                                 } else if !floorUp {
                                     pullDown = 0
+                                    floorTick = 0
                                 }
                             }
                             .onEnded { g in
@@ -804,7 +816,15 @@ struct ChatsView: View {
                                       这种是"滑到头弹一下"，不该开二楼）—— 只认慢慢拉过去的。 */
                                 let fling = abs(g.predictedEndTranslation.height - g.translation.height)
                                 let open = floorOn && pullDown > floorPull && fling < 220
-                                if open { UIImpactFeedbackGenerator(style: .light).impactOccurred() }
+                                /* 二楼下来那一下**振动加强**（用户要求）：heavy + 80ms 后再补一下 medium，
+                                   摸着是"咚"的一下，比原来的 light 明显得多。 */
+                                if open {
+                                    UIImpactFeedbackGenerator(style: .heavy).impactOccurred()
+                                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
+                                        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                                    }
+                                }
+                                floorTick = 0
                                 withAnimation(.spring(response: 0.52, dampingFraction: 0.76)) {
                                     floorUp = open
                                     pullDown = 0
