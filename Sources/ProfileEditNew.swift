@@ -146,9 +146,30 @@ struct ProfileEditView: View {
         }
         /* 性别：微信那样点一行弹出来选（不是行里的分段控件） */
         .confirmationDialog(Tr("性别"), isPresented: $showGender, titleVisibility: .visible) {
-            Button(Tr("男")) { gender = "male" }
-            Button(Tr("女")) { gender = "female" }
+            Button(Tr("男")) { gender = "male"; saveNow(["gender": "male"]) }
+            Button(Tr("女")) { gender = "female"; saveNow(["gender": "female"]) }
             Button(Tr("取消"), role: .cancel) { }
+        }
+        /* 地区 / 生日选完**立刻生效**（不用再回去按右上角那个保存）——
+           用户反馈的「设置了地区和生日都没显示生效」就是这个：
+           以前选完只是改了本地那行字，不点保存什么都没存 */
+        .onChange(of: region) { v in
+            if v != (app.me?.region ?? "") { saveNow(["region": v]) }
+        }
+        .onChange(of: birthday) { v in
+            if v != (app.me?.birthday ?? "") { saveNow(["birthday": v]) }
+        }
+    }
+
+    /// 选完就存（地区 / 生日 / 性别）：存完立刻把 app.me 刷一遍，页面上那行字跟着变
+    private func saveNow(_ fields: [String: Any]) {
+        Task {
+            do {
+                try await API.shared.updateMeChecked(fields)
+                app.me = try? await API.shared.me()
+            } catch {
+                app.show(error.localizedDescription)
+            }
         }
     }
 
@@ -474,7 +495,15 @@ struct ProfileEditView: View {
                 "patText": patText
             ]
             if !phone.isEmpty && phone != (app.me?.phone ?? "") { fields["phone"] = phone }
-            await API.shared.updateMe(fields)
+            do {
+                try await API.shared.updateMeChecked(fields)
+            } catch {
+                /* 服务器说不行（昵称不合格 / 手机号一年只能改一次…）—— 直接说出来，
+                   别再吞掉然后提示"已保存" */
+                busy = false
+                app.show(error.localizedDescription)
+                return
+            }
             app.me = try? await API.shared.me()
             await app.loadContacts()
             busy = false

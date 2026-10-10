@@ -228,6 +228,13 @@ struct ProfileEditViewOld: View {
             PhoneChangeSheet().environmentObject(app)
         }
         .sheet(isPresented: $showMyQR) { MyQRView() }
+        /* 地区 / 生日选完立刻生效（不用再按保存）—— 见 ProfileEditNew 里同一段说明 */
+        .onChange(of: region) { v in
+            if v != (app.me?.region ?? "") { saveNow(["region": v]) }
+        }
+        .onChange(of: birthday) { v in
+            if v != (app.me?.birthday ?? "") { saveNow(["birthday": v]) }
+        }
     }
 
     private func field(_ title: String, _ text: Binding<String>) -> some View {
@@ -254,6 +261,18 @@ struct ProfileEditViewOld: View {
         }
     }
 
+    /// 选完就存（地区 / 生日）：存完把 app.me 刷一遍，页面那行字跟着变
+    private func saveNow(_ fields: [String: Any]) {
+        Task {
+            do {
+                try await API.shared.updateMeChecked(fields)
+                app.me = try? await API.shared.me()
+            } catch {
+                app.show(error.localizedDescription)
+            }
+        }
+    }
+
     private func save() {
         busy = true
         Task {
@@ -265,7 +284,14 @@ struct ProfileEditViewOld: View {
                 "birthday": birthday
             ]
             if !phone.isEmpty && phone != (app.me?.phone ?? "") { fields["phone"] = phone }
-            await API.shared.updateMe(fields)
+            do {
+                try await API.shared.updateMeChecked(fields)
+            } catch {
+                /* 服务器的报错别再吞掉（吞掉就会变成"保存了但没生效"） */
+                busy = false
+                app.show(error.localizedDescription)
+                return
+            }
             app.me = try? await API.shared.me()
             await app.loadContacts()
             busy = false

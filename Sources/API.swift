@@ -4134,6 +4134,14 @@ final class API {
         _ = try? await request("PATCH", "/api/me", body: fields)
     }
 
+    /// 和 updateMe 一样，但**把服务器那句话带回来**。
+    /// 以前 updateMe 是 try?，服务器说"昵称不合格 / 手机号一年只能改一次"这种
+    /// 整条 PATCH 会被拒，界面却照样提示"已保存" —— 用户看到的
+    /// 「设置了地区/生日都没生效」十有八九就是它。
+    func updateMeChecked(_ fields: [String: Any]) async throws {
+        _ = try await request("PATCH", "/api/me", body: fields)
+    }
+
     func addFriend(username: String, from: String = "") async throws {
         var body: [String: Any] = ["username": username]
         if !from.isEmpty { body["from"] = from }
