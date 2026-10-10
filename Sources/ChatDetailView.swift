@@ -987,10 +987,13 @@ struct ChatDetailView: View {
             ForwardPickerView(items: forwardItems) { }
                 .environmentObject(app)
         }
-        /* 点了好友分享来的小游戏卡片 → 全屏用运行时打开 */
+        /* ⚠ 2026-10-11 先摘掉：用户报「进任何聊天都闪退」，而日志停在
+           「8 准备打开」——怀疑就是这一层（进会话时构建的）. 摘掉验证一下，
+           确认无关马上加回来（好友分享来的小游戏卡片就暂时打不开）。
         .fullScreenCover(item: $runningMiniApp) { g in
             GameWebPage(game: g).environmentObject(app)
         }
+        */
         /* 点「视频通话」→ 微信那样弹「语音通话 / 视频通话」两个选择 */
         .confirmationDialog(Tr("音视频通话"), isPresented: $showCallChoice, titleVisibility: .hidden) {
             Button(Tr("语音通话")) { startRealCall(video: false) }
