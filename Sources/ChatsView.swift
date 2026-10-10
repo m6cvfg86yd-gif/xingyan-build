@@ -563,6 +563,17 @@ struct ChatsView: View {
     /// 后台 floorPopBounce：写 0 = 二楼开/收、以及里面每一块，**都不走弹簧、也不上下滑**，
     /// 只做缩放 + 淡入淡出（用户："关闭的时候文字不要弹 / 不要上下弹一下"）。
     private var floorBounce: Bool { UIConfig.num("floorPopBounce", 1) > 0 }
+
+    /// 二楼内容的**顶部内缩**（状态栏 + 顶栏那一段的位置）。
+    /// 关键点在「跟手指一起动」：以前这里是 `floorUp ? 0 : safeTop + navH`，
+    /// 松手那一瞬间才从 99pt 变成 0，整页文字会往上跳一截 ——
+    /// 用户说的「还是有上下一弹的感觉」就是这一下。
+    /// 现在按**下拉进度**插值，拉到头的时候已经是终值，松手不会再动。
+    private var floorInset: CGFloat {
+        let prog = floorUp ? 1 : min(1, max(0, pullDown) / max(1, floorPull))
+        return L.safeTop + L.navH - (L.navH - 8) * prog
+    }
+
     private var floorAnim: Animation {
         floorBounce
             ? .spring(response: 0.52, dampingFraction: 0.76)
@@ -590,8 +601,8 @@ struct ChatsView: View {
            松手停住的时候带一点**错开的弹簧**（一层层浮上来），不是整页一起硬切。 */
         let t: CGFloat = floorUp ? 1 : min(1, pullDown / max(1, floorPull))
         VStack(spacing: 10) {
-            /* 整页版：顶上给状态栏 + 顶栏让出位置（内容不要钻到时间图标底下） */
-            Color.clear.frame(height: floorUp ? L.safeTop + 8 : 0)
+            /* 顶上给状态栏让位置的那段间距，现在归 floorInset（外面那层 padding）管 ——
+               这里再放一段的话，松手时会跟它叠着动，就是"上下一弹"的另一个来源。 */
             /* 最近搜索（微信二楼第一行） */
             HStack(spacing: 8) {
                 Image(systemName: "magnifyingglass").font(.system(size: 14, weight: .medium))
@@ -936,7 +947,7 @@ struct ChatsView: View {
                         .frame(height: floorReveal)
                         .frame(maxWidth: .infinity, alignment: .top)
                         /* 铺满全屏时从最顶上开始画（含状态栏那一条），不然就是顶栏下面一条 */
-                        .padding(.top, floorUp ? 0 : L.safeTop + L.navH)
+                        .padding(.top, floorInset)
                         .clipped()
                         .allowsHitTesting(floorOn && (pullDown > floorPull * 0.6 || floorUp))
                         /* 二楼本身滑出来那一下：floorPopBounce=0 用纯缓动（一点都不弹），
