@@ -14,6 +14,8 @@ struct DiscoverView: View {
     /// 扫一扫（发现页 → 扫一扫）
     @State private var showScan = false
     @ObservedObject private var realtime = Realtime.shared
+    /// 微信那个「余下 x 条」：哪几条被折叠了、哪一组已经点开
+    @State private var expandedGroups: Set<String> = []
 
     private var latestThumb: String {
         for m in app.moments {
@@ -742,6 +744,68 @@ struct MomentsView: View {
         .padding(.bottom, 2)
     }
 
+    /* ---------------------------------------------------------- 「余下 x 条」折叠 */
+
+    /// 一行：显示的那条 + 被折叠的那几条
+    private struct FoldRow: Identifiable {
+        var id: String { first.id }
+        var first: Moment
+        var rest: [Moment]
+    }
+
+    /// 把时间轴按「同一个好友 + 很短时间内连发」折起来。
+    /// 微信就是这套：同一个人的连续几条只留最新那条，下面写「余下 x 条」。
+    /// 时间窗后台可调（momentFoldWindow，单位分钟，默认 10；0 = 不折叠）。
+    private var foldRows: [FoldRow] {
+        let timeline = moments.filter { $0.pinned != true }
+        let win = UIConfig.num("momentFoldWindow", 10) * 60_000      // 毫秒
+        guard win > 0 else {
+            return timeline.map { FoldRow(first: $0, rest: []) }
+        }
+        var out: [FoldRow] = []
+        var i = 0
+        while i < timeline.count {
+            let head = timeline[i]
+            var rest: [Moment] = []
+            let headAt = TimeFmt.date(head.createdAt) ?? Date.distantPast
+            var j = i + 1
+            while j < timeline.count {
+                let nxt = timeline[j]
+                /* 只折「同一个好友」的；作者拿不到的就不折 */
+                guard let aid = head.authorId, !aid.isEmpty, nxt.authorId == aid else { break }
+                let nextAt = TimeFmt.date(nxt.createdAt) ?? Date.distantPast
+                /* 两条之间不超过这个窗口才算"连着发的"（同一个人的旧动态不折叠） */
+                if abs(headAt.timeIntervalSince(nextAt)) > win / 1000 { break }
+                rest.append(nxt)
+                j += 1
+            }
+            out.append(FoldRow(first: head, rest: rest))
+            i = j
+        }
+        return out
+    }
+
+    /// 那一行「余下 x 条」（微信就是一行灰字，点一下展开）
+    private func packedRow(_ row: FoldRow) -> some View {
+        Button {
+            withAnimation(.easeOut(duration: 0.18)) { _ = expandedGroups.insert(row.first.id) }
+        } label: {
+            HStack(spacing: 6) {
+                Text(Tr("余下") + " \(row.rest.count) " + Tr("条"))
+                    .font(pf(14))
+                    .foregroundColor(Color(hex: 0x576B95))
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(Color(hex: 0x576B95))
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 16)
+            .frame(height: 40)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
     private var momentList: some View {
         // 必须用 LazyVStack：1500 条动态如果一次性全建出来（每行还有图），手机会直接崩
         LazyVStack(spacing: 0) {
@@ -759,7 +823,6 @@ struct MomentsView: View {
             /* 置顶的那条固定在最上面（带「置顶」标），
                其余按天分组：今天 / 昨天 / 前天 / M月d日 —— 时间轴看着清楚 */
             let pinnedOnes = moments.filter { $0.pinned == true }
-            let timeline = moments.filter { $0.pinned != true }
             /* 每条朋友圈之间那条细线（微信同款）：左边从**头像左边**起，
                右边一直顶到屏幕边。左右内缩都在后台：momentDividerInset / momentDividerTrail。 */
             let divInset = UIConfig.num("momentDividerInset", 12)
@@ -768,14 +831,29 @@ struct MomentsView: View {
                 momentRow(moment)
                 HairLine(inset: divInset, trailingInset: divTrail)
             }
-            ForEach(Array(timeline.enumerated()), id: \.element.id) { i, moment in
-                let day = dayLabel(moment.createdAt)
-                if i == 0 || dayLabel(timeline[i - 1].createdAt) != day {
+            /* 微信那个「余下 x 条」折叠（2026-07 上的新功能）：
+               同一个好友**在很短时间里连发好几条**时，时间轴只显示**最新的一条**，
+               它下面写一行「余下 x 条」——点一下才把这个人这几条都展开。
+               时间窗后台可调：momentFoldWindow（分钟，默认 10；写 0 = 不折叠）。 */
+            ForEach(Array(foldRows.enumerated()), id: \.element.id) { i, row in
+                let day = dayLabel(row.first.createdAt)
+                if i == 0 || dayLabel(foldRows[i - 1].first.createdAt) != day {
                     dayHeader(day)
                 }
-                momentRow(moment)
+                momentRow(row.first)
+                if !row.rest.isEmpty {
+                    if expandedGroups.contains(row.first.id) {
+                        /* 展开状态：把这个人这一串剩下的都画出来 */
+                        ForEach(Array(row.rest.enumerated()), id: \.element.id) { _, m in
+                            HairLine(inset: divInset, trailingInset: divTrail)
+                            momentRow(m)
+                        }
+                    } else {
+                        packedRow(row)
+                    }
+                }
                 /* 最后一条底下不画线（微信也是，末尾直接接「没有更多了」） */
-                if i < timeline.count - 1 {
+                if i < foldRows.count - 1 {
                     HairLine(inset: divInset, trailingInset: divTrail)
                 }
             }
