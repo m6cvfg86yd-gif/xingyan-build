@@ -56,7 +56,7 @@ struct RedPacketRain: View {
                     let h = d.size * 1.32
                     let rect = CGRect(x: x - w / 2, y: y - h / 2, width: w, height: h)
                     var c = g
-                    c.opacity(fade)
+                    c.opacity = fade          // GraphicsContext.opacity 是属性，不是方法
                     c.translateBy(x: x, y: y)
                     c.rotate(by: .radians(d.spin))
                     c.translateBy(x: -x, y: -y)
