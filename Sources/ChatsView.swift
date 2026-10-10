@@ -466,6 +466,15 @@ struct ChatsView: View {
     private var floorPull: CGFloat { max(40, UIConfig.num("chatsFloorPull", 120)) }
     /// 下拉时三颗"压感点"已经点亮了几颗（每亮一颗震一下；用户要求振动加强）
     @State private var floorTick = 0
+    /// 「重力感」：手指下拉的距离 → 二楼实际露出的高度
+    /// 前 60pt 完全跟手，再往深按 0.82 次方衰减（拉得越深越沉，像拽一个越来越重的东西）。
+    /// 后台键 floorGravity：写 0 就是原来那种 1:1 跟手。
+    private func heavyPull(_ d: CGFloat) -> CGFloat {
+        let g = UIConfig.num("floorGravity", 1)
+        if g <= 0 || d <= 60 { return d }
+        let tail = max(0, d - 60)
+        return 60 + CGFloat(pow(Double(tail), 0.82)) * 0.62 + tail * 0.38
+    }
     @State private var path = NavigationPath()
     /// 点公众号那两条会话：直接开公众号页面
     @State private var oaOpenId = ""
@@ -815,7 +824,7 @@ struct ChatsView: View {
                                 guard scrolled < 8 else { return }      // 只有（基本）回到顶部才认这个下拉
                                 let dy = g.translation.height
                                 if floorOn, dy > 0 {
-                                    pullDown = dy
+                                    pullDown = heavyPull(dy)
                                     /* 每点亮一颗提示点震一下（越往后越重，像压感） */
                                     let step = max(1, floorPull / 3)
                                     let lit = min(3, Int(dy / step))
@@ -866,7 +875,7 @@ struct ChatsView: View {
                         }
                         /* 下拉的那一段（v 是负的）就是「二楼」露出来的高度：完全靠列表自己的
                            橡皮筋，不需要我们再挂一层手势，所以不会跟滚动抢手势。 */
-                        let p = max(0, -v)
+                        let p = heavyPull(max(0, -v))
                         if abs(p - pullDown) > 0.5 { pullDown = p }
                         /* 二楼**只在松手那一下判断**（onEnded 里），不再拉到一半就自己弹出来 ——
                            之前"滑到头弹一下"也会被这里判定成开二楼，就是误触的主因。
