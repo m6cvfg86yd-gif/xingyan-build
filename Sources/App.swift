@@ -808,10 +808,17 @@ struct SavedLoginConfirm: View {
 
     /// 本机保存的登录令牌（退出登录之后靠它一键登回来；没有就只能去一级登录页）
     private var savedToken: String {
-        if let a = app.accounts.first(where: { !$0.token.isEmpty && $0.avatar == app.lastAvatar }) {
-            return a.token
+        /* 令牌是**按账号存在钥匙串**里的（SavedAccount 里没有 token 字段），
+           所以这里先按"上次登录那个人"的头像找到账号名，再取钥匙串里那把令牌。 */
+        if let a = app.accounts.first(where: { $0.avatar == app.lastAvatar }) {
+            let t = AccountStore.token(for: a.username)
+            if !t.isEmpty { return t }
         }
-        return app.accounts.first(where: { !$0.token.isEmpty })?.token ?? ""
+        for a in app.accounts {
+            let t = AccountStore.token(for: a.username)
+            if !t.isEmpty { return t }
+        }
+        return ""
     }
 
     var body: some View {
