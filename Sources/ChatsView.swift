@@ -604,14 +604,24 @@ struct ChatsView: View {
         }
         .padding(.top, 8)
         .frame(maxWidth: .infinity)
-        /* 「烟雾感」= 磨砂玻璃 + 一道由上到下变淡的渐变（微信那层就是这么出来的：
-           底不是纯色，是磨砂压着页面，再罩一层渐变让下沿慢慢化开） */
+        /* 「烟雾感」= 照桌面 安全 文件夹那张参考图**量的颜色**做的三层：
+           ① 底：上深下浅的深紫蓝渐变（图里量到 #1B1A2A → #2B283C → 上浅到 #322F44，
+              这就是微信二楼背后那层"烟"）
+           ② 一层很薄的磨砂：后面的会话列表透上来一点点（烟才像烟，不是一块色板）
+           ③ 左上一团极淡的高光：烟在空中散开的那种不均匀 */
         .background(
             ZStack {
-                Rectangle().fill(.ultraThinMaterial)
-                LinearGradient(colors: [C.chatsPageBg.opacity(0.92),
-                                        C.chatsPageBg.opacity(0.62)],
+                LinearGradient(colors: [Color(hex: 0x1B1A2A),
+                                        Color(hex: 0x232130),
+                                        Color(hex: 0x2B283C),
+                                        Color(hex: 0x322F44)],
                                startPoint: .top, endPoint: .bottom)
+                Rectangle().fill(.ultraThinMaterial)
+                    .opacity(UIConfig.num("floorSmokeBlur", 0.35))
+                RadialGradient(colors: [Color.white.opacity(UIConfig.num("floorSmokeGlow", 0.05)),
+                                        Color.clear],
+                               center: UnitPoint(x: 0.35, y: 0.12),
+                               startRadius: 20, endRadius: 430)
             }
         )
     }
