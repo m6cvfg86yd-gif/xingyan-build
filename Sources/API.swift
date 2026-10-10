@@ -34,6 +34,9 @@ struct User: Codable, Identifiable, Hashable {
     /// 拍一拍后缀（微信：我 → 个人资料 → 拍一拍）：别人拍我时念成「拍了拍我的＿＿」
     var patText: String?
     var bot: Bool?
+    /// 这个账号有没有「App 内的管理」权限（上新音乐 / 换图标）——
+    /// 服务器 users.json 里 ops=true 才会有；别人看不到这个入口
+    var ops: Bool?
     var online: Bool?
     var balance: Double?
     /// 我和他的关系：self / friend / incoming / requested / none（名片页按钮按它变）
@@ -1789,6 +1792,28 @@ final class API {
     }
 
     /* ---------------------------------------------------------- 音乐：我正在听 / 好友在听 */
+
+    /* ---------------------------------------------------------- App 内的「管理」（ops 用户） */
+
+    /// 管理页要的数据：曲库 + 小游戏/小程序清单
+    func manageData() async -> ManageData? {
+        try? await get("/api/manage", as: ManageData.self)
+    }
+
+    /// 上新音乐 / 改一首歌（id 传空 = 新增）
+    func manageSaveMusic(id: String, title: String, artist: String,
+                         cover: String, url: String, lyrics: String) async throws {
+        var b: [String: Any] = ["title": title, "artist": artist,
+                                "cover": cover, "url": url, "lyrics": lyrics]
+        if !id.isEmpty { b["id"] = id }
+        _ = try await request("POST", "/api/manage/music", body: b)
+    }
+
+    /// 换图标（kind = music / miniapp）
+    func manageSetIcon(kind: String, id: String, cover: String) async throws {
+        _ = try await request("POST", "/api/manage/icon",
+                              body: ["kind": kind, "id": id, "cover": cover])
+    }
 
     /// 报一下"我正在听这首"（好友「听一听 → 朋友推荐」那一栏看的就是它）。失败就算了。
     func musicNow(_ t: MusicTrack) async {

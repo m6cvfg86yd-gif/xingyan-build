@@ -112,6 +112,10 @@ struct MeView: View {
                 } else if key == "friendsStatus" {
                     /* 状态旁边那颗：所有好友现在挂的状态（微信那一栏） */
                     FriendsStatusView()
+                } else if key == "manage" {
+                    /* App 内的管理（只有 ops 账号看得到这个入口）：
+                       上新音乐 / 换音乐图标 / 换游戏图标 */
+                    UserManageView()
                 } else if key == "paypwd" {
                     PayPasswordView()
                 } else if key == "gesture" {
@@ -422,6 +426,8 @@ struct MeView: View {
                 memberPill
                 statusChip
                 friendsStatusChip
+                /* 只有开了 ops 的账号看得到：App 里直接上新音乐、换音乐/游戏图标 */
+                if app.me?.ops == true { manageChip }
             }
             .padding(.top, 14)
             .padding(.bottom, 16)
@@ -549,6 +555,16 @@ struct MeView: View {
             Text(Tr("朋友的状态"))
         } action: {
             path.append("friendsStatus")
+        }
+    }
+
+    /// 只有 ops 账号看得到的那颗：App 里直接维护曲库和图标（不用开电脑后台）
+    private var manageChip: some View {
+        chip {
+            Text("🛠")
+            Text(Tr("管理"))
+        } action: {
+            path.append("manage")
         }
     }
 
