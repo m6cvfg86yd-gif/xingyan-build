@@ -60,8 +60,11 @@ struct MiniPlayerBall: View {
                顺序换成 手势 → position，命中区域就只剩那颗圆。 */
             ball
                 .contentShape(Circle())
+                /* 点球 = 回到大图（微信那套：往下划收成小球，点小球又回到播放页）。
+                   这里用 highPriorityGesture 的单击：手指一动超过一点点它就自动让位，
+                   拖球照旧 —— 不然两种手势会互相抢，点了没反应。 */
+                .highPriorityGesture(TapGesture().onEnded { openPlayer() })
                 .gesture(drag(w: w, h: h))
-                .onTapGesture { openPlayer() }
                 .position(x: cx, y: cy)
         }
         .ignoresSafeArea()
