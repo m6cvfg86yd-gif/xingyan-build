@@ -171,6 +171,13 @@ struct MiniAppsView: View {
                     .fill(LinearGradient(colors: [Color(hex: 0x2B2F3A), Color(hex: 0x1B1F27)],
                                          startPoint: .topLeading, endPoint: .bottomTrailing))
                 Text(it.iconText).font(.system(size: 30))
+                /* ⚠ 有上传的图标图就**用图**（后台/App 管理里换了图标这里要跟着变）——
+                   以前这里只画 emoji，所以用户换了图标，小程序页看着"怎么没换"。 */
+                if let cv = it.cover, !cv.isEmpty {
+                    RemoteImage(path: cv)
+                        .frame(width: 62, height: 62)
+                        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                }
             }
             .frame(width: 62, height: 62)
             .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous)
