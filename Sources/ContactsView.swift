@@ -646,68 +646,36 @@ struct ContactCardView: View {
     private var link: Color { scheme == .dark ? Color(hex: 0x7D90B8) : Color(hex: 0x576B95) }
     private var lineColor: Color { scheme == .dark ? Color(white: 1, opacity: 0.09) : Color(hex: 0xE5E5E5) }
 
-    /// 新版名片页（畅聊/HarmonyOS 语言）的开关：后台 data/ui.json 里
-    /// cardStyle = "new" 才走新版；默认 "old" 就是原来这版，随时能切回来。
+    /// 名片页的三种长相（后台 data/ui.json 里 cardStyle 决定，改完重开 App 生效）：
+    ///   old    = 原来那版（默认）
+    ///   new    = 畅聊 / HarmonyOS 设计语言那版
+    ///   wechat = 照微信「详细资料」页重做的那版
+    /// 老的两版一个字没动，随时能切回去。
     var body: some View {
-        if UIConfig.text("cardStyle", "old") == "new" {
-            ContactCardNew(name: displayName,
-                           idLine: "账号 " + (u.username ?? ""),
-                           avatarPath: u.avatarPath,
-                           isEyes: isEyesBot,
-                           remark: meta?.remark ?? "",
-                           phone: phone,
-                           momentCount: thumbs.count,
-                           onClose: { dismiss() },
-                           onMessage: { openChat() },
-                           onVoice: {
-                               if CallCenter.shared.phase != .idle {
-                                   app.show(Tr("正在通话中"))
-                               } else {
-                                   CallCenter.shared.start(peerId: u.id,
-                                                           name: u.nickname ?? u.username ?? "对方",
-                                                           avatar: u.avatar ?? "", video: false)
-                               }
-                           },
-                           onVideo: {
-                               if CallCenter.shared.phase != .idle {
-                                   app.show(Tr("正在通话中"))
-                               } else {
-                                   CallCenter.shared.start(peerId: u.id,
-                                                           name: u.nickname ?? u.username ?? "对方",
-                                                           avatar: u.avatar ?? "", video: true)
-                               }
-                           },
-                           onMoments: hasMoments ? { onOpenMoments(u.id) } : nil)
-        } else {
-            cardBody
-        }
-    }
-
-    private var cardBody: some View {
         ZStack {
-            VStack(spacing: 0) {
-                nav
-                ScrollView {
-                    VStack(spacing: 12) {
-                        hero
-                        infoCard
-                        if hasMoments { momentsCard }
-                        acts
-                        Spacer(minLength: 0)
-                    }
-                    .padding(.horizontal, 14)
-                    .padding(.top, 10)
-                    .padding(.bottom, 24)
+            Group {
+                if UIConfig.text("cardStyle", "old") == "new" {
+                    ContactCardNew(name: displayName,
+                                   idLine: "账号 " + (u.username ?? ""),
+                                   avatarPath: u.avatarPath,
+                                   isEyes: isEyesBot,
+                                   remark: meta?.remark ?? "",
+                                   phone: phone,
+                                   momentCount: thumbs.count,
+                                   momentsRange: u.momentsRange ?? "all",
+                                   onClose: { dismiss() },
+                                   onMessage: { openChat() },
+                                   onVoice: { startCall(video: false) },
+                                   onVideo: { startCall(video: true) },
+                                   onMoments: hasMoments ? { onOpenMoments(u.id) } : nil)
+                } else if UIConfig.text("cardStyle", "old") == "wechat" {
+                    wechatCard
+                } else {
+                    cardBody
                 }
-                .background(scrollBg)
             }
-            .background(sheetBg.ignoresSafeArea())
-
-            /* 右上「⋯」：自己画的一张高级面板（暗底 + 头像卡 + 图标行），
-               不再是系统那个从底下冒出来的白色动作表 */
-            if showMore {
-                morePanel.transition(.opacity)
-            }
+            /* 右上「⋯」那张面板三版共用（new / wechat 也要能改备注、加黑名单、删好友） */
+            if showMore { morePanel.transition(.opacity) }
         }
         .animation(.easeOut(duration: 0.18), value: showMore)
         .toolbar(.hidden, for: .navigationBar)
@@ -767,6 +735,85 @@ struct ContactCardView: View {
                 }
             }
             .environmentObject(app)
+        }
+    }
+
+    /// 微信那版名片：数据在这儿凑齐（头像 / 微信号 / 地区 / 三张缩略图 / 那张句提示）
+    private var wechatCard: some View {
+        ContactCardWechat(name: displayName,
+                          wxId: "微信号：" + ((u.username?.isEmpty == false) ? u.username! : "—"),
+                          region: regionText,
+                          avatarPath: avatarPath,
+                          isEyes: isEyesBot,
+                          remarkLine: tagText,
+                          permLine: permText,
+                          moreLine: moreText,
+                          momentsHint: momentsHint,
+                          thumbs: thumbs,
+                          isBot: isBot,
+                          relation: relation,
+                          onClose: { dismiss() },
+                          onAvatar: { if !avatarPath.isEmpty { showBigAvatar = true } },
+                          onMessage: { openChat() },
+                          onVoice: { startCall(video: false) },
+                          onVideo: { startCall(video: true) },
+                          onAICall: { startAICall() },
+                          onMoments: { onOpenMoments(u.id) },
+                          onRemark: { showRemark = true },
+                          onPerm: { showPerm = true },
+                          onMore: { showInfo = true },
+                          onMenu: { showMore = true },
+                          onApply: { showApply = true },
+                          onAgree: { run(CardAct(title: "同意好友申请", key: "agree")) })
+    }
+
+    /// 名片上的地区那一行
+    private var regionText: String {
+        (u.region?.isEmpty == false) ? u.region! : Tr("未知")
+    }
+
+    /// 朋友圈那一行要说的那句话：好友设了「最近三天 / 最近半年」、这区间里又没动态时，
+    /// 微信写的是「朋友仅展示最近三天的朋友圈」（不是「暂无朋友圈动态」）。
+    private var momentsHint: String {
+        if !thumbs.isEmpty { return "" }
+        switch u.momentsRange ?? "all" {
+        case "3d": return "朋友仅展示最近三天的朋友圈"
+        case "6m": return "朋友仅展示最近半年的朋友圈"
+        default:   return ""
+        }
+    }
+
+    /// 打真人语音 / 视频通话（WebRTC）
+    private func startCall(video: Bool) {
+        if CallCenter.shared.phase != .idle {
+            app.show(Tr("正在通话中"))
+            return
+        }
+        CallCenter.shared.start(peerId: u.id,
+                                name: u.nickname ?? u.username ?? "对方",
+                                avatar: u.avatar ?? "",
+                                video: video)
+    }
+
+    private var cardBody: some View {
+        ZStack {
+            VStack(spacing: 0) {
+                nav
+                ScrollView {
+                    VStack(spacing: 12) {
+                        hero
+                        infoCard
+                        if hasMoments { momentsCard }
+                        acts
+                        Spacer(minLength: 0)
+                    }
+                    .padding(.horizontal, 14)
+                    .padding(.top, 10)
+                    .padding(.bottom, 24)
+                }
+                .background(scrollBg)
+            }
+            .background(sheetBg.ignoresSafeArea())
         }
     }
 

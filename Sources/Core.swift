@@ -21,6 +21,24 @@ enum AppInfo {
         Keychain.set(v, for: key)
         return v
     }()
+
+    /* ---------- 「登录设备管理」要的那三样（随请求头报给服务器） ---------- */
+
+    /// 设备名（「张三的 iPhone」这种）。HTTP 头只能放 ASCII，
+    /// 所以中文名字先按百分号编码，App 显示前再解回来。
+    static let deviceName: String =
+        UIDevice.current.name.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? ""
+    /// 机型标识（iPhone17,1 这种），跟系统版本拼一行
+    static let deviceModel: String = {
+        var sys = utsname()
+        uname(&sys)
+        let id = withUnsafePointer(to: &sys.machine) {
+            $0.withMemoryRebound(to: CChar.self, capacity: 1) { String(cString: $0) }
+        }
+        return id.isEmpty ? UIDevice.current.model : id
+    }()
+    /// 系统版本：iOS 19.1
+    static let deviceOs: String = "iOS " + UIDevice.current.systemVersion
 }
 
 /* ============================================================

@@ -127,6 +127,27 @@ struct MeView: View {
                     AccountSecurityView()
                 } else if key == "pair" {
                     PairApproveView()
+                } else if key == "devices" {
+                    /* 账号与安全 → 登录设备管理（真设备列表） */
+                    LoginDevicesView()
+                } else if key == "teen" {
+                    TeenModeView()
+                } else if key == "care" {
+                    CareModeView()
+                } else if key == "notify" {
+                    NotifyView()
+                } else if key == "privacy" {
+                    PrivacyView()
+                } else if key == "general" {
+                    GeneralView()
+                } else if key == "storage" {
+                    StorageSpaceView()
+                } else if key == "feedback" {
+                    FeedbackView()
+                } else if key == "about" {
+                    AboutView()
+                } else if key == "chatbg" {
+                    ChatBackgroundSheet()
                 } else {
                     ComingSoonView(title: String(key.dropFirst(5)))
                 }
@@ -642,33 +663,31 @@ struct SettingsView: View {
                            （个人信息、实名、支付密码、安全锁、安全分、登录设备都归到「账号与安全」里了） */
                         settingLink(Tr("账号与安全"), accountSubtitle, key: "account")
                         HairLine(inset: 16)
-                        settingRow(Tr("未成年人模式"), "") { showTeen = true }
+                        settingLink(Tr("未成年人模式"), "", key: "teen")
                         HairLine(inset: 16)
-                        settingRow(Tr("关怀模式"), CareMode.on ? Tr("已开启") : Tr("未开启")) { showCare = true }
+                        settingLink(Tr("关怀模式"), CareMode.on ? Tr("已开启") : Tr("未开启"), key: "care")
                         HairLine(inset: 16)
-                        settingRow(Tr("新消息通知"), "") { showNotify = true }
+                        settingLink(Tr("新消息通知"), "", key: "notify")
                         HairLine(inset: 16)
-                        settingRow(Tr("隐私"), "") { showPrivacy = true }
+                        settingLink(Tr("隐私"), "", key: "privacy")
                         HairLine(inset: 16)
                         /* 通用：外观 / 界面语言 / 聊天背景（微信也把这几项收在「通用」里） */
-                        settingRow(Tr("通用"), "") { showGeneral = true }
+                        settingLink(Tr("通用"), "", key: "general")
                         HairLine(inset: 16)
                         /* 本地存储：媒体和聊天记录都存在本机，这里能看到占用、能分类清理 */
-                        settingRow(Tr("存储空间"), storageText) { showStorage = true }
+                        settingLink(Tr("存储空间"), storageText, key: "storage")
                     }
 
                     Rectangle().fill(C.pageBg).frame(height: 8)
 
                     GroupCard {
-                        settingRow(Tr("帮助与反馈"), "") { showFeedback = true }
+                        settingLink(Tr("帮助与反馈"), "", key: "feedback")
                         HairLine(inset: 16)
-                        settingRow(Tr("关于我们 · 版本更新"), "1.0 · " + AppInfo.build) { showAbout = true }
+                        settingLink(Tr("关于我们 · 版本更新"), "1.0 · " + AppInfo.build, key: "about")
                     }
 
                     /* 切换账号（微信就在「退出登录」上面这一行） */
-                    Button {
-                        showSwitchAccount = true
-                    } label: {
+                    NavigationLink(value: "switch") {
                         HStack {
                             Text(Tr("切换账号"))
                                 .font(pf(17))
@@ -719,9 +738,7 @@ struct SettingsView: View {
         .hidesTabBar()
         /* 聊天背景：换成整页选择 —— 上面 6 张黑白基础背景缩略图，
            下面还是「默认背景 / 从相册选一张」那两条老入口。 */
-        .sheet(isPresented: $showBg) {
-            ChatBackgroundSheet().environmentObject(app)
-        }
+        /* 聊天背景现在是整页 push（见 searchItems 里那条 key: "chatbg"） */
         .confirmationDialog(Tr("外观"), isPresented: $showTheme, titleVisibility: .visible) {
             Button(Tr("跟随系统")) { app.setAppearance("auto") }
             Button(Tr("浅色")) { app.setAppearance("light") }
@@ -731,18 +748,8 @@ struct SettingsView: View {
         .sheet(isPresented: $showBgPick) {
             PhotoPicker { image in changeBg(image) }
         }
-        .sheet(isPresented: $showFeedback) { FeedbackView() }
-        .sheet(isPresented: $showTeen) { TeenModeView().environmentObject(app) }
-        .sheet(isPresented: $showCare) { CareModeView().environmentObject(app) }
-        .sheet(isPresented: $showAbout) { AboutView() }
-        .sheet(isPresented: $showPairApprove) { PairApproveView() }
-        .sheet(isPresented: $showMyQR) { MyQRView() }
-        .sheet(isPresented: $showPrivacy) { PrivacyView() }
-        .sheet(isPresented: $showNotify) { NotifyView() }
-        .sheet(isPresented: $showGeneral) { GeneralView() }
-        .sheet(isPresented: $showStorage) { StorageSpaceView() }
-        .sheet(isPresented: $showProfileEdit) { ProfileEditView() }
-        .sheet(isPresented: $showSwitchAccount) { SwitchAccountView() }
+        /* 二级菜单一律**整页 push**（以前是 sheet / 半屏，用户要求跟微信一样整页进去）；
+           落点在「我」页那条 navigationDestination 上。 */
         .confirmationDialog(Tr("界面语言"), isPresented: $showLang, titleVisibility: .visible) {
             Button(Tr("简体中文")) { setLang("zh") }
             Button("English") { setLang("en") }
@@ -824,26 +831,28 @@ struct SettingsView: View {
                               keywords: "等级 活跃天 成长 升级 图标", key: "level"),
             SettingSearchItem(title: Tr("安全分"), sub: "",
                               keywords: "安全分 评分 安全", key: "score"),
+            SettingSearchItem(title: Tr("登录设备管理"), sub: "",
+                              keywords: "登录设备 设备 手机 电脑 退出设备", key: "devices"),
             SettingSearchItem(title: Tr("未成年人模式"), sub: "",
-                              keywords: "未成年人 青少年 防沉迷 伞 模式", run: { showTeen = true }),
+                              keywords: "未成年人 青少年 防沉迷 伞 模式", key: "teen"),
             SettingSearchItem(title: Tr("关怀模式"), sub: CareMode.on ? Tr("已开启") : Tr("未开启"),
-                              keywords: "关怀 大字 字号 老年人 模式", run: { showCare = true }),
+                              keywords: "关怀 大字 字号 老年人 模式", key: "care"),
             SettingSearchItem(title: Tr("新消息通知"), sub: "",
-                              keywords: "新消息 通知 提醒 铃声 震动 免打扰", run: { showNotify = true }),
+                              keywords: "新消息 通知 提醒 铃声 震动 免打扰", key: "notify"),
             SettingSearchItem(title: Tr("隐私"), sub: "",
-                              keywords: "隐私 加我 好友 朋友圈 通讯录", run: { showPrivacy = true }),
+                              keywords: "隐私 加我 好友 朋友圈 通讯录", key: "privacy"),
             SettingSearchItem(title: Tr("通用"), sub: "",
-                              keywords: "通用 外观 深色 浅色 主题 界面语言 中文 英文", run: { showGeneral = true }),
+                              keywords: "通用 外观 深色 浅色 主题 界面语言 中文 英文", key: "general"),
             SettingSearchItem(title: Tr("聊天背景"), sub: "",
-                              keywords: "聊天背景 背景 壁纸 图片", run: { showBg = true }),
+                              keywords: "聊天背景 背景 壁纸 图片", key: "chatbg"),
             SettingSearchItem(title: Tr("外观"), sub: "",
                               keywords: "外观 深色 浅色 跟随系统 主题", run: { showTheme = true }),
             SettingSearchItem(title: Tr("界面语言"), sub: "",
                               keywords: "界面语言 语言 中文 英文 language", run: { showLang = true }),
             SettingSearchItem(title: Tr("帮助与反馈"), sub: "",
-                              keywords: "帮助 反馈 意见 客服 投诉", run: { showFeedback = true }),
+                              keywords: "帮助 反馈 意见 客服 投诉", key: "feedback"),
             SettingSearchItem(title: Tr("关于我们 · 版本更新"), sub: "1.0 · " + AppInfo.build,
-                              keywords: "关于 版本 更新 检查更新 当前版本", run: { showAbout = true }),
+                              keywords: "关于 版本 更新 检查更新 当前版本", key: "about"),
             SettingSearchItem(title: Tr("切换账号"), sub: "",
                               keywords: "切换账号 换号 登录 账号", key: "switch"),
             SettingSearchItem(title: Tr("退出登录"), sub: "",

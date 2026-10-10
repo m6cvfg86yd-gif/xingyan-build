@@ -37,6 +37,10 @@ struct User: Codable, Identifiable, Hashable {
     var relation: String?
     /// 他发过几条朋友圈（名片上朋友圈那一行有没有）
     var momentCount: Int?
+    /// 他的朋友圈可见范围：3d 最近三天 / 6m 最近半年 / all 全部。
+    /// 只有「我加了他」的名片（/api/users/{id} 走 memberProfile）才带这个值 ——
+    /// 名片上那句「朋友仅展示最近三天的朋友圈」用的就是它。
+    var momentsRange: String?
     /// 好友申请里那句验证消息（「新的朋友」里显示）
     var requestMessage: String?
     /// 我给这个人设的备注名（设了以后列表/会话标题都显示它）
@@ -1601,6 +1605,13 @@ final class API {
         req.setValue(AppInfo.build, forHTTPHeaderField: "X-App-Build")
         /* 设备标识：服务器拿它判断「这次是不是换了设备」，只有换了设备才弹滑动验证 */
         req.setValue(AppInfo.deviceId, forHTTPHeaderField: "X-Device-Id")
+        /* 「登录设备管理」那一页要显示的三样：设备名 / 机型 / 系统。
+           老客户端没有这三个头，服务器就退回按 UA 猜（只能猜出「浏览器 · iOS」）。 */
+        if !AppInfo.deviceName.isEmpty {
+            req.setValue(AppInfo.deviceName, forHTTPHeaderField: "X-Device-Name")
+        }
+        req.setValue(AppInfo.deviceModel, forHTTPHeaderField: "X-Device-Model")
+        req.setValue(AppInfo.deviceOs, forHTTPHeaderField: "X-Device-Os")
         if !token.isEmpty {
             req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         }
@@ -2891,6 +2902,33 @@ final class API {
         } catch {
             return (error as? APIError)?.errorDescription ?? "操作失败"
         }
+    }
+
+    /* ---------------- 登录设备管理 ---------------- */
+
+    /// 一台登录过的设备（服务端 /api/devices 下发）
+    struct LoginDevice: Decodable, Identifiable, Hashable {
+        var id: String
+        /// 设备名（「张三的 iPhone」）——是百分号编码过的，显示前用 removingPercentEncoding 解
+        var name: String?
+        /// 老记录留下的那行 UA 描述（「Safari · iOS」）
+        var device: String?
+        /// 机型标识：iPhone17,1
+        var model: String?
+        /// 系统：iOS 19.1 / HarmonyOS 5.0
+        var os: String?
+        var ip: String?
+        /// 最后登录时间（毫秒时间戳）
+        var at: Double?
+        /// 是不是当前这台
+        var current: Bool?
+    }
+
+    /// 登录设备管理：我登录过的设备（设备名 + 系统 + 最后登录时间 + 本机标记）
+    func devices() async -> [LoginDevice] {
+        struct Payload: Decodable { var devices: [LoginDevice]? }
+        guard let p: Payload = try? await get("/api/devices", as: Payload.self) else { return [] }
+        return p.devices ?? []
     }
 
     /* ---------------------------------------------------------- 推送通知（苹果 APNs） */

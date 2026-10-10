@@ -25,6 +25,9 @@ struct ContactCardNew: View {
     let remark: String
     let phone: String
     let momentCount: Int
+    /// 对方设的朋友圈可见范围（3d / 6m / all）：这区间里没动态时，
+    /// 那一行要写微信那句「朋友仅展示最近三天的朋友圈」，不是「暂无朋友圈动态」。
+    let momentsRange: String
     let onClose: () -> Void
     let onMessage: () -> Void
     let onVoice: () -> Void
@@ -60,8 +63,8 @@ struct ContactCardNew: View {
                                             .frame(width: 44, height: 44)
                                             .overlay(Image(systemName: "photo.on.rectangle.angled")
                                                 .font(.system(size: 18)).foregroundColor(hBlue))
-                                        Text(momentCount > 0 ? "看 TA 的朋友圈" : "暂无朋友圈动态")
-                                            .font(pf(16)).foregroundColor(momentCount > 0 ? hInk : hInk3)
+                        Text(momentCount > 0 ? "看 TA 的朋友圈" : momentEmptyText)
+                            .font(pf(16)).foregroundColor(momentCount > 0 ? hInk : hInk3)
                                         Spacer()
                                         Image(systemName: "chevron.right")
                                             .font(.system(size: 13, weight: .semibold)).foregroundColor(hInk3)
@@ -82,6 +85,17 @@ struct ContactCardNew: View {
         if !remark.isEmpty { list.append(("备注", remark)) }
         if !phone.isEmpty { list.append(("手机号", phone)) }
         return list
+    }
+
+    /// 朋友圈那一行没动态时写什么：
+    /// 对方设了「最近三天 / 最近半年」→ 微信写的是「朋友仅展示最近三天的朋友圈」；
+    /// 没设范围（all）才是「暂无朋友圈动态」。
+    private var momentEmptyText: String {
+        switch momentsRange {
+        case "3d": return "朋友仅展示最近三天的朋友圈"
+        case "6m": return "朋友仅展示最近半年的朋友圈"
+        default:   return "暂无朋友圈动态"
+        }
     }
 
     private var nav: some View {

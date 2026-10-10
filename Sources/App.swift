@@ -233,7 +233,10 @@ final class AppState: ObservableObject {
     /// 点进二级页面（聊天、名片、朋友圈、设置…）时把底部 4 个 tab 收起来。
     /// 用「层数」而不是布尔：从第三层返回第二层时，底栏不能错误地冒出来。
     @Published var tabBarDepth = 0
-    var tabBarHidden: Bool { tabBarDepth > 0 }
+    /// 会话列表「二楼」拉下来时也要把底栏收起来。它不走导航栈（是同一页里叠出来的一层），
+    /// 所以单独一个标志位；底栏该不该藏 = 导航栈有层数 **或者** 二楼开着。
+    @Published var floorFull = false
+    var tabBarHidden: Bool { tabBarDepth > 0 || floorFull }
     /// 外观：auto=跟随系统 · light=浅色 · dark=深色（存在本机，和网页版那个「切换外观」一样）
     @Published var appearance: String = UserDefaults.standard.string(forKey: "chris.appearance") ?? "auto"
     func setAppearance(_ v: String) {

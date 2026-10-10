@@ -683,7 +683,7 @@ struct ChatsView: View {
             .ignoresSafeArea(edges: .top)
             /* 二楼铺满全屏时要**盖住底部导航**（用户要求），所以二楼一拉开就把底栏藏起来 */
             .onChange(of: floorUp) { v in
-                withAnimation(.easeOut(duration: 0.2)) { app.tabBarHidden = v }
+                withAnimation(.easeOut(duration: 0.2)) { app.floorFull = v }
             }
         )
         /* 二楼**顶上那条遮罩**：状态栏那一条压得最重、往下化开 ——
