@@ -133,6 +133,8 @@ struct MusicLyricsView: View {
     /// 不是 sheet，所以不用 dismiss）
     var onClose: () -> Void = { }
     @ObservedObject private var player = MusicPlayer.shared
+    /// 上一个高亮行（用来判断"是一句一句往下走"还是"一下跳很多行"）
+    @State private var lastLyricLine = -1
 
     private var lines: [MusicLyricLine] { MusicLyrics.parse(track?.lyrics ?? "", duration: player.total) }
     private var cur: Int { MusicLyrics.current(lines, at: player.seconds) }
@@ -188,7 +190,11 @@ struct MusicLyricsView: View {
                     }
                     .onChange(of: cur) { i in
                         guard i >= 0 else { return }
-                        withAnimation(.easeInOut(duration: 0.28)) { sp.scrollTo(i, anchor: .center) }
+                        /* 同上：滚顺一点，跳很多行才直接到位 */
+                        let jump = lastLyricLine < 0 || abs(i - lastLyricLine) > 3
+                        lastLyricLine = i
+                        if jump { sp.scrollTo(i, anchor: .center) }
+                        else { withAnimation(.easeInOut(duration: 0.55)) { sp.scrollTo(i, anchor: .center) } }
                     }
                 }
             }
@@ -1068,6 +1074,8 @@ struct MusicPlayingView: View {
     /// AI 识别歌词：识别中的文字 / 是不是在识别
     @State private var aiText = ""
     @State private var aiBusy = false
+    /// 歌词滚动的上一个高亮行（跳很多行就"直接跳过去"，只差一两行才做动画）
+    @State private var lastLyricLine = -1
     /// 播放器下面那排：点赞 / 转发 / 分享（微信听一听那一排）
     @State private var likedNow: Bool? = nil
     @State private var likeCountNow: Int? = nil
@@ -1231,7 +1239,12 @@ struct MusicPlayingView: View {
                     }
                     .onChange(of: cur) { i in
                         guard i >= 0 else { return }
-                        withAnimation(.easeInOut(duration: 0.25)) { sp.scrollTo(i, anchor: .center) }
+                        /* 滚得顺一点（用户说"生硬"）：0.55 秒 easeInOut；
+                           拖进度条那种一下跳十几行的，就别动画了，直接到位 */
+                        let jump = lastLyricLine < 0 || abs(i - lastLyricLine) > 3
+                        lastLyricLine = i
+                        if jump { sp.scrollTo(i, anchor: .center) }
+                        else { withAnimation(.easeInOut(duration: 0.55)) { sp.scrollTo(i, anchor: .center) } }
                     }
                 }
             }
