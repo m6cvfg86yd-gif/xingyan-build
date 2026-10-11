@@ -264,6 +264,27 @@ struct MiniAppRuntimeView: View {
             .overlay(Capsule().stroke(Color.white.opacity(0.18), lineWidth: 0.5))
             .padding(.top, 8)
             .padding(.trailing, 10)
+            /* 右下角 🏆：好友排名（和游戏页一样，独立一颗好点） */
+            if localIndex != nil {
+                VStack {
+                    Spacer(minLength: 0)
+                    HStack {
+                        Spacer(minLength: 0)
+                        Button {
+                            box.web?.evaluateJavaScript("window.chrisRank && chrisRank.show()")
+                        } label: {
+                            Text("🏆")
+                                .font(.system(size: 20))
+                                .frame(width: 42, height: 42)
+                                .background(Circle().fill(Color.black.opacity(0.35)))
+                                .overlay(Circle().stroke(Color.white.opacity(0.18), lineWidth: 0.5))
+                        }
+                        .buttonStyle(.plain)
+                        .padding(.trailing, 12)
+                        .padding(.bottom, 18)
+                    }
+                }
+            }
         }
         .background(Color(hex: 0x0B0E17).ignoresSafeArea())
         .statusBarHidden(true)
