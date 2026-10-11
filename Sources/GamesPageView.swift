@@ -43,6 +43,14 @@ func miniAppSharePayload(_ g: MiniApp) -> String {
    ============================================================ */
 
 struct GamesPageView: View {
+    /// 一段字符串的稳定指纹（djb2）：用来给游戏缓存目录命名 ——
+    /// Swift 自带的 hashValue 每次启动都不一样，不能用来当目录名。
+    static func stableKey(_ s: String) -> String {
+        var h: UInt64 = 5381
+        for b in s.utf8 { h = (h &* 33) &+ UInt64(b) }
+        return String(h, radix: 16)
+    }
+
     @EnvironmentObject var app: AppState
     @Environment(\.dismiss) private var dismiss
     @State private var games: [MiniApp] = []
@@ -543,18 +551,29 @@ struct GameWebPage: View {
             loading = false
             return
         }
-        let root = caches.appendingPathComponent("games/\(game.id)", isDirectory: true)
+        /* ⚠ 缓存目录要带上**地址的指纹**：以前只按 game.id 存，而且"文件已存在就不重下"，
+           所以后台把同一款游戏的 url 换掉（比如四国军棋从 09 换成 11-junqi）以后，
+           手机上跑的**还是老那份缓存**（用户看到的"还是你做的那个"就是这个）。
+           现在 url 一变目录就变，一定重新下。 */
+        let rootKey = "games/\(game.id)-\(GamesPageView.stableKey(game.url))"
+        let root = caches.appendingPathComponent(rootKey, isDirectory: true)
         do {
             try fm.createDirectory(at: root, withIntermediateDirectories: true)
             /* 文件清单问服务器（每套游戏目录里那份 files.json），没有才用默认那 5 个 */
             let list = await miniAppFileList(baseDir: remoteDir)
+            /* 清单变了（后台给游戏加了文件）也要重下：把清单的指纹存一份比一下 */
+            let stamp = GamesPageView.stableKey(list.joined(separator: "|"))
+            let stampFile = root.appendingPathComponent(".list")
+            let oldStamp = (try? String(contentsOf: stampFile, encoding: .utf8)) ?? ""
+            let needAll = force || oldStamp != stamp
             for f in list {
                 let dst = root.appendingPathComponent(f)
-                if !force, let sz = try? dst.resourceValues(forKeys: [.fileSizeKey]).fileSize, sz > 0 { continue }
+                if !needAll, let sz = try? dst.resourceValues(forKeys: [.fileSizeKey]).fileSize, sz > 0 { continue }
                 try fm.createDirectory(at: dst.deletingLastPathComponent(), withIntermediateDirectories: true)
                 let data = try await API.shared.assetData(remoteDir.appendingPathComponent(f))
                 try data.write(to: dst, options: .atomic)
             }
+            try? stamp.write(to: stampFile, atomically: true, encoding: .utf8)
             localDir = root
             localIndex = root.appendingPathComponent("index.html")
         } catch {
