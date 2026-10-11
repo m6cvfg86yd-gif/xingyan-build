@@ -24,6 +24,10 @@ import AVFoundation
 struct MiniPlayerBall: View {
     @ObservedObject private var player = MusicPlayer.shared
 
+    /* 挂起的样子（用户要求"按照微信的做"）：
+       0 = 悬浮小球（老样子）  1 = **底部一条小播放条**（微信/苹果音乐那种，默认） */
+    private var barStyle: Bool { UIConfig.num("miniBallStyle", 1) > 0 }
+
     /// 这颗球**只在屏幕上留一颗**：聊天那条全屏路径自己挂了一份，
     /// 外层这份在它弹出来时要先让位（不然两层都在画，过渡动画里会看到球在飘）。
     var hidden: Bool = false
@@ -45,6 +49,57 @@ struct MiniPlayerBall: View {
     private var showing: Bool { on && !hidden && player.current != nil }
 
     var body: some View {
+        if barStyle {
+            miniBar
+        } else {
+            ballBody
+        }
+    }
+
+    /// 微信那种底部小播放条：封面 + 歌名/歌手 + 播放暂停；点一下回大图，往下划收起来
+    private var miniBar: some View {
+        VStack {
+            Spacer(minLength: 0)
+            HStack(spacing: 10) {
+                MusicCover(path: player.current?.cover ?? "", size: 36, radius: 6)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(player.current?.title ?? "").font(pf(14)).foregroundColor(C.label).lineLimit(1)
+                    Text(player.current?.artistText ?? "").font(pf(11.5)).foregroundColor(C.subLabel).lineLimit(1)
+                }
+                Spacer(minLength: 6)
+                Button {
+                    if let t = MusicPlayer.shared.current { MusicPlayer.shared.toggle(t) }
+                } label: {
+                    MusicPlayButton(playing: player.playing,
+                                    loading: !player.loadingId.isEmpty && player.loadingId == (player.current?.id ?? ""),
+                                    size: 32, tint: .white, bg: C.green)
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(.horizontal, 12).padding(.vertical, 8)
+            .background {
+                ZStack {
+                    Rectangle().fill(.bar)
+                    C.cardBg.opacity(0.55)
+                }
+            }
+            .overlay(alignment: .top) { HairLine() }
+            .contentShape(Rectangle())
+            .onTapGesture { openPlayer() }
+            .gesture(DragGesture(minimumDistance: 10).onEnded { v in
+                /* 往下划 = 收起来（和微信一样，不会自己弹回来） */
+                if v.translation.height > 40 { MusicPlayer.shared.stop() }
+            })
+            .padding(.bottom, L.safeBottom + L.tabH)
+        }
+        .ignoresSafeArea()
+        .opacity(showing ? 1 : 0)
+        .allowsHitTesting(showing)
+        .transition(.move(edge: .bottom))
+        .animation(.easeOut(duration: 0.2), value: showing)
+    }
+
+    private var ballBody: some View {
         GeometryReader { geo in
             let w = max(geo.size.width, 1), h = max(geo.size.height, 1)
             let pad = dia / 2 + 6

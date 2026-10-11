@@ -255,6 +255,26 @@ final class MusicPlayer: NSObject, ObservableObject, AVAudioPlayerDelegate {
     private var nowId = ""
     private var nowAt = Date.distantPast
 
+    /* 播放列表（QQ音乐那排「上一首 / 下一首」要有东西可切）：
+       从「听一听」点歌时把那一页的列表塞进来，切歌就在这份里找上下首 */
+    var queue: [MusicTrack] = []
+    func setQueue(_ list: [MusicTrack]) { queue = list }
+    /// 单曲循环（播放页那颗「播放模式」）：开着就一直放这一首
+    var loopOne = false
+
+    /// 下一首（没有列表就什么都不做）
+    func next() {
+        guard let cur = current, let i = queue.firstIndex(where: { $0.id == cur.id }) else { return }
+        let n = queue[(i + 1) % queue.count]
+        play(n)
+    }
+    /// 上一首
+    func prev() {
+        guard let cur = current, let i = queue.firstIndex(where: { $0.id == cur.id }) else { return }
+        let n = queue[(i - 1 + queue.count) % queue.count]
+        play(n)
+    }
+
     /// 报一句"我在听这首"：好友在「听一听 → 朋友推荐」里就能看到
     private func reportNow(_ t: MusicTrack) {
         if nowId == t.id, Date().timeIntervalSince(nowAt) < 60 { return }
@@ -438,6 +458,13 @@ final class MusicPlayer: NSObject, ObservableObject, AVAudioPlayerDelegate {
             self.seconds = 0
             self.stopTimer()
             self.syncNowPlaying()
+            /* 放完一首：单曲循环就再来一遍；有列表就自动放下一首（QQ音乐就是这样） */
+            if self.loopOne, let t = self.current {
+                self.play(t)
+            } else if let t = self.current,
+                      let i = self.queue.firstIndex(where: { $0.id == t.id }), self.queue.count > 1 {
+                self.play(self.queue[(i + 1) % self.queue.count])
+            }
         }
     }
 }
@@ -980,6 +1007,7 @@ struct ListenView: View {
             } else {
                 /* 点一下**只播放/暂停** —— 以前还会顺手弹出播放页，
                    手一抖就"播放 + 弹页"两件事一起发生（用户说的误触）。 */
+                MusicPlayer.shared.setQueue(tracks)    // 记住这一页的列表：播放页能切上下首
                 MusicPlayer.shared.toggle(t)
             }
         } label: {
@@ -1081,6 +1109,10 @@ struct MusicPlayingView: View {
     @State private var likeCountNow: Int? = nil
     @State private var shareTo = false
     @State private var shareSystem = false
+    /// 播放列表（QQ音乐那颗「列表」按钮）
+    @State private var showQueue = false
+    /// 切「单曲循环」时用它触发一次重绘（loopOne 在播放器上，不是 @Published）
+    @State private var loopTick = false
 
     private var t: MusicTrack? { sheet.track ?? player.current }
 
@@ -1137,6 +1169,70 @@ struct MusicPlayingView: View {
         let title = t?.title ?? ""
         let artist = t?.artistText ?? ""
         return artist.isEmpty ? title : title + " — " + artist
+    }
+
+    /// 播放列表：从下往上滑出来的半屏（QQ音乐那颗「列表」）
+    private var queueSheet: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Text(Tr("播放列表") + "（\(player.queue.count)）")
+                    .font(pf(16, .semibold)).foregroundColor(C.label)
+                Spacer(minLength: 0)
+                Button { showQueue = false } label: {
+                    Image(systemName: "xmark").font(.system(size: 15, weight: .semibold))
+                        .foregroundColor(C.subLabel).frame(width: 40, height: 40)
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(.horizontal, 16).padding(.top, 10)
+
+            if player.queue.isEmpty {
+                VStack(spacing: 8) {
+                    Text(Tr("还没有播放列表")).font(pf(14)).foregroundColor(C.label)
+                    Text(Tr("去「听一听」里点一首歌，就能在这里切上一首/下一首"))
+                        .font(pf(12)).foregroundColor(C.subLabel)
+                        .multilineTextAlignment(.center)
+                }
+                .padding(.top, 40)
+                Spacer(minLength: 0)
+            } else {
+                ScrollView {
+                    LazyVStack(spacing: 0) {
+                        ForEach(Array(player.queue.enumerated()), id: \.element.id) { i, t in
+                            if i > 0 { HairLine(inset: 66) }
+                            Button {
+                                MusicPlayer.shared.play(t)
+                            } label: {
+                                HStack(spacing: 10) {
+                                    MusicCover(path: t.cover ?? "", size: 40, radius: 6)
+                                    VStack(alignment: .leading, spacing: 3) {
+                                        Text(t.title).font(pf(15)).foregroundColor(C.label).lineLimit(1)
+                                        Text(t.artistText).font(pf(12)).foregroundColor(C.subLabel).lineLimit(1)
+                                    }
+                                    Spacer(minLength: 6)
+                                    if player.current?.id == t.id {
+                                        Image(systemName: "waveform").font(.system(size: 14)).foregroundColor(C.green)
+                                    }
+                                }
+                                .padding(.horizontal, 14).frame(height: 58)
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                }
+            }
+        }
+        .frame(maxHeight: 380)
+        .background(C.cardBg)
+        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).stroke(C.hairline, lineWidth: 0.5))
+        .shadow(color: .black.opacity(0.25), radius: 24, y: 10)
+        .padding(.horizontal, 14)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+        .padding(.bottom, 12)
+        .transition(.move(edge: .bottom).combined(with: .opacity))
+        .zIndex(70)
     }
 
     private var musicCardJSON: String {
@@ -1349,16 +1445,31 @@ struct MusicPlayingView: View {
                 .padding(.horizontal, 28)
             }
 
-            HStack(spacing: 40) {
-                Button { MusicPlayer.shared.seek(max(0, player.progress - 0.1)) } label: {
-                    Image(systemName: "gobackward").font(.system(size: 24)).foregroundColor(C.label)
+            /* QQ音乐那一排：播放模式 · 上一首 · 大播放钮 · 下一首 · 播放列表 */
+            HStack(spacing: 0) {
+                Button { MusicPlayer.shared.loopOne.toggle(); loopTick.toggle() } label: {
+                    Image(systemName: MusicPlayer.shared.loopOne ? "repeat.1" : "repeat")
+                        .font(.system(size: 19))
+                        .foregroundColor(MusicPlayer.shared.loopOne ? C.green : C.subLabel)
+                        .frame(width: 54, height: 46)
+                        .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
+
+                Button { MusicPlayer.shared.prev() } label: {
+                    Image(systemName: "backward.end.fill")
+                        .font(.system(size: 25))
+                        .foregroundColor(player.queue.count > 1 ? C.label : C.subLabel.opacity(0.5))
+                        .frame(width: 54, height: 46)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+
                 Button {
                     if let t { MusicPlayer.shared.toggle(t) }
                 } label: {
                     ZStack {
-                        Circle().fill(C.green).frame(width: 66, height: 66)
+                        Circle().fill(C.green).frame(width: 64, height: 64)
                         if player.loadingId == (t?.id ?? "") {
                             ProgressView().tint(.white)
                         } else {
@@ -1368,14 +1479,29 @@ struct MusicPlayingView: View {
                                 .offset(x: player.playing ? 0 : 2)
                         }
                     }
+                    .frame(width: 84, height: 46)
                 }
                 .buttonStyle(.plain)
-            Button { MusicPlayer.shared.seek(min(1, player.progress + 0.1)) } label: {
-                    Image(systemName: "goforward").font(.system(size: 24)).foregroundColor(C.label)
+
+                Button { MusicPlayer.shared.next() } label: {
+                    Image(systemName: "forward.end.fill")
+                        .font(.system(size: 25))
+                        .foregroundColor(player.queue.count > 1 ? C.label : C.subLabel.opacity(0.5))
+                        .frame(width: 54, height: 46)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+
+                Button { showQueue = true } label: {
+                    Image(systemName: "list.bullet")
+                        .font(.system(size: 20))
+                        .foregroundColor(C.label)
+                        .frame(width: 54, height: 46)
+                        .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
             }
-            .padding(.top, 18)
+            .padding(.top, 14)
 
             /* 微信听一听那一排：赞（带数字）· 转发 · 分享 */
             HStack(spacing: 0) {
@@ -1421,6 +1547,12 @@ struct MusicPlayingView: View {
         /* 分享：系统分享面板（把歌名歌手分享出去） */
         .sheet(isPresented: $shareSystem) {
             ShareSheet(items: [shareText])
+        }
+        /* 播放列表（QQ音乐那颗「列表」）：点一首就切过去 */
+        .overlay {
+            if showQueue {
+                queueSheet
+            }
         }
         .onAppear {
             /* 只有「换了一首」才从头播；同一首进进出出别打断（以前每次进这页都重播一遍） */
