@@ -244,6 +244,8 @@ struct GameWebPage: View {
     @StateObject private var box = WebBox()
     /// 「分享给好友」那个选人页
     @State private var share = false
+    /// 右上角胶囊里的「···」菜单
+    @State private var capsuleMenu = false
     /* ---- 棋牌大厅（四国军棋这类要凑桌的） ---- */
     /// 是不是"要凑桌"的游戏。
     /// ⚠ 现在**关掉**了：四国军棋用的是项目里那套 11-junqi（自带「好友联机 / 快速匹配」，
@@ -260,73 +262,63 @@ struct GameWebPage: View {
     @State private var pollTask: Task<Void, Never>? = nil
 
     var body: some View {
-        VStack(spacing: 0) {
-            ZStack {
-                Text(game.name)
-                    .font(pf(16.5, .semibold))
-                    .foregroundColor(.white)
-                HStack(spacing: 0) {
-                    Button { dismiss() } label: {
-                        Image(systemName: "xmark")
-                            .font(.system(size: 16, weight: .semibold))
-                            .foregroundColor(.white)
-                            .frame(width: 48, height: L.navH)
+        /* 微信小程序那样：**不占顶栏，整屏都是游戏**，只有右上角那个胶囊 */
+        ZStack(alignment: .topTrailing) {
+            Group {
+                if isRoomGame && !roomStarted {
+                    lobby
+                } else if let localIndex {
+                    GameWebView(index: localIndex, dir: localDir,
+                                rankJs: chrisRankJs(game: game.id, token: API.shared.token, base: API.shared.base),
+                                box: box,
+                                onScore: { g, s in Task { await API.shared.gameScore(g, s) } },
+                                onRank: { g, done in Task { done(await API.shared.gameRankJSONWithAvatars(g)) } },
+                                roomJs: roomJs,
+                                onMove: { mv in Task { await API.shared.gameTableMove(myRoom, mv) } })
+                } else if loading {
+                    VStack(spacing: 10) {
+                        ProgressView().tint(.white)
+                        Text(Tr("正在准备游戏…")).font(pf(13.5)).foregroundColor(.white.opacity(0.7))
                     }
-                    .buttonStyle(.plain)
-                    Spacer(minLength: 0)
-                    /* 好友排名：点了在游戏上盖一层「我 + 我的好友」的榜单 */
-                    Button {
-                        box.web?.evaluateJavaScript("window.chrisRank && chrisRank.show()")
-                    } label: {
-                        Text("🏆").font(.system(size: 18))
-                            .frame(width: 48, height: L.navH)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else {
+                    VStack(spacing: 12) {
+                        Text(errorText.isEmpty ? Tr("游戏打不开") : errorText)
+                            .font(pf(14)).foregroundColor(.white.opacity(0.8))
+                            .multilineTextAlignment(.center).padding(.horizontal, 30)
+                        Button { Task { await prepare(force: true) } } label: {
+                            Text(Tr("重试"))
+                                .font(pf(15, .medium)).foregroundColor(.white)
+                                .padding(.horizontal, 22).frame(height: 40)
+                                .background(Capsule().fill(C.green))
+                        }
+                        .buttonStyle(.plain)
                     }
-                    .buttonStyle(.plain)
-                    /* 分享给好友挪到**列表页**那颗按钮上了 ——
-                       在这里弹选人页会闪退（用户反馈的「分享出去会没法选择哪个人还闪退」），
-                       列表页（普通的 NavigationStack 页面）里弹就没事。 */
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
             }
-            .frame(height: L.navH)
-            .background(Color(hex: 0x111318))
-
-            if isRoomGame && !roomStarted {
-                lobby
-            } else if let localIndex {
-                GameWebView(index: localIndex, dir: localDir,
-                            rankJs: chrisRankJs(game: game.id, token: API.shared.token, base: API.shared.base),
-                            box: box,
-                            onScore: { g, s in Task { await API.shared.gameScore(g, s) } },
-                            onRank: { g, done in Task { done(await API.shared.gameRankJSONWithAvatars(g)) } },
-                            roomJs: roomJs,
-                            onMove: { mv in Task { await API.shared.gameTableMove(myRoom, mv) } })
-            } else if loading {
-                VStack(spacing: 10) {
-                    ProgressView().tint(.white)
-                    Text(Tr("正在准备游戏…")).font(pf(13.5)).foregroundColor(.white.opacity(0.7))
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else {
-                VStack(spacing: 12) {
-                    Text(errorText.isEmpty ? Tr("游戏打不开") : errorText)
-                        .font(pf(14)).foregroundColor(.white.opacity(0.8))
-                        .multilineTextAlignment(.center).padding(.horizontal, 30)
-                    Button { Task { await prepare(force: true) } } label: {
-                        Text(Tr("重试"))
-                            .font(pf(15, .medium)).foregroundColor(.white)
-                            .padding(.horizontal, 22).frame(height: 40)
-                            .background(Capsule().fill(C.green))
-                    }
-                    .buttonStyle(.plain)
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            }
+            /* 右上角那颗胶囊：左边 ···（菜单）右边 ⊙（关掉）—— 微信小程序就是这一颗 */
+            miniCapsule
+                .padding(.top, 8)
+                .padding(.trailing, 10)
         }
         .background(Color(hex: 0x0B0E17).ignoresSafeArea())
         .statusBarHidden(true)
         .task {
             if isRoomGame { await loadTables() }
             await prepare()
+        }
+        .confirmationDialog(game.name, isPresented: $capsuleMenu, titleVisibility: .visible) {
+            Button(Tr("好友排名")) { box.web?.evaluateJavaScript("window.chrisRank && chrisRank.show()") }
+            if isRoomGame && !myRoom.isEmpty {
+                Button(Tr("复制桌号邀请")) {
+                    UIPasteboard.general.string = Tr("四国军棋 桌号 ") + myRoom
+                    lobbyMsg = Tr("桌号已复制")
+                }
+            }
+            Button(Tr("重新进入")) { Task { await prepare(force: true) } }
+            Button(Tr("关闭"), role: .destructive) { dismiss() }
+            Button(Tr("取消"), role: .cancel) { }
         }
         .onDisappear {
             pollTask?.cancel()
@@ -337,6 +329,34 @@ struct GameWebPage: View {
     /* ============================================================
        棋牌大厅：一张张桌子摆着（用户要求"进门要做摆放一张张的桌子"）
        ============================================================ */
+
+    /// 微信小程序右上角那颗胶囊：[ ··· | ⊙ ]
+    private var miniCapsule: some View {
+        HStack(spacing: 0) {
+            Button { capsuleMenu = true } label: {
+                Image(systemName: "ellipsis")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundColor(.white)
+                    .frame(width: 48, height: 32)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            Rectangle()
+                .fill(Color.white.opacity(0.25))
+                .frame(width: 0.5, height: 18)
+            Button { dismiss() } label: {
+                ZStack {
+                    Circle().stroke(Color.white, lineWidth: 1.6).frame(width: 15, height: 15)
+                    Circle().fill(Color.white).frame(width: 5.5, height: 5.5)
+                }
+                .frame(width: 46, height: 32)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+        }
+        .background(Capsule().fill(Color.black.opacity(0.35)))
+        .overlay(Capsule().stroke(Color.white.opacity(0.18), lineWidth: 0.5))
+    }
 
     private var lobby: some View {
         ZStack {

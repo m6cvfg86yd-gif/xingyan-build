@@ -205,37 +205,12 @@ struct MiniAppRuntimeView: View {
     @State private var errorText = ""
     /// 顶栏那颗 🏆 要用它往里打 JS（好友排名面板）
     @StateObject private var box = WebBox()
+    /// 右上角胶囊里的「···」菜单
+    @State private var capsuleMenu = false
 
     var body: some View {
-        VStack(spacing: 0) {
-            /* 顶栏：✕ / 标题（wx.setNavigationBarTitle 会改它）/ ⋯（刷新） */
-            ZStack {
-                Text(title.isEmpty ? app.name : title)
-                    .font(pf(16.5, .semibold)).foregroundColor(.white).lineLimit(1)
-                HStack(spacing: 0) {
-                    Button { dismiss() } label: {
-                        Image(systemName: "xmark").font(.system(size: 16, weight: .semibold))
-                            .foregroundColor(.white).frame(width: 48, height: L.navH)
-                    }
-                    .buttonStyle(.plain)
-                    Spacer(minLength: 0)
-                    /* 好友排名（🏆）：在页面上盖一层「我 + 我的好友」的榜单 */
-                    Button {
-                        box.web?.evaluateJavaScript("window.chrisRank && chrisRank.show()")
-                    } label: {
-                        Text("🏆").font(.system(size: 18)).frame(width: 48, height: L.navH)
-                    }
-                    .buttonStyle(.plain)
-                    Button { Task { await prepare(force: true) } } label: {
-                        Image(systemName: "arrow.clockwise").font(.system(size: 16, weight: .medium))
-                            .foregroundColor(.white).frame(width: 48, height: L.navH)
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
-            .frame(height: L.navH)
-            .background(Color(hex: 0x111318))
-
+        /* 微信小程序那样：**整屏都是小程序**，只有右上角一颗胶囊（··· / ⊙） */
+        ZStack(alignment: .topTrailing) {
             if let localIndex {
                 MiniAppWebView(index: localIndex, dir: localDir,
                                injectBridge: !app.isGame,
@@ -264,10 +239,41 @@ struct MiniAppRuntimeView: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
+            /* 右上角胶囊：[ ··· | ⊙ ] */
+            HStack(spacing: 0) {
+                Button { capsuleMenu = true } label: {
+                    Image(systemName: "ellipsis")
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundColor(.white)
+                        .frame(width: 48, height: 32)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                Rectangle().fill(Color.white.opacity(0.25)).frame(width: 0.5, height: 18)
+                Button { dismiss() } label: {
+                    ZStack {
+                        Circle().stroke(Color.white, lineWidth: 1.6).frame(width: 15, height: 15)
+                        Circle().fill(Color.white).frame(width: 5.5, height: 5.5)
+                    }
+                    .frame(width: 46, height: 32)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+            .background(Capsule().fill(Color.black.opacity(0.35)))
+            .overlay(Capsule().stroke(Color.white.opacity(0.18), lineWidth: 0.5))
+            .padding(.top, 8)
+            .padding(.trailing, 10)
         }
         .background(Color(hex: 0x0B0E17).ignoresSafeArea())
         .statusBarHidden(true)
         .task { await prepare() }
+        .confirmationDialog(title.isEmpty ? app.name : title, isPresented: $capsuleMenu, titleVisibility: .visible) {
+            Button(Tr("好友排名")) { box.web?.evaluateJavaScript("window.chrisRank && chrisRank.show()") }
+            Button(Tr("重新进入")) { Task { await prepare(force: true) } }
+            Button(Tr("关闭"), role: .destructive) { dismiss() }
+            Button(Tr("取消"), role: .cancel) { }
+        }
     }
 
     /// 小程序/小游戏那一套文件（约定：入口同目录下的 index.html + js/*.js）
