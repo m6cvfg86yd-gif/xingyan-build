@@ -1734,6 +1734,10 @@ struct MomentRow: View {
         }
         .padding(.top, 15)
         .padding(.bottom, 12)
+        /* 别人给我这条点赞 → 底下那个爱心也爆一下（用户要求） */
+        .onChange(of: (moment.likes ?? []).count) { n in
+            if n > 0 { burstHeart() }
+        }
         /* 微信那个小横条：贴着「···」左边弹出来，里面有「赞 | 评论」（自己的动态多一个删除） */
         .overlay(alignment: .bottomTrailing) {
             if showActions {
@@ -1820,6 +1824,12 @@ struct MomentRow: View {
     }
 
     /* 微信那个「赞 | 评论」小横条：深色底、白字白图标，贴着「···」左边 */
+    /// 爱心爆开一下（自己点赞 / 别人点赞进来都调它）
+    private func burstHeart() {
+        heartBurst = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { heartBurst = false }
+    }
+
     private var actionBar: some View {
         HStack(spacing: 0) {
             Button {
