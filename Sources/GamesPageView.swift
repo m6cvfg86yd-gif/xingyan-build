@@ -237,8 +237,11 @@ struct GameWebPage: View {
     /// 「分享给好友」那个选人页
     @State private var share = false
     /* ---- 棋牌大厅（四国军棋这类要凑桌的） ---- */
-    /// 是不是"要凑桌"的游戏（四国军棋）
-    private var isRoomGame: Bool { game.id == "g09" }
+    /// 是不是"要凑桌"的游戏。
+    /// ⚠ 现在**关掉**了：四国军棋用的是项目里那套 11-junqi（自带「好友联机 / 快速匹配」，
+    /// 走 wss://aa.x8iu.com/junqi 的房间服务器），不用我们这层原生大厅了。
+    /// 以后要新加"凑桌"游戏，把 id 写进来就能用原生大厅。
+    private var isRoomGame: Bool { false }
     @State private var tables: [GameTable] = []
     @State private var myRoom: String = ""
     @State private var mySeat: Int = 0
