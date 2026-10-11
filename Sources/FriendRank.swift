@@ -92,7 +92,11 @@ func chrisRankJs(game: String, token: String, base: String) -> String {
           body: JSON.stringify({ game: GAME, score: n })
         }).catch(function () { });
       }
-      function hide() { var el = document.getElementById('__chris_rank'); if (el) el.remove(); }
+      function hide() {
+        var el = document.getElementById('__chris_rank');
+        if (el) el.remove();
+        if (window.__crTimer) { clearInterval(window.__crTimer); window.__crTimer = null; }
+      }
       /* 原生桥：网页 → App（真正发请求的是 App 自己，证书/跨域都不是问题） */
       function bridge(msg) {
         try {
@@ -145,6 +149,17 @@ func chrisRankJs(game: String, token: String, base: String) -> String {
               + '<button class="__cr_btn" onclick="chrisRank.hide()">关闭</button></div>';
             el.addEventListener('click', function (e) { if (e.target === el) hide(); });
             document.body.appendChild(el);
+            /* 榜单开着的时候每 5 秒自己刷一次：好友那边刚打完一把，这边数字会跟着跳
+               （用户说"排名是死的不会跳数字"） */
+            if (window.__crTimer) clearInterval(window.__crTimer);
+            window.__crTimer = setInterval(function () {
+              if (!document.getElementById('__chris_rank')) { hide(); return; }
+              if (bridge({ action: 'rank', game: GAME })) return;
+              fetch(abs('/api/games/rank?game=' + encodeURIComponent(GAME)), { headers: { 'Authorization': 'Bearer ' + TOKEN } })
+                .then(function (r) { return r.json(); })
+                .then(function (j2) { paint(j2); })
+                .catch(function () { });
+            }, 5000);
       }
       /* 自动报分：页面自己往 localStorage 存的最高分（*_best）一存就报上去 */
       try {
@@ -152,18 +167,73 @@ func chrisRankJs(game: String, token: String, base: String) -> String {
         localStorage.setItem = function (k, v) {
           orig(k, v);
           try {
-            if (/_best$/i.test(k) || /score|high/i.test(k)) {
+            /* ⚠ 以前只认 *_best / score / high，项目里那些游戏存的是 'best'、'junqi_wins'、
+               'ddz_win' 这种 —— 全都匹配不上，于是**一个分都报不上去**，
+               好友排名自然"永远不动"（用户说的"是死的不会跳数字"）。现在放宽：
+               只要 key 里带 best/score/high/record/max/win/rank 就报。 */
+            if (/(best|score|high|record|max|win|rank|combo)/i.test(k)) {
               var n = parseInt(String(v).replace(/[^0-9]/g, ''), 10);
               if (n > 0) report(n);
             }
           } catch (e) { }
         };
         Object.keys(localStorage).forEach(function (k) {
-          if (/_best$/i.test(k)) {
+          if (/(best|score|high|record|max|win|rank|combo)/i.test(k)) {
             var n = parseInt(String(localStorage.getItem(k)).replace(/[^0-9]/g, ''), 10);
             if (n > 0) report(n);
           }
         });
+      } catch (e) { }
+
+      /* ===== 微信那套「关系链数据」的兼容层 =====
+         项目的游戏（斗地主 / 三国杀 / 四国军棋…）用 wx.setUserCloudStorage 上报分数、
+         wx.getFriendCloudStorage 拉好友榜。这里把它们接到我们服务器上，
+         游戏里那个排行榜就能真的动起来（分数变了会立刻重报）。 */
+      try {
+        var wxo = window.wx || (window.wx = {});
+        var kvs = {};
+        wxo.setUserCloudStorage = function (o) {
+          o = o || {};
+          (o.KVDataList || []).forEach(function (kv) {
+            if (!kv || !kv.key) return;
+            kvs[kv.key] = String(kv.value == null ? '' : kv.value);
+            var n = parseInt(String(kv.value).replace(/[^0-9]/g, ''), 10);
+            if (n > 0) report(n);
+          });
+          if (o.success) try { o.success({}); } catch (e) {}
+        };
+        wxo.getUserCloudStorage = function (o) {
+          o = o || {};
+          var list = (o.keyList || Object.keys(kvs)).map(function (k) { return { key: k, value: kvs[k] || '0' }; });
+          if (o.success) try { o.success({ KVDataList: list }); } catch (e) {}
+        };
+        wxo.getFriendCloudStorage = function (o) {
+          o = o || {};
+          fetch(abs('/api/games/rank?game=' + encodeURIComponent(GAME)), { headers: { 'Authorization': 'Bearer ' + TOKEN } })
+            .then(function (r) { return r.json(); })
+            .then(function (j) {
+              var d = (j && j.data) ? j.data : (j || {});
+              var list = (d.list || []).map(function (x) {
+                return {
+                  avatarUrl: abs(x.avatar || ''),
+                  nickname: x.name || '',
+                  openid: x.id || '',
+                  KVDataList: [{ key: 'score', value: String(x.score || 0) }]
+                };
+              });
+              if (o.success) o.success({ data: list });
+            }).catch(function () { if (o.fail) o.fail({}); });
+        };
+        /* 开放数据域常用的那几个，给个空壳免得游戏报错 */
+        if (!wxo.onMessage) wxo.onMessage = function () {};
+        if (!wxo.postMessage) wxo.postMessage = function () {};
+        if (!wxo.getUserInfo) {
+          wxo.getUserInfo = function (o) {
+            o = o || {};
+            var me = (window.chrisMe || {});
+            if (o.success) o.success({ userInfo: { nickName: me.name || '我', avatarUrl: me.avatar || '' } });
+          };
+        }
       } catch (e) { }
       window.chrisRank = { report: report, show: show, hide: hide, render: paint, game: GAME };
     })();
