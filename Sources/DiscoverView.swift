@@ -526,6 +526,11 @@ struct MomentsView: View {
         .task { await reload() }
         // 别人发朋友圈 / 换了封面，这边立刻跟着变
         .onChange(of: realtime.event) { _ in
+            /* ⚠ 以前这里**任何**实时事件都会重拉一遍资料 + 动态（别人发消息、上线、输入…
+               都会触发），滑朋友圈的时候一直在重绘 —— 用户说的"刷起来不够丝滑"就是这个。
+               只认和朋友圈有关的事件。 */
+            let t = realtime.event.type.lowercased()
+            guard t.contains("moment") || t.contains("like") || t.contains("comment") else { return }
             Task {
                 app.me = try? await API.shared.me()
                 await pollNewMoments()          // 只把新出现的插到最前面，别把翻过的页冲掉
@@ -1978,7 +1983,10 @@ struct MomentImageGrid: View {
                     HStack(spacing: gap) {
                         ForEach(rows[r], id: \.self) { i in
                             Button { onTap(i) } label: {
-                                RemoteImage(path: images[i], icon: "photo")
+                                /* 九宫格一格才 ~120pt，解码上限 720 就够了 ——
+                                   以前按默认 1600 解，一屏九张图就是几十 MB，
+                                   滚动容易掉帧 / 触发内存回收（用户说"不够丝滑"）。 */
+                                RemoteImage(path: images[i], icon: "photo", maxSide: 720)
                                     .frame(width: cell, height: cell)
                                     .clipShape(RoundedRectangle(cornerRadius: radius, style: .continuous))
                                     .contentShape(Rectangle())
@@ -2330,7 +2338,8 @@ struct MomentSingleImage: View {
         /* 用 Button 而不是 onTapGesture：手指在图上滑动（滚动朋友圈）时按钮会自动取消，
            以前用手势，滑动经常被当成「点开这张图」，看起来就是莫名其妙弹出一张图 */
         Button { onTap() } label: {
-            RemoteImage(path: path, icon: "photo")
+            /* 单张大图：内容宽最多 ~400pt @3x ≈ 1200，解到 1080 足够（省内存、滚动更稳） */
+            RemoteImage(path: path, icon: "photo", maxSide: 1080)
                 .frame(width: w, height: h)
                 .clipShape(RoundedRectangle(cornerRadius: radius, style: .continuous))
                 .contentShape(Rectangle())
