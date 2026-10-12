@@ -331,6 +331,7 @@ extension UIColor {
 
 extension Color {
     init(hex: UInt32) { self = Color(UIColor(hex: hex)) }
+
     /// "#6F8A38" 这种字符串颜色
     init(hexString: String, fallback: UInt32 = 0x6F8A38) {
         let s = hexString.replacingOccurrences(of: "#", with: "").trimmingCharacters(in: .whitespaces)
