@@ -210,9 +210,12 @@ extension DiscoverItem {
                          color: "#59C47E", action: "service", group: 1, enabled: true),
             DiscoverItem(id: "m02", label: "收藏", icon: "i.star", svg: I.star,
                          color: "#4489EA", action: "favorites", group: 2, enabled: true),
-            /* 卡包（2026-10-12 照微信加）：优惠券 / 会员卡 / 礼品卡 / 票，点进去看核销码 */
-            DiscoverItem(id: "m07", label: "卡包", icon: "i.wallet", svg: I.wallet,
-                         color: "#E0A33A", action: "cards", group: 2, enabled: true),
+            /* 小店与卡包（2026-10-12 照微信加）。
+               用户要求「去掉卡包」——原来这里有一行单独叫「卡包」的，和后台
+               me-page.json 里的「小店与卡包」重复了；后台那行已经删掉，
+               内置兜底这份也改成同一行，免得断网走兜底时又冒出一个「卡包」。 */
+            DiscoverItem(id: "m07", label: "小店与卡包", icon: "i.wallet", svg: I.wallet,
+                         color: "#E08A22", action: "shop", group: 2, enabled: true),
             DiscoverItem(id: "m03", label: "朋友圈", icon: "i.album", svg: I.album,
                          color: "#7275E9", action: "moments", group: 2, enabled: true),
             DiscoverItem(id: "m04", label: "作品", icon: "i.works", svg: I.works,

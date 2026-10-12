@@ -71,6 +71,9 @@ enum RowIcon {
         "收藏": "star.fill",
         "卡包": "wallet.pass.fill",
         "小店": "bag.fill",
+        /* 「小店与卡包」是后台 me-page.json 里那一行的 label，
+           单独那行「卡包」已按用户要求去掉，这里补上全称的兜底映射 */
+        "小店与卡包": "bag.fill",
         "钱包": "wallet.pass.fill",
         "收付款": "yensign.circle.fill",
         "账单": "list.bullet.rectangle.fill",

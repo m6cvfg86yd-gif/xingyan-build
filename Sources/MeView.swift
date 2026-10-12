@@ -834,16 +834,19 @@ struct SettingsView: View {
                         settingLink(Tr("聊天记录管理"), "", key: "g.history")
                     }
 
-                    Rectangle().fill(C.pageBg).frame(height: 8)
+                    /* 微信那张截图里，「帮助与反馈 / 关于微信」上面是有小节标题
+                       「帮助与关于」的。我们原来这三行直接接在「功能」段后面、
+                       中间只垫了 8pt 空白，看着就像是「功能」段的一部分 —— 分类乱就乱在这。
+                       现在补上小节标题，三段变四段：账号 / 通用 / 功能 / 帮助与关于。 */
+                    settingsGroupHeader(Tr("帮助与关于"))
 
                     GroupCard {
                         settingLink(Tr("帮助与反馈"), "", key: "feedback")
                         HairLine(inset: 16)
-                        settingLink(Tr("关于我们 · 版本更新"), "1.0 · " + AppInfo.build, key: "about")
-                        HairLine(inset: 16)
                         /* 诊断工具（用户要求「在设置里加入全套诊断工具」）：
                            版本 / 机型 / 内存 / 缓存 / 网络 / 上次崩溃 / 聊天页打点，
-                           进这一页就能一键上报给开发者 —— 以后出问题不用再靠猜。 */
+                           进这一页就能一键上报给开发者 —— 以后出问题不用再靠猜。
+                           它属于「帮助」这一类的工具，所以跟着帮助与反馈放同一段。 */
                         Button { showDiag = true } label: {
                             HStack(spacing: 12) {
                                 Text(Tr("诊断工具")).font(pf(17)).foregroundColor(C.label)
@@ -856,6 +859,9 @@ struct SettingsView: View {
                             .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
+                        HairLine(inset: 16)
+                        /* 「关于我们」压在这一段的最后一行 —— 微信也是把「关于微信」放最下面 */
+                        settingLink(Tr("关于我们 · 版本更新"), "1.0 · " + AppInfo.build, key: "about")
                     }
 
                     /* 切换账号（微信就在「退出登录」上面这一行） */
@@ -1193,14 +1199,17 @@ struct SettingsView: View {
         .buttonStyle(MenuPressStyle())
     }
 
-    /// 照微信：每一段上面那一行人小的灰色小标题（账号 / 通用 / 功能）。
+    /// 照微信：每一段上面那一行人小的灰色小标题（账号 / 通用 / 功能 / 帮助与关于）。
     /// 灰色比页面底色深一点、比正文浅（截图里量出来是 #666~#767676 这一档）。
+    /// 左内边距必须是 16 —— 微信那张截图里量出来，小标题和下面行标题的
+    /// 左边缘是**对齐**的（都在 17pt 一档）；我们原来是 22，比行标题多缩进 6pt，
+    /// 叠一起能明显看出来错位，所以改成和 settingLink 一样的 16。
     private func settingsGroupHeader(_ text: String) -> some View {
         Text(text)
             .font(pf(13.5))
             .foregroundColor(Color.dyn(0x767676, 0x8F8F8F))
             .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, 22)
+            .padding(.horizontal, 16)
             .padding(.top, 18)
             .padding(.bottom, 7)
     }
