@@ -1302,6 +1302,11 @@ struct ChatDetailView: View {
             if ev.type == "pat", ev.chatId == chat.id {
                 UIImpactFeedbackGenerator(style: ev.patTo == myId ? .medium : .light).impactOccurred()
             }
+            /* 阅后即焚：服务端把「看过的瓶子」销毁了 → 这一页立刻把那几条从列表里去掉
+               （2026-10-12 用户要求「加入阅后即焚的开关」；这里只加代码，不动任何视图层） */
+            if ev.type == "burn", ev.chatId == chat.id, !ev.burnIds.isEmpty {
+                burnAway(ev.burnIds)
+            }
             // 一下子来很多条时合并成一次刷新，别把手机刷爆
             pushTask?.cancel()
             pushTask = Task {
@@ -3258,15 +3263,23 @@ struct ChatDetailView: View {
     private func load(initial: Bool) async {
         /* 登录后同步下来的最近记录：先铺在界面上（微信也是先出内容再刷），
            然后再向服务器要最新的 —— 这样点开会话是"立刻有内容"，不是白屏等网络。 */
+        /* ⚠ 2026-10-13 「冷启动点聊天就闪退」的真凶在这儿：
+           那两个本地缓存（登录预取的 / 本机留底的）可能有好几百条（线上有一条 491 条的会话），
+           **一次性全铺上去 = 一进会话就要渲染几百行**。刚启动那一两秒内存还在爬（日志里
+           只有 39~44MB），这么大的首帧直接就被系统杀掉（没有崩溃栈、也没有 Jetson 记录）。
+           现在首帧只铺**最后 60 条**（往上滑照样能翻到更早的：hasOlder 还是 true，
+           服务端翻页那条路没变），首帧要画的行数从几百降到几十，冷启动也稳。
+           原来 B218 那版之所以看着正常，是因为当时用户是在用了一会儿（内存 90MB+）之后才点的。 */
+        let seedMax = 60
         if initial, messages.isEmpty, let cached = app.prefetched[chat.id], !cached.isEmpty {
-            messages = cached
+            messages = Array(cached.suffix(seedMax))
             hasOlder = true
         } else if initial, messages.isEmpty {
             /* 登录时没预取到（或者断网进会话）：用**本机留底的聊天记录**先铺上 ——
                用户要求「聊天信息也全部本地保存」，点开会话永远先有内容。 */
             let local = LocalStore.cachedChat(chat.id)
             if !local.isEmpty {
-                messages = local
+                messages = Array(local.suffix(seedMax))
                 hasOlder = true
             }
         }
@@ -3316,6 +3329,27 @@ struct ChatDetailView: View {
         rebuildIndex()          // 消息列表变了：把「id → 下标」的表重建一次
         loading = false
         autoOpenShopCard()
+        /* 阅后即焚（2026-10-12 用户要求）：这个会话开着就顺手扫一遍 ——
+           我这边看过的那些，服务端到点会销毁，回来的 id 直接从列表里去掉。
+           ⚠ 只加代码、不动视图层（聊天页那棵树的规矩）。 */
+        if chat.burn == true {
+            let gone = await API.shared.burnSweep(chatId: chat.id)
+            if !gone.isEmpty { burnAway(gone) }
+        }
+    }
+
+    /// 「焚毁」这一下（2026-10-12 用户：「开启阅后即焚 1 分钟后会有焚烧效果就没了」）：
+    /// 服务端到点销毁了那几条 → 这里**带动画**把它们收走：先轻轻震一下、弹一句提示，
+    /// 再用 0.5 秒的淡出 + 收缩把这几行去掉（SwiftUI 自己就把「行消失」画成淡出收缩）。
+    /// ⚠ 只改动画/数据，**不往聊天页加任何视图层** —— 那台机器多一层就闪退。
+    private func burnAway(_ ids: [String]) {
+        guard !ids.isEmpty else { return }
+        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+        app.show(Tr("🔥 消息已焚毁"))
+        withAnimation(.easeOut(duration: 0.5)) {
+            messages.removeAll { ids.contains($0.id) }
+        }
+        rebuildIndex()
     }
 
     /* 往上看更早的记录：服务端支持 before 翻页（一次 40 条），加载完把更早的接在前面 */

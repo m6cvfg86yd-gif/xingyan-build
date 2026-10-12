@@ -227,6 +227,25 @@ final class AppState: ObservableObject {
     /// 走最外层整页打开，不依赖「会话页的导航栈还在不在」——扫一扫从任何页面都能开，
     /// 以前那种「往会话页栈里 push」的写法，人不在会话页时通知就丢了（所以看着像不跳转）。
     @Published var openChat: Chat?
+    /// 点了推送通知要让会话页自己把某个会话推进去（2026-10-12）：
+    /// ⚠ 以前是直接 `openChat = c`（最外层 fullScreenCover 整页压上去）——
+    /// 用户反复报「点推送通知就闪退」，因为点通知进来时 App 可能还在冷启动，
+    /// 整页视图压上去会和启动那几帧打架被系统杀掉。
+    /// 现在改成把会话 id 放这儿，**由会话列表按它自己的导航** push（和手点一个会话一模一样）。
+    @Published var pendingPushChatId: String?
+    /// 置 true 时 MainTab 把底栏切回「会话」那一页（配合 openChatViaList 用）
+    @Published var wantChatsTab = false
+
+    /// **统一的「打开某个会话」入口**（2026-10-12）：
+    /// 以前各处都是 `app.openChat = c` —— 最外层 fullScreenCover 把整页聊天页压上去。
+    /// 那条路在「页面正在切换」的瞬间会被系统杀掉：点推送（用户报过）、**刚建完群**（用户报
+    /// 「创建了群也会闪退」）、扫码进群、搜索结果点进去……都是同一类。
+    /// 现在统一改成：切回会话 tab + 把会话 id 交给会话列表，由它用自己那条导航 push
+    /// —— 和用户手点一个会话**完全同一条路**，那条路一直是稳的。
+    func openChatViaList(_ c: Chat) {
+        wantChatsTab = true
+        pendingPushChatId = c.id
+    }
     /// 从聊天里点好友分享来的小游戏卡片 → 全屏打开那个小游戏。
     /// ⚠ 挂在**最外层**（MainTab）来弹，不放在聊天页里 —— 在聊天页里挂
     /// `fullScreenCover(item:)` 会让聊天页一打开就闪退（2026-10-11 踩过）。
@@ -1876,6 +1895,8 @@ struct AccountLoginSheet: View {
     @State private var error: String?
     @State private var showReg = false
     @State private var showUnban = false
+    /// 账号被冻结后的「解冻账号」弹层（AccountSafety.swift）
+    @State private var showUnfreeze = false
     @State private var showReset = false
     /// 登录滑动验证换来的一次性通行证 + 换题用的 key
     @State private var sliderTicket = ""
@@ -1963,6 +1984,24 @@ struct AccountLoginSheet: View {
                         }
                         .padding(.top, 12)
                     }
+                    /* 账号被冻结（本人冻的 / 管理冻的）：登录页直接给「解冻账号」入口
+                       —— 和微信一样，冻了以后在登录页点一下就能自己解开 */
+                    if isFrozen {
+                        Button {
+                            showUnfreeze = true
+                        } label: {
+                            HStack(spacing: 6) {
+                                Image(systemName: "snowflake")
+                                Text(Tr("账号被冻结了？点这里自助解冻"))
+                            }
+                            .font(.system(size: 14, weight: .medium))
+                            .foregroundColor(.white)
+                            .frame(maxWidth: .infinity, minHeight: 46)
+                            .background(LoginTheme.accent2)
+                            .cornerRadius(14)
+                        }
+                        .padding(.top, 12)
+                    }
                     Button { submit() } label: {
                         HStack(spacing: 8) {
                             if busy { ProgressView().progressViewStyle(.circular).tint(.white) }
@@ -2006,8 +2045,12 @@ struct AccountLoginSheet: View {
                 })
             }
             .sheet(isPresented: $showReset) { ResetPasswordSheet() }
-            .sheet(isPresented: $showUnban) {
+        .sheet(isPresented: $showUnban) {
                 UnbanSheet(preUser: username, prePass: password)
+            }
+            /* 账号被冻结：登录页自助解冻（账号 + 密码，可补身份证号）—— AccountSafety.swift */
+            .sheet(isPresented: $showUnfreeze) {
+                UnfreezeSheet().environmentObject(app)
             }
         }
     }
@@ -2015,6 +2058,10 @@ struct AccountLoginSheet: View {
     private var isBanned: Bool {
         let e = error ?? ""
         return e.contains("禁用") || e.contains("封禁")
+    }
+    /// 服务器回的「该账号已被冻结…」→ 登录页把「解冻账号」入口露出来
+    private var isFrozen: Bool {
+        (error ?? "").contains("冻结")
     }
 
     private func row<C: View>(@ViewBuilder _ c: () -> C) -> some View {
