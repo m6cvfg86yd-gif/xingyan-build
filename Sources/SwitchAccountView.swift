@@ -56,14 +56,16 @@ struct SwitchAccountView: View {
                         .padding(.top, 12)
                         .padding(.bottom, 10)
 
-                    /* 一整块分组列表：账号们 + 最后一行「添加账号」，中间全是细线 */
-                    GroupCard(bg: C.cardBg) {
+                    /* 用户指出微信这里是**一条条独立的卡片**（不是一个整块 + 细线）：
+                       每个账号一张圆角卡（12）、卡与卡之间留 10pt 缝、最下面「添加账号」也是一张卡。 */
+                    VStack(spacing: 10) {
                         ForEach(app.accounts) { acct in
                             accountRow(acct)
-                            HairLine(inset: 84)
                         }
                         addRow
                     }
+                    .padding(.horizontal, 12)
+                    .padding(.top, 10)
 
                     if !note.isEmpty {
                         Text(note)
@@ -130,6 +132,9 @@ struct SwitchAccountView: View {
             }
             .padding(.horizontal, 16)
             .frame(height: 84)
+            /* 一张卡：圆角 12、实色，和下面「添加账号」同一种 */
+            .background(C.cardBg)
+            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -154,6 +159,8 @@ struct SwitchAccountView: View {
             }
             .padding(.horizontal, 16)
             .frame(height: 84)
+            .background(C.cardBg)
+            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
