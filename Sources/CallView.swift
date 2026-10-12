@@ -201,7 +201,7 @@ struct CallView: View {
         Button {
             msgBanner = nil
             call.minimize()                     // 通话缩成小窗，继续通
-            if let c = app.chats.first(where: { $0.id == b.chatId }) { app.openChat = c }
+            if let c = app.chats.first(where: { $0.id == b.chatId }) { app.openChatViaList(c) }
         } label: {
             HStack(spacing: 7) {
                 Image(systemName: "message.fill").font(.system(size: 12, weight: .semibold))

@@ -11,6 +11,8 @@ struct PushEvent: Equatable {
     var user: User? = nil
     /// 朋友圈有没有新的（服务器在 ready 里给；有就给「发现」挂红点）
     var momentUnread: Int? = nil
+    /// 阅后即焚：服务端刚销毁了这几条消息（客户端把它们从列表里去掉）
+    var burnIds: [String] = []
     /// 待处理的好友申请数量（服务器在 ready 里给；手机在后台没收到推送时靠它补上通讯录红点）
     var friendRequests: Int? = nil
     /// 转账推过来的东西（谁发的、什么状态、多少钱）：对方收款时付款方这边要变气泡 + 弹提示
@@ -309,6 +311,8 @@ final class Realtime: ObservableObject {
         /* 拍一拍：谁拍的、拍的谁（服务器单独推的一条轻量事件，给接收方一个"被拍了"的反馈） */
         ev.patFrom = (obj["userId"] as? String) ?? ""
         ev.patTo = (obj["targetId"] as? String) ?? ""
+        /* 阅后即焚：服务端销毁了哪几条（ids 是服务端广播时带的字段） */
+        if let ids = obj["ids"] as? [String] { ev.burnIds = ids }
         /* 设备确认登录：有人在新设备上点「微信登录」，服务器给已登录的这几台推过来。
            立刻弹一条本地通知（前台也弹），点通知就进「登录确认」卡片。 */
         ev.pairCode = (obj["pairCode"] as? String) ?? ""

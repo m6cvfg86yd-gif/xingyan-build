@@ -155,7 +155,7 @@ struct SearchAllView: View {
                 ContactCardView(user: u,
                                 onOpenChat: { chat in
                                     pickedUser = nil
-                                    app.openChat = chat
+                                    app.openChatViaList(chat)
                                 },
                                 onOpenMoments: { _ in
                                     pickedUser = nil
@@ -289,7 +289,7 @@ struct SearchAllView: View {
     /// 打开一个会话（搜到的是 chatId，本地 chats 里查一下再打开）
     private func openChat(_ id: String) {
         if let c = app.chats.first(where: { $0.id == id }) {
-            app.openChat = c
+            app.openChatViaList(c)
         } else {
             app.show(Tr("这个会话不在你的列表里"))
         }
