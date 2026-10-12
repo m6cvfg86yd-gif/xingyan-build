@@ -211,6 +211,12 @@ struct ChatSettingsView: View {
 struct CallSettingsView: View {
     @ObservedObject private var lang = LangStore.shared
     @Environment(\.dismiss) private var dismiss
+    /* 视频清晰度 / 本地镜像 / 美颜（对齐微信这三样）：存本机，改完正在进行的通话立刻生效 */
+    @State private var quality = CallPrefs.quality
+    @State private var mirror = CallPrefs.mirror
+    @State private var beauty = CallPrefs.beauty
+    @State private var pickQuality = false
+    @State private var pickBeauty = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -222,11 +228,34 @@ struct CallSettingsView: View {
                         HairLine(inset: 16)
                         SettingRowLink(title: Tr("语音变声"), key: "g.voice")
                         HairLine(inset: 16)
+                        /* 视频清晰度：标清 360p / 高清 720p / 超清 1080p（微信也是这三档） */
+                        Button { pickQuality = true } label: {
+                            SettingRowLabel(title: Tr("视频清晰度"), value: Tr(CallPrefs.qualityName))
+                        }
+                        .buttonStyle(MenuPressStyle())
+                        HairLine(inset: 16)
+                        /* 本地画面镜像（前置照镜子那样，默认开） */
+                        HStack(spacing: 12) {
+                            Text(Tr("本地画面镜像")).font(pf(17)).foregroundColor(C.label)
+                            Spacer(minLength: 0)
+                            Toggle("", isOn: Binding(
+                                get: { mirror },
+                                set: { v in mirror = v; CallPrefs.mirror = v }))
+                                .labelsHidden().tint(C.green)
+                        }
+                        .padding(.horizontal, 16).frame(height: 56)
+                        HairLine(inset: 16)
+                        /* 视频美颜：关 / 低 / 中 / 高 */
+                        Button { pickBeauty = true } label: {
+                            SettingRowLabel(title: Tr("视频美颜"), value: Tr(CallPrefs.beautyName))
+                        }
+                        .buttonStyle(MenuPressStyle())
+                        HairLine(inset: 16)
                         SettingRowLink(title: Tr("登录设备管理"), key: "devices")
                     }
                     .padding(.top, 8)
 
-                    Text(Tr("语音通话默认走听筒，通话中点一下扬声器就外放；视频通话默认外放。"))
+                    Text(Tr("语音通话默认走听筒，通话中点一下扬声器就外放；视频通话默认外放。清晰度、镜像、美颜改完，正在进行的通话会立刻生效。"))
                         .font(pf(12))
                         .foregroundColor(C.subLabel)
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -241,5 +270,20 @@ struct CallSettingsView: View {
         .toolbar(.hidden, for: .navigationBar)
         .swipeBack { dismiss() }
         .hidesTabBar()
+        .confirmationDialog(Tr("视频清晰度"), isPresented: $pickQuality, titleVisibility: .visible) {
+            Button(Tr("标清（省流量）")) { quality = 0; CallPrefs.quality = 0 }
+            Button(Tr("高清（推荐）")) { quality = 1; CallPrefs.quality = 1 }
+            Button(Tr("超清（最清晰）")) { quality = 2; CallPrefs.quality = 2 }
+            Button(Tr("取消"), role: .cancel) { }
+        } message: {
+            Text(Tr("清晰度越高越吃流量：标清约 0.6Mbps、高清约 1.5Mbps、超清约 2.6Mbps。"))
+        }
+        .confirmationDialog(Tr("视频美颜"), isPresented: $pickBeauty, titleVisibility: .visible) {
+            Button(Tr("关")) { beauty = 0; CallPrefs.beauty = 0 }
+            Button(Tr("低")) { beauty = 1; CallPrefs.beauty = 1 }
+            Button(Tr("中")) { beauty = 2; CallPrefs.beauty = 2 }
+            Button(Tr("高")) { beauty = 3; CallPrefs.beauty = 3 }
+            Button(Tr("取消"), role: .cancel) { }
+        }
     }
 }

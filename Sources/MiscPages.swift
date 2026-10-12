@@ -17,6 +17,11 @@ struct FavoritesView: View {
     @State private var showCompose = false
     /// 点开的那条文字收藏（详情：全文 / 复制 / 编辑 / 删除）
     @State private var noteDetail: [String: Any]? = nil
+    /// 「＋」菜单（微信那种：写笔记 / 拍照 / 从相册选择）
+    @State private var showAddMenu = false
+    @State private var showTakePhoto = false
+    @State private var showPickPhoto = false
+    @State private var savingImage = false
 
     private var shown: [[String: Any]] {
         let key = q.trimmingCharacters(in: .whitespaces)
@@ -80,12 +85,16 @@ struct FavoritesView: View {
         VStack(spacing: 0) {
             NavBar(title: Tr("收藏"), back: { dismiss() }) {
                 /* 和微信收藏一样：右上角一颗「＋」，点开就能写一条笔记 */
-                Button { showCompose = true } label: {
-                    Image(systemName: "plus")
+                Button { showAddMenu = true } label: {
+                    if savingImage {
+                        ProgressView().scaleEffect(0.75)
+                    } else {
+                        Image(systemName: "plus")
                         .font(.system(size: 17, weight: .medium))
                         .foregroundColor(C.label)
                         .frame(width: 40, height: 32)
                         .contentShape(Rectangle())
+                    }
                 }
                 .buttonStyle(.plain)
             }
@@ -118,11 +127,18 @@ struct FavoritesView: View {
                                在那儿能复制 / 编辑 / 删除 */
                             Button { noteDetail = item } label: {
                                 VStack(alignment: .leading, spacing: 4) {
-                                    if let t = item["title"] as? String, !t.isEmpty {
-                                        Text(t).font(pf(15.5, .medium)).foregroundColor(C.label)
-                                            .lineLimit(1)
+                                    HStack(spacing: 6) {
+                                        if (item["pinned"] as? Bool) == true {
+                                            Image(systemName: "pin.fill")
+                                                .font(.system(size: 11)).foregroundColor(C.green)
+                                        }
+                                        if let t = item["title"] as? String, !t.isEmpty {
+                                            Text(t).font(pf(15.5, .medium)).foregroundColor(C.label)
+                                                .lineLimit(1)
+                                        }
+                                        Spacer(minLength: 0)
                                     }
-                                    Text(content)
+                                    Text(previewText(content))
                                         .font(pf(15))
                                         .foregroundColor(C.label)
                                         .lineLimit(3)
@@ -140,6 +156,29 @@ struct FavoritesView: View {
                     .listRowInsets(EdgeInsets())
                     .listRowSeparator(.hidden)
                     .listRowBackground(C.cardBg)
+                    /* 长按（微信收藏是长按出菜单）：置顶 / 删除 */
+                    .contextMenu {
+                        if let i = item["id"] as? String {
+                            Button {
+                                let on = ((item["pinned"] as? Bool) != true)
+                                Task {
+                                    _ = await API.shared.updateFavorite(id: i, pinned: on)
+                                    await load()
+                                }
+                            } label: {
+                                Label((item["pinned"] as? Bool) == true ? Tr("取消置顶") : Tr("置顶"),
+                                      systemImage: (item["pinned"] as? Bool) == true ? "pin.slash" : "pin")
+                            }
+                            Button(role: .destructive) {
+                                Task {
+                                    await API.shared.deleteFavorite(i)
+                                    await load()
+                                }
+                            } label: {
+                                Label(Tr("删除"), systemImage: "trash")
+                            }
+                        }
+                    }
                 }
             }
             .listStyle(.plain)
@@ -159,12 +198,26 @@ struct FavoritesView: View {
             FavoriteNoteComposeSheet { Task { await load() } }
                 .environmentObject(app)
         }
+        /* 「＋」菜单：写笔记 / 拍照 / 从相册选择（微信收藏就是这三项） */
+        .confirmationDialog(Tr("添加收藏"), isPresented: $showAddMenu, titleVisibility: .hidden) {
+            Button(Tr("写笔记")) { showCompose = true }
+            Button(Tr("拍照")) { showTakePhoto = true }
+            Button(Tr("从相册选择")) { showPickPhoto = true }
+            Button(Tr("取消"), role: .cancel) { }
+        }
+        .fullScreenCover(isPresented: $showTakePhoto) {
+            CameraPicker { img in saveImage(img) }
+        }
+        .sheet(isPresented: $showPickPhoto) {
+            PhotoPicker { img in saveImage(img) }
+        }
         /* 点开一条文字收藏 = 笔记详情（全文 / 复制 / 编辑 / 删除） */
         .sheet(isPresented: Binding(get: { noteDetail != nil },
                                     set: { if !$0 { noteDetail = nil } })) {
             if let it = noteDetail {
                 FavoriteNoteDetailSheet(id: (it["id"] as? String) ?? "",
-                                        content: (it["content"] as? String) ?? "") {
+                                        content: (it["content"] as? String) ?? "",
+                                        pinned: (it["pinned"] as? Bool) == true) {
                     Task { await load() }
                 }
                 .environmentObject(app)
@@ -190,6 +243,33 @@ struct FavoritesView: View {
     private func load() async {
         items = await API.shared.favorites()
         loading = false
+    }
+
+    /// 拍照 / 相册选来的图：传上去，然后存成一条「图片」收藏（微信收藏也能收图片）
+    private func saveImage(_ img: UIImage) {
+        savingImage = true
+        Task {
+            do {
+                let url = try await API.shared.upload(image: img)
+                let ok = await API.shared.addFavorite(kind: "image", content: url,
+                                                      title: Tr("图片"), from: "")
+                await MainActor.run { app.show(ok ? Tr("已收藏这张图片") : Tr("收藏失败")) }
+                if ok { await load() }
+            } catch {
+                await MainActor.run { app.show((error as? APIError)?.errorDescription ?? "上传失败") }
+            }
+            savingImage = false
+        }
+    }
+
+    /// 列表那条预览：笔记里插的 [图] 换成「［图片］」字样（不然一串路径很难看）
+    private func previewText(_ s: String) -> String {
+        var out: [String] = []
+        for line in s.components(separatedBy: "\n") {
+            if line.hasPrefix("[图]") { out.append(Tr("［图片］")); continue }
+            out.append(line)
+        }
+        return out.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }
 

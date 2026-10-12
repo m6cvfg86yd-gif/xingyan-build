@@ -1497,6 +1497,14 @@ struct LoginView: View {
                     }
                     .buttonStyle(.plain)
                     .padding(.top, 18)
+                    /* 更多登录方式：照微信做成从底下推上来的白卡（每项一个彩色圆图标） */
+                    .sheet(isPresented: $showMoreWays) {
+                        LoginWaysSheet(
+                            onPhone: { if requireAgree() { sheet = .phone } },
+                            onPassword: { if requireAgree() { sheet = .password } },
+                            onFace: { if requireAgree() { faceLogin() } },
+                            onVoice: { if requireAgree() { voiceLogin() } })
+                    }
                     .confirmationDialog(Tr("更多登录方式"), isPresented: $showMoreWays, titleVisibility: .visible) {
                         Button(Tr("手机号登录")) {
                             guard requireAgree() else { return }

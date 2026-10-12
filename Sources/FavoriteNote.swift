@@ -27,6 +27,9 @@ struct FavoriteNoteComposeSheet: View {
     @State private var busy = false
     @State private var msg = ""
     @FocusState private var focused: Bool
+    /// 笔记里插图片（微信笔记也能插）：走相册选一张，传上去，正文里插一行 [图]路径
+    @State private var showPic = false
+    @State private var picBusy = false
 
     init(editingId: String = "", initial: String = "", onSaved: @escaping () -> Void) {
         self.editingId = editingId
@@ -71,6 +74,38 @@ struct FavoriteNoteComposeSheet: View {
             .padding(.horizontal, 12)
             .padding(.top, 12)
 
+            /* 笔记的小工具条（照微信笔记底部那排）：插图片 / 插分割线 */
+            HStack(spacing: 10) {
+                Button { showPic = true } label: {
+                    HStack(spacing: 5) {
+                        Image(systemName: "photo").font(.system(size: 14))
+                        Text(Tr("插入图片")).font(pf(13.5))
+                    }
+                    .foregroundColor(C.green)
+                    .padding(.horizontal, 12).frame(height: 32)
+                    .background(Capsule().fill(C.cardBg))
+                }
+                .buttonStyle(.plain)
+                .disabled(picBusy)
+
+                Button {
+                    text += "\n————————\n"
+                } label: {
+                    HStack(spacing: 5) {
+                        Image(systemName: "minus").font(.system(size: 14))
+                        Text(Tr("分割线")).font(pf(13.5))
+                    }
+                    .foregroundColor(C.green)
+                    .padding(.horizontal, 12).frame(height: 32)
+                    .background(Capsule().fill(C.cardBg))
+                }
+                .buttonStyle(.plain)
+
+                if picBusy { ProgressView().scaleEffect(0.7) }
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 12).padding(.top, 8)
+
             HStack(spacing: 10) {
                 if !msg.isEmpty {
                     Text(msg).font(pf(12.5)).foregroundColor(C.subLabel)
@@ -87,6 +122,25 @@ struct FavoriteNoteComposeSheet: View {
         .toolbar(.hidden, for: .navigationBar)
         .swipeBack { dismiss() }
         .task { DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { focused = true } }
+        .sheet(isPresented: $showPic) {
+            PhotoPicker { img in insertImage(img) }
+        }
+    }
+
+    /// 选了一张图：传上去，然后在正文末尾插一行 [图]路径（详情页会把这种行画成图）
+    private func insertImage(_ img: UIImage) {
+        picBusy = true
+        Task {
+            do {
+                let url = try await API.shared.upload(image: img)
+                if !text.isEmpty && !text.hasSuffix("\n") { text += "\n" }
+                text += "[图]" + url + "\n"
+                msg = Tr("图片已插入")
+            } catch {
+                msg = (error as? APIError)?.errorDescription ?? "图片上传失败"
+            }
+            picBusy = false
+        }
     }
 
     private func save() async {
@@ -97,9 +151,14 @@ struct FavoriteNoteComposeSheet: View {
         /* 标题取第一行（前 24 个字）——列表里一眼能看出这条是什么 */
         let firstLine = body.split(separator: "\n").first.map(String.init) ?? body
         let title = String(firstLine.prefix(24))
-        /* 编辑 = 先删掉旧的那条，再加一条新的 */
-        if !editingId.isEmpty { await API.shared.deleteFavorite(editingId) }
-        let ok = await API.shared.addFavorite(kind: "text", content: body, title: title, from: "")
+        /* 编辑走 PATCH（id 和位置都不变）；新建才 POST。
+           以前是「删旧加新」，改完会跳到最前面 —— 微信不会。 */
+        let ok: Bool
+        if editingId.isEmpty {
+            ok = await API.shared.addFavorite(kind: "text", content: body, title: title, from: "")
+        } else {
+            ok = await API.shared.updateFavorite(id: editingId, content: body, title: title)
+        }
         busy = false
         if ok {
             DiagLog.shared.note("收藏：保存了一条笔记（" + String(body.count) + " 字）")
@@ -118,11 +177,20 @@ struct FavoriteNoteDetailSheet: View {
 
     let id: String
     let content: String
+    /// 这条是不是置顶的（微信收藏能置顶）
+    var pinned: Bool = false
     /// 改了 / 删了以后收藏页要重拉
     let onChanged: () -> Void
 
     @State private var editing = false
     @State private var copied = false
+    @State private var isPinned = false
+    @State private var showForward = false
+
+    /// 笔记正文按行拆（[图]路径 那几行画成图片，其它当文字）
+    private var lines: [String] {
+        content.components(separatedBy: "\n")
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -140,19 +208,62 @@ struct FavoriteNoteDetailSheet: View {
             }
 
             ScrollView(showsIndicators: false) {
-                Text(content.isEmpty ? Tr("（空）") : content)
-                    .font(pf(16))
-                    .foregroundColor(C.label)
-                    .textSelection(.enabled)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(14)
-                    .background(C.cardBg)
-                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                    .padding(.horizontal, 12)
-                    .padding(.top, 12)
+                /* 正文：文字照旧，插进去的图片按原比例画出来（微信笔记就是这样） */
+                VStack(alignment: .leading, spacing: 8) {
+                    if content.isEmpty {
+                        Text(Tr("（空）")).font(pf(16)).foregroundColor(C.subLabel)
+                    } else {
+                        ForEach(Array(lines.enumerated()), id: \.offset) { _, line in
+                            if line.hasPrefix("[图]") {
+                                let path = String(line.dropFirst(3))
+                                RemoteImage(path: path)
+                                    .scaledToFit()
+                                    .frame(maxWidth: .infinity)
+                                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                            } else if !line.isEmpty {
+                                Text(line)
+                                    .font(pf(16))
+                                    .foregroundColor(C.label)
+                                    .textSelection(.enabled)
+                                    .fixedSize(horizontal: false, vertical: true)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                        }
+                    }
+                }
+                .padding(14)
+                .background(C.cardBg)
+                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .padding(.horizontal, 12)
+                .padding(.top, 12)
 
                 VStack(spacing: 0) {
+                    /* 置顶（微信收藏也是这一项） */
+                    Button { Task { await pin(!isPinned) } } label: {
+                        HStack(spacing: 10) {
+                            Image(systemName: isPinned ? "pin.slash" : "pin").font(.system(size: 15))
+                            Text(isPinned ? Tr("取消置顶") : Tr("置顶")).font(pf(16))
+                            Spacer(minLength: 0)
+                        }
+                        .foregroundColor(C.label)
+                        .padding(.horizontal, 16).frame(height: 52)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    HairLine(inset: 16)
+                    /* 转发给朋友（微信收藏点进去第一项就是这个） */
+                    Button { showForward = true } label: {
+                        HStack(spacing: 10) {
+                            Image(systemName: "arrowshape.turn.up.right").font(.system(size: 15))
+                            Text(Tr("转发给朋友")).font(pf(16))
+                            Spacer(minLength: 0)
+                        }
+                        .foregroundColor(C.label)
+                        .padding(.horizontal, 16).frame(height: 52)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    HairLine(inset: 16)
                     Button { editing = true } label: {
                         HStack(spacing: 10) {
                             Image(systemName: "square.and.pencil").font(.system(size: 15))
@@ -188,12 +299,26 @@ struct FavoriteNoteDetailSheet: View {
         .background(C.pageBg.ignoresSafeArea())
         .toolbar(.hidden, for: .navigationBar)
         .swipeBack { dismiss() }
+        .task { isPinned = pinned }
+        /* 转发给朋友：走聊天那套「先选人」（ForwardPickerView） */
+        .sheet(isPresented: $showForward) {
+            ForwardPickerView(items: [ForwardItem(kind: "text", content: content)]) { }
+                .environmentObject(app)
+        }
         .sheet(isPresented: $editing) {
             FavoriteNoteComposeSheet(editingId: id, initial: content) {
                 onChanged()
                 dismiss()
             }
             .environmentObject(app)
+        }
+    }
+
+    private func pin(_ on: Bool) async {
+        if await API.shared.updateFavorite(id: id, pinned: on) {
+            isPinned = on
+            DiagLog.shared.note(on ? "收藏：置顶了一条" : "收藏：取消置顶")
+            onChanged()
         }
     }
 

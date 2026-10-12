@@ -16,6 +16,10 @@ struct RealNameView: View {
     @State private var idCard = ""
     @State private var busy = false
     @State private var error = ""
+    /// 人脸核身那一页（微信：实名之前先刷脸）
+    @State private var showFace = false
+    /// 这一轮是不是已经核过脸了（核过就直接提交）
+    @State private var faceOK = false
     @FocusState private var focus: Field?
 
     private enum Field: Hashable { case name, id }
@@ -131,9 +135,12 @@ struct RealNameView: View {
             }
 
             Button {
-                submit()
+                /* 微信的规矩：提交实名之前先刷一次脸（人脸核身）。
+                   这里是真的开摄像头做活体（正对屏幕 → 眨眨眼 → 摇摇头），
+                   过了才允许提交。 */
+                showFace = true
             } label: {
-                Text(busy ? Tr("提交中…") : Tr("提交认证"))
+                Text(busy ? Tr("提交中…") : (faceOK ? Tr("提交认证") : Tr("开始人脸验证")))
                     .font(pf(17, .medium))
                     .foregroundColor(.white)
                     .frame(maxWidth: .infinity)
@@ -145,6 +152,19 @@ struct RealNameView: View {
             .disabled(!canSubmit || busy)
             .padding(16)
             .background(sheetBg)
+            .sheet(isPresented: $showFace) {
+                FaceLivenessView { ok in
+                    showFace = false
+                    if ok {
+                        faceOK = true
+                        DiagLog.shared.note("实名认证：人脸核身通过")
+                        submit()
+                    } else {
+                        app.show(Tr("人脸验证没通过，可以重来一次"))
+                    }
+                }
+                .environmentObject(app)
+            }
         }
     }
 
