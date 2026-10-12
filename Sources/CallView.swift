@@ -114,6 +114,8 @@ struct CallView: View {
     @State private var pipX: CGFloat? = nil
     @State private var pipY: CGFloat? = nil
     @State private var pipDrag: CGSize = .zero
+    /// 「拒绝并回复」那个菜单（2026-10-13 用户要求，对齐微信）
+    @State private var showReplies = false
 
     private var blurRadius: CGFloat { UIConfig.num("callBackdropBlur", 60) }
     private var tint: CGFloat { UIConfig.num("callGlassTint", 0.45) }
@@ -153,6 +155,13 @@ struct CallView: View {
         }
         .sheet(isPresented: $showInvite) {
             inviteSheet
+        }
+        /* 拒绝并回复：微信那几句常用话（2026-10-13 用户要求） */
+        .confirmationDialog(Tr("拒绝并回复"), isPresented: $showReplies, titleVisibility: .visible) {
+            Button(Tr("在忙，稍后联系你")) { call.reject(withReply: "在忙，稍后联系你") }
+            Button(Tr("不方便接听，稍后回你")) { call.reject(withReply: "不方便接听，稍后回你") }
+            Button(Tr("在开车，晚点回你")) { call.reject(withReply: "在开车，晚点回你") }
+            Button(Tr("取消"), role: .cancel) { }
         }
         /* 通话中收到的新消息：每 2 秒扫一遍会话列表（微信也这么做） */
         .task(id: call.callId) {
@@ -201,7 +210,7 @@ struct CallView: View {
         Button {
             msgBanner = nil
             call.minimize()                     // 通话缩成小窗，继续通
-            if let c = app.chats.first(where: { $0.id == b.chatId }) { app.openChat = c }
+            if let c = app.chats.first(where: { $0.id == b.chatId }) { app.openChatViaList(c) }
         } label: {
             HStack(spacing: 7) {
                 Image(systemName: "message.fill").font(.system(size: 12, weight: .semibold))
@@ -473,6 +482,13 @@ struct CallView: View {
                     VStack(spacing: 6) {
                         ZStack {
                             Avatar(path: m.avatar, size: 62, radius: 12)
+                            /* ③ 「谁在说话」（2026-10-13 对标微信）：音量最大的那个人套一圈绿光边 */
+                            if speakOn(m) {
+                                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                    .stroke(C.green, lineWidth: 2.5)
+                                    .frame(width: 68, height: 68)
+                                    .shadow(color: C.green.opacity(0.65), radius: 8)
+                            }
                             if m.muted {
                                 Image(systemName: "mic.slash.fill")
                                     .font(.system(size: 10.5, weight: .semibold))
@@ -494,6 +510,15 @@ struct CallView: View {
                 .font(pf(12.5))
                 .foregroundColor(.white.opacity(0.6))
         }
+    }
+
+    /// ③ 这个人现在是不是「在说话」：他报上来的音量是全场最大的、而且过了小门槛
+    /// （服务端每 250ms 汇总一次整屋音量，见 CallCenter.speakerLevels）
+    private func speakOn(_ m: GroupCallMember) -> Bool {
+        let lv = call.speakerLevels[m.userId] ?? 0
+        guard lv > 0.10 else { return false }
+        let top = call.speakerLevels.values.max() ?? 0
+        return lv >= top
     }
 
     private var statusText: String {
@@ -550,6 +575,15 @@ struct CallView: View {
                                 .font(.system(size: 27, weight: .medium))
                         }
                     }
+                    /* 拒绝并回复（2026-10-13 用户要求，对齐微信）：不去接，但先回一句 */
+                    Button { showReplies = true } label: {
+                        Text(Tr("拒绝并回复"))
+                            .font(pf(14))
+                            .foregroundColor(.white.opacity(0.9))
+                            .padding(.horizontal, 16).frame(height: 34)
+                            .background(Capsule().fill(Color.white.opacity(0.16)))
+                    }
+                    .buttonStyle(.plain)
                     /* 视频来电：微信还能「语音接听」（先不接画面、只接声音） */
                     if call.isVideo && !call.isGroupCall {
                         Button { call.accept(asAudio: true) } label: {
@@ -828,8 +862,16 @@ struct CallView: View {
                             showInvite = false
                             let name = u.nickname ?? u.username ?? "好友"
                             Task {
-                                let msg = await call.invite(userId: u.id, name: name)
-                                app.show(msg)
+                                /* ④ 2026-10-13：群通话里「邀请成员」现在真的把人叫进**同一个通话**
+                                   （服务端 group-invite → 对方弹群通话来电页 → 接听即入同一个房间）；
+                                   不在群通话里（单聊）才退回原来那条「邀请消息」。 */
+                                if call.isGroupCall {
+                                    call.inviteToCall(u.id)
+                                    app.show(Tr("已邀请 ") + name + Tr(" 加入通话"))
+                                } else {
+                                    let msg = await call.invite(userId: u.id, name: name)
+                                    app.show(msg)
+                                }
                             }
                         } label: {
                             HStack(spacing: 10) {
@@ -844,7 +886,9 @@ struct CallView: View {
                 } header: {
                     Text(Tr("邀请好友加入通话"))
                 } footer: {
-                    Text(Tr("对方会收到一条邀请消息；多人同时在同一个通话里（会议模式）还在做，先保证人能叫到。"))
+                    Text(call.isGroupCall
+                         ? Tr("点一下就把这个人拉进**当前这个通话**（对方会看到群通话来电，接听即入会）。")
+                         : Tr("对方会收到一条邀请消息，点那条消息就能回拨给你。"))
                 }
             }
             .navigationTitle(Tr("添加通话"))
