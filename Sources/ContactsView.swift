@@ -296,7 +296,7 @@ private var funcs: [(String, String, Color, String)] {
                                 onPickChat: { c in
                                     searchFocused = false
                                     keyword = ""
-                                    app.openChat = c
+                                    app.openChatViaList(c)
                                 },
                                 onCancel: {
                                     searchFocused = false
