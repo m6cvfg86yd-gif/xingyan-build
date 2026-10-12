@@ -47,11 +47,7 @@ struct MeView: View {
                         /* 用户要求：我页的卡片底色**和会话页每行一致**（暗色 #141419）。
                            后台 ui.json 写 meGlass = 0 就是实色卡（吃 cardBg）；
                            留默认 1 还是原来那张透出封面的玻璃卡。 */
-                        /* 对齐微信：卡片一律实色（原来那个透出封面的玻璃卡去掉了）。
-                           ⚠ 用户反馈「外面的框全没了」——GroupCard 传 bg: 那条分支是
-                           **不留边、没圆角**的（玻璃那条才自带内缩+圆角），所以去掉玻璃时
-                           把卡片的框也丢了。这里手动把内缩 12 和圆角 12 补回来。 */
-                        GroupCard(bg: C.meCardBg) {
+                        GroupCard(glass: UIConfig.num("meGlass", 1) > 0, bg: C.meCardBg) {
                             ForEach(grouped[gi].indices, id: \.self) { ri in
                                 let item = grouped[gi][ri]
                                 if ri > 0 { rowLine }
@@ -181,13 +177,8 @@ struct MeView: View {
                     /* 我 → 卡包（照微信：优惠券 / 会员卡 / 礼品卡 / 票） */
                     CardsView()
                 } else if key == "shop" {
-                    /* 我 → 小店与卡包（后台 me-page.json 里那一行 action = shop）
-                       ⚠ 2026-10-12 用户要求：① 点这行**直接进商城**（不再先落在我们自己
-                       那个「零钱余额 + 商品列表」的中间页）② 商城从 H5 改成**原生**
-                       —— 见 MallNative.swift（首页/推荐/消息/购物车/我的 + 详情 + 下单 +
-                       我的订单 + 收藏 + 搜索；数据存本机 dd_mall.json）。
-                       原生小店页 ShopView 和原来的 H5 页 MallWebPage 都还在，只是入口走原生。 */
-                    MallNativeView()
+                    /* 我 → 小店与卡包（后台 me-page.json 里那一行 action = shop） */
+                    ShopView()
                 } else if key == "eyes" {
                     /* 设置 → 通用 → 更多 → 显示小星（三档开关：开 / 静态 / 关） */
                     EyesSettingsView()
@@ -292,8 +283,7 @@ struct MeView: View {
     /// 而 GroupGap 画的是两条**通顶全宽**的细线（老的平铺列表留下的一对）——
     /// 从卡片边上多伸出去一截，看着就是"多出来的线"。这里只留一条灰缝。
     private var meGap: some View {
-        /* 照微信截图量的：上下两块之间那道灰缝是 10pt */
-        Rectangle().fill(C.pageBg).frame(height: 10)
+        Rectangle().fill(C.pageBg).frame(height: L.groupGap)
     }
 
     private var rowLine: some View {
@@ -332,39 +322,46 @@ struct MeView: View {
         return Color.white.opacity(0.82)
     }
 
-    /// 顶部整条背景：有状态色 → 斜向渐变 + 顶部一层薄薄的压暗（状态栏图标才看得清）
-    @ViewBuilder private var profileTopBg: some View {
-        if moodOn {
-            ZStack(alignment: .top) {
-                LinearGradient(colors: [Color(hexString: moodC1, fallback: 0xD8F2E4),
-                                        Color(hexString: moodC2, fallback: 0x1DC9BD)],
-                               /* 竖向渐变：上浅下深（截图量出来是这样） */
-                               startPoint: .top, endPoint: .bottom)
-                /* 顶部薄压暗：状态栏那一条的图标/时间保证看得清（微信的状态色也这么做） */
+    /* 顶端那一条（含系统状态栏）用的两个颜色：
+       · 设了状态 = 状态自己那对渐变色
+       · 没设状态 = 品牌蓝封面（深色下深蓝、浅色下浅蓝）
+       ⚠ 浅色模式下系统状态栏是**深色字**，所以浅色下把颜色整体调亮一档，
+       不然时间/电池压在深色封面上看不清 —— 用户报的「状态栏颜色不对」就是这个。 */
+    private var stripC1: String {
+        /* ⚠ 用户强调：顶上这块的颜色**就是状态里选的那个颜色**，不许我们自己调色。
+           所以设了状态时两个色值原样用（浅色/深色都不动），只有没设状态时才用
+           量出来的那张封面色（深色 顶 #9BB4D3 → 底 #687C94，浅色浅一档）。 */
+        if !moodOn { return scheme == .dark ? "#9BB4D3" : "#C9DEF4" }
+        return moodC1
+    }
+    private var stripC2: String {
+        if !moodOn { return scheme == .dark ? "#687C94" : "#9BB4D3" }
+        return moodC2.isEmpty ? moodC1 : moodC2
+    }
+
+    /// 顶部整条背景（**永远有颜色** —— 用户要求「和微信一样上面卡片有颜色」）：
+    /// 设了状态 → 状态色渐变；没设状态 → 品牌蓝封面。深色下顶部再压一点点暗，
+    /// 让白色状态栏图标更清楚；浅色下不加暗（深色字需要亮底）。
+    private var profileTopBg: some View {
+        ZStack(alignment: .top) {
+            LinearGradient(colors: [Color(hexString: stripC1, fallback: 0xE8F1FB),
+                                    Color(hexString: stripC2, fallback: 0xC9DEF4)],
+                           startPoint: .topLeading, endPoint: .bottomTrailing)
+            /* 设了状态时**不加任何修饰**（颜色就是状态里选的那个，原样铺）；
+               只有没设状态的默认封面才补一点层次。 */
+            if !moodOn && scheme == .dark {
                 LinearGradient(colors: [Color.black.opacity(0.10), Color.clear],
                                startPoint: .top, endPoint: .bottom)
                     .frame(height: L.safeTop + 44)
             }
-            .ignoresSafeArea(edges: .top)
-        } else {
-            /* 没设状态的时候：一张**深蓝渐变封面**（就是我页 C 方案的底）——
-               头像、零钱那几张玻璃卡片浮在它上面，玻璃才有东西可以透。
-               右上角补一道柔光，免得整块太平。 */
-            ZStack(alignment: .top) {
-                LinearGradient(colors: [Color(hex: 0x0E2A47),
-                                        Color(hex: 0x1E5F8C),
-                                        Color(hex: 0x7FB2D9)],
-                               startPoint: .topLeading, endPoint: .bottomTrailing)
-                RadialGradient(colors: [Color.white.opacity(0.30), Color.clear],
-                               center: UnitPoint(x: 0.84, y: 0.10),
-                               startRadius: 4, endRadius: 200)
-                /* 顶部薄压暗：状态栏那一条的图标/时间保证看得清 */
-                LinearGradient(colors: [Color.black.opacity(0.14), Color.clear],
-                               startPoint: .top, endPoint: .bottom)
-                    .frame(height: L.safeTop + 44)
+            if !moodOn && scheme == .light {
+                /* 浅色下加一道柔光，整块不至于太平 */
+                RadialGradient(colors: [Color.white.opacity(0.55), Color.clear],
+                               center: UnitPoint(x: 0.84, y: 0.08),
+                               startRadius: 4, endRadius: 220)
             }
-            .ignoresSafeArea(edges: .top)
         }
+        .ignoresSafeArea(edges: .top)
     }
 
     /* ---------------------------------------------------------- 方案 3：矮封面 + 资料卡
@@ -372,159 +369,160 @@ struct MeView: View {
        现在：封面只占顶上一条，头像压在资料卡上沿，名字、星言号、朋友/等级/活跃天、
        会员 + 状态 全部收进**同一张玻璃卡**里 —— 层次从 4 层变成 2 层。 */
 
-    /* 2026-10-12 用户要求「对齐微信做」：
-       微信的「我」页**平时顶上什么封面都没有**，只有设了状态时顶上那一块才铺状态色。
-       所以封面高度改成：有状态 = 盖住「状态栏 + 资料行」那一整块；没状态 = 0（完全不占位）。 */
-    /// 状态色那一块的高度（含系统状态栏）。
-    /// 按用户给的截图逐像素量出来的结论：**通顶、通边、铺到底栏上方** ——
-    /// 从屏幕最顶（状态栏底下就是它，时间/灵动岛画在它上面）一路铺到离底部
-    /// 一个底栏的高度，不是细条、也不是整屏。下面是竖向渐变（上浅下深）。
-    private var coverH: CGFloat {
-        guard moodOn else { return 0 }
-        let h = UIScreen.main.bounds.height - L.tabH - L.safeBottom
-        return max(560, h + L.safeTop)      // +safeTop：这块还要从状态栏底下往上顶出去
-    }
-    /// 资料行顶部离屏幕顶的距离：就是状态栏那一条（没状态时也留，不然内容会顶到刘海）
-    private var cardTopY: CGFloat { L.safeTop + 10 }
-    /// 资料行里的头像。微信量出来是 68（方角 6）。
-    private var topAvatar: CGFloat { 68 }
+    /// 封面高度（含系统状态栏那一条）
+    private var coverH: CGFloat { L.safeTop + UIConfig.num("meCoverH", 76) }
+    /// 资料卡顶部离屏幕顶的距离：卡片压在封面下沿上，上面露出一截蓝
+    private var cardTopY: CGFloat { coverH - UIConfig.num("meCardOverlap", 39) }
+    private var topAvatar: CGFloat { L.v(58, 15.6, 66) }
 
-    /// 顶部那一块：**只有设了状态才画**（铺状态自己的渐变色，和微信一样）。
-    /// 没设状态就是空的 —— 微信「我」页平时顶上什么都没有。
+    /// 方案 3 的封面：只占顶上一条，是一块**磨砂玻璃** ——
+    /// 浅色模式是白磨砂、深色模式是黑磨砂（Material 自己跟着主题走，不用写两套颜色）。
     @ViewBuilder private var meCover: some View {
         if moodOn {
-            /* 设了状态：这一整块（通顶、通边、一直铺到底栏上方）就是状态自己的颜色，
-               竖向渐变（上浅下深）—— 照用户给的微信截图量的。
-               没设状态什么都不画：微信平时就是干净的页面底。 */
+            /* ⚠ 用户原话：「微信开启状态后**只有上面的卡片**是状态色」。
+               所以设了状态时，顶上这一整块卡片（含状态栏那条）铺**状态里选的那个颜色**，
+               颜色原样不调；卡片下面那堆行（服务/收藏…）一点都不染。 */
             profileTopBg
                 .frame(maxWidth: .infinity)
+        } else {
+            /* 没设状态：保持原来的样子（用户：「没状态的时候是正常的」）——
+               浅色白磨砂、深色近黑，只有顶上这一条，不动它。 */
+            ZStack(alignment: .top) {
+                if scheme == .dark {
+                    Color(hex: 0x131315)
+                    LinearGradient(colors: [Color.white.opacity(0.05), Color.clear],
+                                   startPoint: .top, endPoint: .bottom)
+                        .frame(height: L.safeTop + 64)
+                } else {
+                    Color(hex: 0xFFFFFF)
+                    Rectangle().fill(.ultraThinMaterial)
+                    LinearGradient(colors: [Color.white.opacity(0.60), Color.clear],
+                                   startPoint: .top, endPoint: .bottom)
+                        .frame(height: L.safeTop + 64)
+                }
+            }
+            .frame(maxWidth: .infinity)
         }
     }
 
     private var profileTop: some View {
         VStack(spacing: 0) {
             Color.clear.frame(height: cardTopY)
-            /* ⚠ 微信顶上这一块是**通顶**的：左右不留边、没有圆角，就是一整条。
-               我上一版做成了内缩 12pt 的圆角卡，用户说「微信不是这样的」，这里去掉内缩。 */
             meProfileCard
+                .padding(.horizontal, UIConfig.num("meGlassInset", 12))
             Color.clear.frame(height: 12)
         }
         .background(alignment: .top) {
-            meCover.frame(height: coverH)
+            /* ⚠ 2026-10-12：设了状态时，颜色要**铺满整张卡片**（用户截图量出来是
+               从屏幕最顶一直铺到资料卡下沿 ≈286pt 处，微信就是这样），所以不写死高度，
+               背景跟着整块（状态栏 + 资料卡 + 下沿 12pt）走。
+               没设状态时还是原来那条固定高度的封面 —— 用户说「没状态的时候是正常的」，
+               不要去动它。 */
+            if moodOn {
+                meCover
+            } else {
+                meCover.frame(height: coverH)
+            }
         }
     }
 
-    /// 「我」页顶部那条资料行（对齐微信：一行里放下头像 / 名字 / 星言号 / 二维码 / 箭头）
+    /// 「我」页顶部那张资料卡：头像压在卡片上沿，其余全在卡里
     private var meProfileCard: some View {
-        /* 对齐微信：资料区就是**一行** ——
-           头像（64、方角 6）在左；右边是名字 20 + 会员/等级小徽章 + 星言号；
-           设了状态时再多一行「状态 emoji + 文案」；最右边是二维码图标和箭头。
-           原来那套「头像压在卡片上沿 + 三条统计 + 两枚胶囊」是自定义设计，微信没有，收掉了。 */
-        HStack(spacing: 14) {
-            Button { path.append("profile") } label: {
-                HStack(spacing: 14) {
-                    Avatar(path: app.me?.avatarPath ?? "", size: topAvatar,
-                           radius: 6, level: growth.shownLevel)
-                        .frame(width: topAvatar, height: topAvatar)
-
-                    VStack(alignment: .leading, spacing: 6) {
-                        HStack(spacing: 6) {
-                            /* 未成年人模式开着：名字前面挂一把小雨伞（点一下进那一页，微信就是这样） */
-                            if teenOn {
-                                Button { showTeenCard = true } label: {
-                                    UmbrellaIcon(color: Color(hex: 0x3E9BF0), size: 15)
-                                }
-                                .buttonStyle(.plain)
-                            }
-                            Text(app.me?.name ?? "")
-                                .font(pf(22, .semibold))
-                                .foregroundColor(C.label)
-                                .lineLimit(1)
-                            if growthShow {
-                                QQLevelBadge(level: growth.shownLevel, size: 14, maxIcons: 3)
-                                    .fixedSize()
-                            }
-                            /* 会员徽章本身可点 → 进会员中心（原来那枚「开通会员」胶囊也是这个去处，
-                               收行的时候一起没了，这里挂回到名字右边这颗小徽章上） */
-                            Button { path.append("member") } label: {
-                                MemberBadge(tier: app.me?.memberTier,
-                                            short: app.me?.memberShort,
-                                            color: app.me?.memberColor,
-                                            color2: app.me?.memberColor2,
-                                            height: 13)
-                                    .fixedSize()
-                            }
-                            .buttonStyle(.plain)
-                        }
-                        Text(Tr("星言号") + "：" + (app.me?.username ?? "-"))
-                            .font(pf(14))
-                            .foregroundColor(C.subLabel)
-                            .lineLimit(1)
-                        /* 状态 + 朋友的状态（微信就是名字下面这一行）。
-                           ⚠ 我上一版把这两个入口整个收掉了，用户反馈「状态和朋友状态都弄没了」——
-                          这里补回来：**设了状态**显示「🌙 睡觉中」，**没设**显示「+ 状态」，两种都能点，
-                          点了进状态页（和微信一样）；右边一颗浅灰「朋友的状态 ›」。 */
-                        HStack(spacing: 12) {
-                            Button {
-                                path.append("status")
-                            } label: {
-                                HStack(spacing: 4) {
-                                    if moodOn {
-                                        Text((app.me?.moodIcon ?? "") + " " + (app.me?.moodText ?? ""))
-                                            .lineLimit(1)
-                                    } else {
-                                        Image(systemName: "plus.circle")
-                                            .font(.system(size: 12))
-                                        Text(Tr("状态"))
-                                    }
-                                }
-                                .font(pf(13))
-                                .foregroundColor(C.subLabel)
-                                .contentShape(Rectangle())
-                            }
-                            .buttonStyle(.plain)
-
-                            Button {
-                                path.append("friendsStatus")
-                            } label: {
-                                HStack(spacing: 2) {
-                                    Text(Tr("朋友的状态"))
-                                    Image(systemName: "chevron.right")
-                                        .font(.system(size: 10, weight: .semibold))
-                                }
-                                .font(pf(13))
-                                .foregroundColor(C.subLabel)
-                                .contentShape(Rectangle())
-                            }
-                            .buttonStyle(.plain)
-                        }
+        VStack(spacing: 0) {
+            /* 名字 + 等级徽章 + 会员徽章（居中；左右各留 46pt，别顶到右上角二维码） */
+            HStack(spacing: 6) {
+                /* 未成年人模式开着：名字前面挂一把小雨伞（点一下进那一页，微信就是这样） */
+                if teenOn {
+                    Button { showTeenCard = true } label: {
+                        UmbrellaIcon(color: Color(hex: 0x3E9BF0), size: 16)
                     }
-
-                    Spacer(minLength: 8)
+                    .buttonStyle(.plain)
                 }
-                .contentShape(Rectangle())
+                Text(app.me?.name ?? "")
+                    .font(pf(L.v(17, 4.8, 19.5), .semibold))
+                    .foregroundColor(C.label)
+                    .lineLimit(1)
+                if growthShow {
+                    QQLevelBadge(level: growth.shownLevel,
+                                 size: L.v(15, 4.2, 17), maxIcons: 3)
+                        .fixedSize()
+                }
+                MemberBadge(tier: app.me?.memberTier,
+                            short: app.me?.memberShort,
+                            color: app.me?.memberColor,
+                            color2: app.me?.memberColor2,
+                            height: L.v(12.5, 3.5, 14))
+                    .fixedSize()
+            }
+            .padding(.top, topAvatar / 2 + 8)
+            .padding(.horizontal, 46)
+
+            Text(Tr("星言号") + "：" + (app.me?.username ?? "-"))
+                .font(pf(13))
+                .foregroundColor(C.subLabel)
+                .padding(.top, 5)
+
+            /* 数据条：朋友 / 等级 / 活跃天（后两格点进去都是「我的等级」） */
+            HStack(spacing: 0) {
+                statCell("\(friendCount)", Tr("朋友"), tap: false)
+                /* 成长系统关掉（growthShow=0）时，只留「朋友」一格 */
+                if growthShow {
+                    statLine
+                    statCell("Lv." + String(growth.shownLevel), Tr("等级"), tap: true)
+                    statLine
+                    statCell(daysText, Tr("活跃天"), tap: true)
+                }
+            }
+            .padding(.top, 14)
+            .padding(.horizontal, 10)
+
+            /* 会员 + 状态：两枚胶囊并排居中 */
+            HStack(spacing: 8) {
+                memberPill
+                statusChip
+                friendsStatusChip
+                /* 只有开了 ops 的账号看得到：App 里直接上新音乐、换音乐/游戏图标 */
+                if app.me?.ops == true { manageChip }
+            }
+            .padding(.top, 14)
+            .padding(.bottom, 16)
+        }
+        .frame(maxWidth: .infinity)
+        .background {
+            ZStack {
+                GlassBackground(shape: RoundedRectangle(cornerRadius: 20, style: .continuous),
+                                opacity: UIConfig.num("meGlassAlpha", 0.62),
+                                edgeAlpha: UIConfig.num("meGlassEdge", 0.55),
+                                shadow: true,
+                                seed: 0.42,
+                                native: true)
+                RoundedRectangle(cornerRadius: 20, style: .continuous)
+                    .fill(C.meCardBg.opacity(0.42))
+            }
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+        /* 头像：压在卡片上沿，点进个人信息 */
+        .overlay(alignment: .top) {
+            Button { path.append("profile") } label: {
+                Avatar(path: app.me?.avatarPath ?? "", size: topAvatar,
+                       circle: true, level: growth.shownLevel)
+                    .frame(width: topAvatar, height: topAvatar)
+                    .contentShape(Circle())
             }
             .buttonStyle(.plain)
-
-            /* 二维码：整行最右边（点开「我的二维码」） */
+            .offset(y: -topAvatar / 2)
+        }
+        /* 二维码：卡片右上角，点开「我的二维码」 */
+        .overlay(alignment: .topTrailing) {
             Button { showMyQR = true } label: {
-                SVGIcon(markup: I.qr, size: 20, color: C.label)
-                    .frame(width: 34, height: 34)
+                SVGIcon(markup: I.qr, size: L.v(19, 5.4, 21), color: C.label)
+                    .frame(width: 40, height: 40)
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-
-            Chevron(size: 10, line: 1.8)
+            .padding(.trailing, 6)
+            .padding(.top, topAvatar / 2 + 2)
         }
-        /* 高度照微信真机截图量的：顶部那块从屏幕最顶到 y=726px（≈248pt，含状态栏），
-           下面是 10pt 灰缝。我们这边 = safeTop(59) + 10 + 这一行 + 12 ≈ 249，
-           所以这一行要给到 168。原来 124 比微信矮了一倍。 */
-        .padding(.horizontal, 16)
-        .frame(height: 168)
-        .frame(maxWidth: .infinity)
-        /* 通顶实色条：微信这里**没有圆角、没有左右留边**，就是页面宽度的一条。
-           （下面那些分组卡才是内缩 12 的圆角卡，两者别混。） */
-        .background(C.meCardBg)
     }
 
     /// 资料卡里的一格数据（大数字 + 小标题）
