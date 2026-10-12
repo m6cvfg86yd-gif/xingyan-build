@@ -24,6 +24,14 @@ struct PushEvent: Equatable {
     var callPeerName = ""
     var callPeerAvatar = ""
     var callError = ""
+    /// 对方那边的状态（和微信一样画出来）：静音中 / 摄像头关着 / 现在是视频还是语音
+    var callPeerMuted = false
+    var callPeerCameraOff = false
+    var callPeerVideo = false
+    /// 群语音：房间号 / 群 id / 房里现在都有谁
+    var callRoomId = ""
+    var callChatId = ""
+    var callRoster: [GroupCallMember] = []
     /// 通话里的 SDP（WebRTC 协商用，字符串形式）
     var callSDP: String? = nil
     /// 语音「服务器转发」的一帧音频（base64 的 16kHz 单声道 PCM）
@@ -333,6 +341,19 @@ final class Realtime: ObservableObject {
         ev.callPeerName = (obj["peerName"] as? String) ?? ""
         ev.callPeerAvatar = (obj["peerAvatar"] as? String) ?? ""
         ev.callError = (obj["error"] as? String) ?? ""
+        ev.callPeerMuted = (obj["muted"] as? Bool) ?? false
+        ev.callPeerCameraOff = (obj["camOff"] as? Bool) ?? false
+        ev.callPeerVideo = (obj["video"] as? Bool) ?? false
+        ev.callRoomId = (obj["roomId"] as? String) ?? ""
+        ev.callChatId = (obj["chatId"] as? String) ?? ""
+        if let arr = obj["roster"] as? [[String: Any]] {
+            ev.callRoster = arr.map {
+                GroupCallMember(userId: ($0["userId"] as? String) ?? "",
+                                name: ($0["name"] as? String) ?? "",
+                                avatar: ($0["avatar"] as? String) ?? "",
+                                muted: ($0["muted"] as? Bool) ?? false)
+            }
+        }
         ev.callReason = (obj["reason"] as? String) ?? ""
         if let same = obj["same"] as? Bool { ev.callSameNetwork = same }
         // 直播：进的哪个房间、什么动作（弹幕/点赞/人数）、谁说的、多少人

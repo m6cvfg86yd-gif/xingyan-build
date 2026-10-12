@@ -602,18 +602,21 @@ struct RedPacketSendView: View {
 
     private func luckyPill(_ t: String, on: Bool, _ tap: @escaping () -> Void) -> some View {
         Button { tap() } label: {
+            /* ⚠ 用户反馈「拼手气红包点不了」：
+               以前选中态是 `.background { if on { 渐变胶囊 } }` —— 没选中的那颗**完全没有背景视图**，
+               加上外层还有一层胶囊底 + 描边，点击经常落在那层上、传不进按钮。
+               现在：两颗都用**同一个胶囊**（选中的填渐变、没选中的填空），
+               再显式给 44pt 高的矩形热区，点击一定吃得到。 */
             Text(t)
                 .font(pf(15, on ? .semibold : .regular))
                 .foregroundColor(on ? .white : C.label)
                 .frame(maxWidth: .infinity)
-                .frame(height: 38)
-                .background {
-                    if on {
-                        Capsule().fill(LinearGradient(colors: [Color(hex: 0xF45A3C), Color(hex: 0xC91F14)],
-                                                      startPoint: .topLeading, endPoint: .bottomTrailing))
-                    }
-                }
-                .contentShape(Capsule())
+                .frame(height: 44)
+                .background(Capsule().fill(on
+                    ? AnyShapeStyle(LinearGradient(colors: [Color(hex: 0xF45A3C), Color(hex: 0xC91F14)],
+                                                   startPoint: .topLeading, endPoint: .bottomTrailing))
+                    : AnyShapeStyle(Color.clear)))
+                .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
     }
