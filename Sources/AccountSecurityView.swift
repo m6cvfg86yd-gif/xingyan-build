@@ -16,6 +16,8 @@ struct AccountSecurityView: View {
     @State private var hasPay = false
     @State private var showChangePwd = false
     @State private var confirmLogoutOthers = false
+    /// 微信安全中心（冻结 / 解冻 / 自助解封）
+    @State private var showSafety = false
 
     private var me: User? { app.me }
     private var phoneText: String {
@@ -46,6 +48,13 @@ struct AccountSecurityView: View {
                         HairLine(inset: 16)
                         Button { app.show(Tr("手机号在注册或找回密码时绑定，需要换号联系客服")) } label: {
                             row(Tr("手机号"), phoneText, chevron: true)
+                        }
+                        .buttonStyle(.plain)
+                        HairLine(inset: 16)
+                        /* 2026-10-12 用户要求「微信的真实封号和解冻、可以自己冻结做出来对齐」：
+                           微信「我 → 设置 → 账号与安全」里就是这一行「微信安全中心」 */
+                        Button { showSafety = true } label: {
+                            row(Tr("微信安全中心"), Tr("冻结 / 解冻 / 自助解封"), chevron: true)
                         }
                         .buttonStyle(.plain)
                     }
@@ -123,6 +132,10 @@ struct AccountSecurityView: View {
         .toolbar(.hidden, for: .navigationBar)
         .swipeBack { dismiss() }
         .hidesTabBar()
+        /* 微信安全中心：冻结 / 解冻 / 自助解封（AccountSafety.swift） */
+        .sheet(isPresented: $showSafety) {
+            AccountSafetyCenterView().environmentObject(app)
+        }
         .task {
             if let m = try? await API.shared.me() {
                 app.me = m
