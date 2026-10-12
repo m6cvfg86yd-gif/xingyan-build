@@ -717,6 +717,9 @@ struct NavBar<Right: View>: View {
     let onLongPressTitle: (() -> Void)?
     /// 返回箭头右边可以插一小块内容（聊天页那个未读数字就放这儿）
     let leftExtra: AnyView?
+    /// 左上角用**文字**代替返回箭头：微信「切换账号」页左上角就是「关闭」两个字。
+    /// 默认 nil = 还是原来的箭头，**其它页面一点不受影响**。
+    var backText: String? = nil
     /// 苹果那套浮动玻璃：返回=圆形玻璃、标题=胶囊玻璃、右边=胶囊玻璃，其余地方全透明（露出内容）
     /// **默认全站都开**（用户要求：所有页面都沿用 iOS 26 这套玻璃做全套升级）。
     /// 想整体退回老的整条顶栏：后台 ui.json 写 navFloating = 0。
@@ -729,6 +732,7 @@ struct NavBar<Right: View>: View {
          back: (() -> Void)? = nil,
          onLongPressTitle: (() -> Void)? = nil,
          leftExtra: AnyView? = nil,
+         backText: String? = nil,
          floating: Bool = true,
          leftExtraGlass: Bool = true,
          @ViewBuilder right: () -> Right) {
@@ -736,6 +740,7 @@ struct NavBar<Right: View>: View {
         self.back = back
         self.onLongPressTitle = onLongPressTitle
         self.leftExtra = leftExtra
+        self.backText = backText
         self.floating = floating
         self.leftExtraGlass = leftExtraGlass
         self.right = right()
@@ -766,12 +771,22 @@ struct NavBar<Right: View>: View {
             HStack(spacing: 0) {
                 if let back = back {
                     Button(action: back) {
-                        FlexIcon(custom: IconOverrides.custom("nav.back"), size: 20,
-                                 color: C.label, symbol: "chevron.left", weight: .medium)
-                            .frame(width: useFloating ? 36 : 44, height: useFloating ? 36 : L.navH)
-                            .background {
-                                if useFloating { GlassBackground(shape: Circle(), shadow: true, seed: 0.10) }
-                            }
+                        if let bt = backText {
+                            /* 文字版（微信「切换账号」左上角的「关闭」）：
+                               走的是普通文字，不套圆形玻璃、不套箭头 */
+                            Text(Tr(bt))
+                                .font(pf(17))
+                                .foregroundColor(C.label)
+                                .padding(.horizontal, 4)
+                                .frame(height: useFloating ? 36 : L.navH)
+                        } else {
+                            FlexIcon(custom: IconOverrides.custom("nav.back"), size: 20,
+                                     color: C.label, symbol: "chevron.left", weight: .medium)
+                                .frame(width: useFloating ? 36 : 44, height: useFloating ? 36 : L.navH)
+                                .background {
+                                    if useFloating { GlassBackground(shape: Circle(), shadow: true, seed: 0.10) }
+                                }
+                        }
                     }
                     .buttonStyle(.plain)
                     .padding(.leading, useFloating ? 10 : 0)

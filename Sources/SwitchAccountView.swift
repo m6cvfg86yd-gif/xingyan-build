@@ -29,7 +29,8 @@ struct SwitchAccountView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            NavBar(title: Tr("切换账号"), back: { dismiss() }) {
+            /* 左上角照微信用「关闭」两个字，不是返回箭头（用户发来的真机截图就是这样） */
+            NavBar(title: Tr("切换账号"), back: { dismiss() }, backText: "关闭") {
                 Button {
                     withAnimation(.easeInOut(duration: 0.18)) { managing.toggle() }
                 } label: {

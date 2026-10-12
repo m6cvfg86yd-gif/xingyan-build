@@ -372,8 +372,8 @@ struct MeView: View {
     private var coverH: CGFloat { moodOn ? L.safeTop + 106 : 0 }
     /// 资料行顶部离屏幕顶的距离：就是状态栏那一条（没状态时也留，不然内容会顶到刘海）
     private var cardTopY: CGFloat { L.safeTop + 10 }
-    /// 资料行里的头像：微信不管机型都是 64
-    private var topAvatar: CGFloat { 64 }
+    /// 资料行里的头像。微信量出来是 68（方角 6）。
+    private var topAvatar: CGFloat { 68 }
 
     /// 顶部那一块：**只有设了状态才画**（铺状态自己的渐变色，和微信一样）。
     /// 没设状态就是空的 —— 微信「我」页平时顶上什么都没有。
@@ -390,8 +390,9 @@ struct MeView: View {
     private var profileTop: some View {
         VStack(spacing: 0) {
             Color.clear.frame(height: cardTopY)
+            /* ⚠ 微信顶上这一块是**通顶**的：左右不留边、没有圆角，就是一整条。
+               我上一版做成了内缩 12pt 的圆角卡，用户说「微信不是这样的」，这里去掉内缩。 */
             meProfileCard
-                .padding(.horizontal, UIConfig.num("meGlassInset", 12))
             Color.clear.frame(height: 12)
         }
         .background(alignment: .top) {
@@ -422,30 +423,66 @@ struct MeView: View {
                                 .buttonStyle(.plain)
                             }
                             Text(app.me?.name ?? "")
-                                .font(pf(20, .semibold))
+                                .font(pf(22, .semibold))
                                 .foregroundColor(C.label)
                                 .lineLimit(1)
                             if growthShow {
                                 QQLevelBadge(level: growth.shownLevel, size: 14, maxIcons: 3)
                                     .fixedSize()
                             }
-                            MemberBadge(tier: app.me?.memberTier,
-                                        short: app.me?.memberShort,
-                                        color: app.me?.memberColor,
-                                        color2: app.me?.memberColor2,
-                                        height: 13)
-                                .fixedSize()
+                            /* 会员徽章本身可点 → 进会员中心（原来那枚「开通会员」胶囊也是这个去处，
+                               收行的时候一起没了，这里挂回到名字右边这颗小徽章上） */
+                            Button { path.append("member") } label: {
+                                MemberBadge(tier: app.me?.memberTier,
+                                            short: app.me?.memberShort,
+                                            color: app.me?.memberColor,
+                                            color2: app.me?.memberColor2,
+                                            height: 13)
+                                    .fixedSize()
+                            }
+                            .buttonStyle(.plain)
                         }
                         Text(Tr("星言号") + "：" + (app.me?.username ?? "-"))
-                            .font(pf(13.5))
+                            .font(pf(14))
                             .foregroundColor(C.subLabel)
                             .lineLimit(1)
-                        /* 设了状态：状态 emoji + 文案跟在星言号下面（微信也是这一行） */
-                        if moodOn {
-                            Text((app.me?.moodIcon ?? "") + " " + (app.me?.moodText ?? ""))
-                                .font(pf(12.5))
+                        /* 状态 + 朋友的状态（微信就是名字下面这一行）。
+                           ⚠ 我上一版把这两个入口整个收掉了，用户反馈「状态和朋友状态都弄没了」——
+                          这里补回来：**设了状态**显示「🌙 睡觉中」，**没设**显示「+ 状态」，两种都能点，
+                          点了进状态页（和微信一样）；右边一颗浅灰「朋友的状态 ›」。 */
+                        HStack(spacing: 12) {
+                            Button {
+                                path.append("status")
+                            } label: {
+                                HStack(spacing: 4) {
+                                    if moodOn {
+                                        Text((app.me?.moodIcon ?? "") + " " + (app.me?.moodText ?? ""))
+                                            .lineLimit(1)
+                                    } else {
+                                        Image(systemName: "plus.circle")
+                                            .font(.system(size: 12))
+                                        Text(Tr("状态"))
+                                    }
+                                }
+                                .font(pf(13))
                                 .foregroundColor(C.subLabel)
-                                .lineLimit(1)
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+
+                            Button {
+                                path.append("friendsStatus")
+                            } label: {
+                                HStack(spacing: 2) {
+                                    Text(Tr("朋友的状态"))
+                                    Image(systemName: "chevron.right")
+                                        .font(.system(size: 10, weight: .semibold))
+                                }
+                                .font(pf(13))
+                                .foregroundColor(C.subLabel)
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
                         }
                     }
 
@@ -466,11 +503,11 @@ struct MeView: View {
             Chevron(size: 10, line: 1.8)
         }
         .padding(.horizontal, 16)
-        .frame(height: 96)
+        .frame(height: 124)
         .frame(maxWidth: .infinity)
-        /* 实色卡片，跟下面那些行同一档（对齐微信：整页只有页面底 + 卡片两个色阶） */
+        /* 通顶实色条：微信这里**没有圆角、没有左右留边**，就是页面宽度的一条。
+           （下面那些分组卡才是内缩 12 的圆角卡，两者别混。） */
         .background(C.meCardBg)
-        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
     }
 
     /// 资料卡里的一格数据（大数字 + 小标题）
