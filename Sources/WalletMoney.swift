@@ -157,67 +157,98 @@ struct WithdrawView: View {
     @State private var bankId = ""
     @State private var busy = false
     @State private var showAddBank = false
+    /// 选到账银行卡（微信：点「提现到」那一行走一整页/半屏列表挑）
+    @State private var showPickBank = false
     @State private var showPay = false
     @State private var ops: [API.WalletOp] = []
+    /// 底部那两条常见问题点开看答案
+    @State private var faq: (String, String)?
+    @FocusState private var amountFocused: Bool
 
     private var amount: Double { Double(amountText) ?? 0 }
     private var balance: Double { app.me?.balance ?? 0 }
     /* 微信：每笔 0.1%，最低 0.1 元 */
     private var fee: Double { amount <= 0 ? 0 : max(0.1, (amount * 0.001 * 100).rounded() / 100) }
+    /// 本次实际到账（微信在服务费那行写「实际到账 ¥x」）
+    private var net: Double { max(0, amount - fee) }
+    private var picked: API.WalletBankCard? { banks.first(where: { $0.id == bankId }) }
 
     var body: some View {
         VStack(spacing: 0) {
-            NavBar(title: Tr("提现"), back: { dismiss() })
+            /* 微信这一页的标题就叫「零钱提现」（不是「提现」） */
+            NavBar(title: Tr("零钱提现"), back: { dismiss() })
 
-            ScrollView {
+            ScrollView(showsIndicators: false) {
                 VStack(spacing: 0) {
+                    /* ① 提现到哪张卡（微信：一张白卡，上面是银行 + 尾号，下面小字「2小时内到账」） */
                     GroupCard {
                         Button {
-                            if banks.count > 1 { switchBank() } else if banks.isEmpty { showAddBank = true }
+                            if banks.isEmpty { showAddBank = true } else { showPickBank = true }
                         } label: {
                             HStack(spacing: 12) {
-                                VStack(alignment: .leading, spacing: 3) {
-                                    Text(Tr("到账银行卡")).font(pf(16)).foregroundColor(C.label)
-                                    Text(bankLabel).font(pf(12.5)).foregroundColor(C.subLabel)
+                                Text(Tr("提现到")).font(pf(16)).foregroundColor(C.label)
+                                Spacer(minLength: 6)
+                                HStack(spacing: 7) {
+                                    bankBadge(picked?.bank ?? "")
+                                    VStack(alignment: .trailing, spacing: 2) {
+                                        Text(picked.map { ($0.bank ?? Tr("银行卡")) + Tr("储蓄卡") }
+                                             ?? Tr("添加银行卡"))
+                                            .font(pf(15.5)).foregroundColor(C.label).lineLimit(1)
+                                        Text(picked.map { Tr("尾号 ") + ($0.tail ?? "****") } ?? "")
+                                            .font(pf(12.5)).foregroundColor(C.subLabel)
+                                    }
                                 }
-                                Spacer(minLength: 8)
-                                Chevron(size: 9, line: 1.6).padding(.trailing, 3)
+                                Chevron(size: 9, line: 1.6).padding(.leading, 2)
                             }
-                            .padding(.horizontal, 16).frame(height: 62)
+                            .padding(.horizontal, 16).frame(height: 68)
                             .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
+                        HairLine(inset: 16)
+                        HStack(spacing: 6) {
+                            Image(systemName: "clock")
+                                .font(.system(size: 12))
+                                .foregroundColor(C.subLabel)
+                            Text(Tr("预计 2 小时内到账（以银行处理时间为准）"))
+                                .font(pf(12.5)).foregroundColor(C.subLabel)
+                            Spacer(minLength: 0)
+                        }
+                        .padding(.horizontal, 16).padding(.bottom, 12)
                     }
                     .padding(.top, 10)
 
                     Spacer().frame(height: 8)
 
+                    /* ② 金额（微信：大号 ¥ + 金额，右边「全部提现」；下面一行「可用余额」） */
                     GroupCard {
-                        HStack(spacing: 12) {
-                            Text(Tr("提现金额")).font(pf(16)).foregroundColor(C.label)
-                            Spacer(minLength: 8)
+                        HStack(alignment: .firstTextBaseline, spacing: 6) {
+                            Text("¥").font(pfMoney(22)).foregroundColor(C.label)
                             TextField("0.00", text: $amountText)
-                                .font(pfMoney(20))
+                                .font(pfMoney(34))
                                 .keyboardType(.decimalPad)
-                                .multilineTextAlignment(.trailing)
                                 .foregroundColor(C.label)
-                                .frame(maxWidth: 160)
+                                .focused($amountFocused)
+                                .frame(maxWidth: .infinity, alignment: .leading)
                             Button {
                                 amountText = String(format: "%.2f", max(0, balance))
+                                amountFocused = false
                             } label: {
-                                Text(Tr("全部提现")).font(pf(14)).foregroundColor(C.link)
+                                Text(Tr("全部提现")).font(pf(14.5)).foregroundColor(C.link)
                             }
                             .buttonStyle(.plain)
                         }
-                        .padding(.horizontal, 16).frame(height: 56)
-                    }
-
-                    VStack(alignment: .leading, spacing: 6) {
+                        .padding(.horizontal, 16).frame(height: 74)
+                        HairLine(inset: 16)
                         HStack {
-                            Text(Tr("可提现余额")).font(pf(13)).foregroundColor(C.subLabel)
+                            Text(Tr("可用余额")).font(pf(13)).foregroundColor(C.subLabel)
                             Spacer()
                             Text("¥" + money(balance)).font(pf(13)).foregroundColor(C.subLabel)
                         }
+                        .padding(.horizontal, 16).frame(height: 40)
+                    }
+
+                    /* ③ 服务费 / 实际到账（微信在按钮上面这几行灰字） */
+                    VStack(alignment: .leading, spacing: 6) {
                         if amount > 0 {
                             HStack {
                                 Text(Tr("服务费（0.1%，最低 ¥0.1）")).font(pf(13)).foregroundColor(C.subLabel)
@@ -227,16 +258,16 @@ struct WithdrawView: View {
                             HStack {
                                 Text(Tr("实际到账")).font(pf(13)).foregroundColor(C.subLabel)
                                 Spacer()
-                                Text("¥" + money(max(0, amount))).font(pf(13)).foregroundColor(C.subLabel)
+                                Text("¥" + money(net)).font(pf(13)).foregroundColor(C.subLabel)
                             }
+                        }
+                        HStack {
+                            Text(Tr("单笔限额")).font(pf(13)).foregroundColor(C.subLabel)
+                            Spacer()
+                            Text("¥50,000.00").font(pf(13)).foregroundColor(C.subLabel)
                         }
                     }
                     .padding(.horizontal, 22).padding(.top, 10)
-
-                    Text(Tr("提现到银行卡一般是 2 小时内到账，具体以银行处理时间为准。"))
-                        .font(pf(12.5)).foregroundColor(C.subLabel)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.horizontal, 22).padding(.top, 10)
 
                     Spacer().frame(height: 22)
 
@@ -249,6 +280,22 @@ struct WithdrawView: View {
                     }
                     .buttonStyle(.plain)
                     .disabled(busy || !canWithdraw)
+
+                    /* ④ 常见问题（微信这一页底部就是这两条链接） */
+                    VStack(spacing: 0) {
+                        faqRow(Tr("提现多久能到账？"),
+                               Tr("一般 2 小时内到账，具体以银行处理时间为准。遇到节假日可能稍慢。")) {
+                            faq = (Tr("提现多久能到账？"),
+                                   Tr("一般 2 小时内到账，具体以银行处理时间为准。遇到节假日可能慢一些。\n如果超过 24 小时还没到账，把提现记录截图发给管理员查。"))
+                        }
+                        HairLine(inset: 16)
+                        faqRow(Tr("提现要手续费吗？"),
+                               Tr("按提现金额的 0.1% 收取，最低 ¥0.1。")) {
+                            faq = (Tr("提现要手续费吗？"),
+                                   Tr("按提现金额的 0.1% 收取，最低 ¥0.1，从提现金额里直接扣。\n（这也是微信零钱提现的规则。）"))
+                        }
+                    }
+                    .padding(.top, 18)
 
                     /* 提现记录（微信在这一页下面就有） */
                     if !ops.isEmpty {
@@ -295,6 +342,8 @@ struct WithdrawView: View {
             BankAddSheet { list in banks = list; bankId = list.first?.id ?? "" }
                 .environmentObject(app)
         }
+        /* 选到账银行卡（微信是一整页列表，这里用半屏列表，点一下就换） */
+        .sheet(isPresented: $showPickBank) { bankPicker }
         .sheet(isPresented: $showPay) {
             PayConfirmSheet(title: Tr("提现") + " ¥" + money(amount)) { pwd, face in
                 doWithdraw(password: pwd, face: face)
@@ -305,13 +354,112 @@ struct WithdrawView: View {
         .overlay {
             if busy { PayBusyOverlay(text: "正在提现") }
         }
+        .alert(faq?.0 ?? "", isPresented: Binding(get: { faq != nil }, set: { if !$0 { faq = nil } })) {
+            Button(Tr("知道了"), role: .cancel) { faq = nil }
+        } message: {
+            Text(faq?.1 ?? "")
+        }
+        .onAppear {
+            /* 进页面就把光标放金额上（微信也是进来就能输） */
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { amountFocused = true }
+        }
+    }
+
+    /// 银行小图标：一个圆 + 银行名第一个字（微信到账卡那一行左边就是这种）
+    private func bankBadge(_ bank: String) -> some View {
+        let ch = bank.isEmpty ? "卡" : String(bank.prefix(1))
+        return Text(ch)
+            .font(pf(14, .medium))
+            .foregroundColor(.white)
+            .frame(width: 28, height: 28)
+            .background(Circle().fill(bankColor(bank)))
+    }
+
+    private func bankColor(_ bank: String) -> Color {
+        if bank.contains("工商") { return Color(hex: 0xC0392B) }
+        if bank.contains("建设") { return Color(hex: 0x1F5FBF) }
+        if bank.contains("农业") { return Color(hex: 0x2E9B5B) }
+        if bank.contains("中国银行") { return Color(hex: 0xB3282E) }
+        if bank.contains("招商") { return Color(hex: 0xC7302C) }
+        if bank.contains("交通") { return Color(hex: 0x1D4E9B) }
+        if bank.contains("邮储") || bank.contains("邮政") { return Color(hex: 0x2B7A3D) }
+        return Color(hex: 0x8A8A8E)
+    }
+
+    private func faqRow(_ q: String, _ a: String, _ tap: @escaping () -> Void) -> some View {
+        Button(action: tap) {
+            HStack(spacing: 8) {
+                Text(q).font(pf(13.5)).foregroundColor(C.link)
+                Spacer(minLength: 8)
+                Chevron(size: 8, line: 1.4)
+            }
+            .padding(.horizontal, 20).frame(height: 44)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    /// 选到账银行卡
+    private var bankPicker: some View {
+        VStack(spacing: 0) {
+            NavBar(title: Tr("选择到账银行卡"), back: { showPickBank = false })
+            ScrollView {
+                VStack(spacing: 0) {
+                    GroupCard {
+                        ForEach(banks) { b in
+                            Button {
+                                bankId = b.id
+                                showPickBank = false
+                            } label: {
+                                HStack(spacing: 12) {
+                                    bankBadge(b.bank ?? "")
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text((b.bank ?? Tr("银行卡")) + Tr("储蓄卡"))
+                                            .font(pf(16)).foregroundColor(C.label)
+                                        Text(Tr("尾号 ") + (b.tail ?? "****"))
+                                            .font(pf(12.5)).foregroundColor(C.subLabel)
+                                    }
+                                    Spacer(minLength: 8)
+                                    if b.id == bankId {
+                                        Image(systemName: "checkmark")
+                                            .font(.system(size: 15, weight: .semibold))
+                                            .foregroundColor(C.green)
+                                    }
+                                }
+                                .padding(.horizontal, 16).frame(height: 64)
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            HairLine(inset: 16)
+                        }
+                        Button {
+                            showPickBank = false
+                            showAddBank = true
+                        } label: {
+                            HStack(spacing: 10) {
+                                Image(systemName: "plus.circle.fill")
+                                    .font(.system(size: 17)).foregroundColor(C.green)
+                                Text(Tr("添加银行卡")).font(pf(16)).foregroundColor(C.label)
+                                Spacer(minLength: 0)
+                            }
+                            .padding(.horizontal, 16).frame(height: 56)
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    .padding(.top, 10)
+                    Text(Tr("到账时间：预计 2 小时内（以银行处理时间为准）"))
+                        .font(pf(12.5)).foregroundColor(C.subLabel)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 22).padding(.top, 10)
+                }
+            }
+            .background(C.pageBg)
+        }
+        .background(C.pageBg.ignoresSafeArea())
     }
 
     private var canWithdraw: Bool { amount >= 1 && amount + fee <= balance && !bankId.isEmpty }
-    private var bankLabel: String {
-        if let b = banks.first(where: { $0.id == bankId }) { return b.label }
-        return banks.isEmpty ? Tr("添加银行卡") : (banks.first?.label ?? "")
-    }
 
     private func statusText(_ s: String?) -> String {
         switch s {
@@ -319,11 +467,6 @@ struct WithdrawView: View {
         case "failed": return Tr("提现失败")
         default: return Tr("处理中")
         }
-    }
-
-    private func switchBank() {
-        guard let i = banks.firstIndex(where: { $0.id == bankId }) else { return }
-        bankId = banks[(i + 1) % banks.count].id
     }
 
     private func doWithdraw(password: String, face: Bool) {

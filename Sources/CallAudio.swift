@@ -15,6 +15,20 @@ import UIKit
 final class CallAudioPipe: NSObject, AVCaptureAudioDataOutputSampleBufferDelegate {
     static let shared = CallAudioPipe()
 
+    /// 本机麦克风最近的音量（0…1，按峰值归一）：群通话「谁在说话」上报用（2026-10-13）
+    private(set) var lastLevel: Double = 0
+    /// 发出去那一帧的序号（2 字节，循环）
+    private var outSeq: UInt16 = 0
+    /// 收到的那一帧序号（期望值）：用来判丢帧/乱序
+    private var expectSeq: UInt16? = nil
+    /// 丢帧补出来的帧数（PLC）、乱序丢掉的数量（都写进通话诊断）
+    private(set) var plcFilled = 0
+    private(set) var outOfOrder = 0
+    /// 抖动缓冲目标深度（帧数，40ms 一帧）：网络抖就自动加厚，稳了再慢慢放薄
+    private var bufferTarget: Int = 4
+    private var lastPlcAt: Date = .distantPast
+    /// 上一帧的音频（PLC 补帧用）
+    private var lastPlayedFrame: Data? = nil
     /// 每帧多少采样（16000Hz × 0.04s = 640）
     private let sampleRate: Double = 16000
     private let frameSamples = 640
@@ -76,6 +90,8 @@ final class CallAudioPipe: NSObject, AVCaptureAudioDataOutputSampleBufferDelegat
     var playDiag: String {
         "播放端 收到=\(framesIn) 排播=\(framesScheduled) 丢=\(framesDropped)"
             + " 采集端 发出=\(framesOut)帧"
+            /* 2026-10-13：抖动缓冲 / 丢包补偿的实况（排查"断续/杂音"看这几个数就够了） */
+            + " 补帧=\(plcFilled) 乱序=\(outOfOrder) 缓冲=\(bufferTarget)帧"
             + " 延迟峰值=\(String(format: "%.1f", latencyPeak))s"
             + " 引擎=\(player.isRunning ? "跑" : "停")"
             + " 播放器=\(playerReady ? (playerNode.isPlaying ? "跑" : "停") : "没起")"
@@ -427,6 +443,9 @@ final class CallAudioPipe: NSObject, AVCaptureAudioDataOutputSampleBufferDelegat
         let chunk0 = Data(bytes: ch[0], count: Int(out.frameLength) * 2)
         let peak = peakOfInt16(chunk0)
         lastCapturePeak = peak
+        /* 顺手把电平归一成 0…1 存下来（群通话「谁在说话」上报给服务器）：
+           满量程 32767，按 0.35 满量程算"在说话"，超过就算 1。 */
+        lastLevel = max(0, min(1, Double(peak) / (32767.0 * 0.35)))
         /* 软件增益（简易 AGC）：输入偏小的时候提一把，太响的时候压一下 ——
            .default 模式下没有系统 AGC，不补一下对面听着还是很小。
            目标峰值约 6000（满量程的 18%），增益限在 0.5~6 倍之间；只对小于 4000 的做提升，
@@ -456,7 +475,16 @@ final class CallAudioPipe: NSObject, AVCaptureAudioDataOutputSampleBufferDelegat
             let chunk = pending.prefix(frameBytes)
             pending.removeFirst(frameBytes)
             framesOut += 1
-            onFrame?(Data(chunk))
+            /* ⚠ 2026-10-13 音质对齐微信：每帧前面加 **2 字节序号**（大端）。
+               接收端靠它判断「有没有丢帧 / 乱序」，丢了就补一帧（PLC），
+               而不是让播放器直接空过去 —— 空过去听着就是"咔哒/断续"。
+               老版本（不带头）发过来的帧是正好 1280 字节，接收端按长度自动兼容。 */
+            outSeq = (outSeq &+ 1) & 0xFFFF
+            var frame = Data()
+            frame.append(UInt8((outSeq >> 8) & 0xFF))
+            frame.append(UInt8(outSeq & 0xFF))
+            frame.append(Data(chunk))
+            onFrame?(frame)
         }
     }
 
@@ -464,8 +492,58 @@ final class CallAudioPipe: NSObject, AVCaptureAudioDataOutputSampleBufferDelegat
     func play(_ data: Data) {
         guard !data.isEmpty else { return }
         framesIn += 1
-        lastPlayPeak = peakOfInt16(data)
-        playQueue.async { [weak self] in self?.playOnQueue(data) }
+        /* ⚠ 2026-10-13 音质对齐微信（抖动缓冲 + 丢包补偿）：
+           · 带 2 字节序号的新帧（长度 = 1280 + 2）：按序号判丢帧/乱序
+             —— 丢了的帧补一帧（把上一帧衰减着重复一遍，PLC），听感上不会有"咔哒"；
+             · 不带序号的老帧（长度正好 1280）：原样播，行为和老版本一致。
+           序号连续时什么都不做；明显乱序（迟到）的直接丢，避免顺序错乱。 */
+        var payload = data
+        if data.count == frameSamples * 2 + 2 {
+            let hi = UInt16(data[data.startIndex])
+            let lo = UInt16(data[data.startIndex + 1])
+            let seq = (hi << 8) | lo
+            payload = data.subdata(in: (data.startIndex + 2)..<data.endIndex)
+            if let exp = expectSeq {
+                let diff = Int((seq &- exp) & 0xFFFF)
+                if diff == 0 || diff > 0x8000 {
+                    /* 重复帧 / 迟到很久的旧帧：丢掉（不然声音会来回跳） */
+                    if diff == 0 || diff < 0x8000 { outOfOrder += 1 }
+                    return
+                }
+                if diff > 1 && diff < 20 {
+                    /* 中间丢了 diff-1 帧 → 用上一帧衰减着补上（PLC） */
+                    if let last = lastPlayedFrame {
+                        let fill = min(diff - 1, 6)
+                        for k in 0..<fill {
+                            let att: Double = max(0.15, 0.55 - 0.08 * Double(k))
+                            pendingFrames.append(attenuate(last, att))
+                            plcFilled += 1
+                        }
+                    }
+                    lastPlcAt = Date()
+                    bufferTarget = min(6, bufferTarget + 1)     // 网络在抖 → 缓冲加厚
+                }
+            }
+            expectSeq = (seq &+ 1) & 0xFFFF
+            lastPlayedFrame = payload
+        } else {
+            lastPlayedFrame = payload
+        }
+        lastPlayPeak = peakOfInt16(payload)
+        playQueue.async { [weak self] in self?.playOnQueue(payload) }
+    }
+
+    /// 把一帧按比例衰减（PLC 补出来的帧听着是"上一帧的回声"，不会像静音那么突兀）
+    private func attenuate(_ data: Data, _ k: Double) -> Data {
+        var out = data
+        out.withUnsafeMutableBytes { raw in
+            guard let base = raw.baseAddress?.assumingMemoryBound(to: Int16.self) else { return }
+            let n = raw.count / 2
+            for i in 0..<n {
+                base[i] = Int16(max(-32768, min(32767, Int(Double(base[i]) * k))))
+            }
+        }
+        return out
     }
 
     private func playOnQueue(_ data: Data) {
@@ -495,9 +573,17 @@ final class CallAudioPipe: NSObject, AVCaptureAudioDataOutputSampleBufferDelegat
            追的过程是"播放点往前挪 40ms"，不是把已排进播放器的内容扔掉，
            所以听不出大窟窿，最多一两声轻微顿挫。 */
         let backlog = until.timeIntervalSinceNow
-        if backlog > 0.4, pendingFrames.count > 4 {
+        /* 2026-10-13：垫子深度改成**自适应**（bufferTarget，3~6 帧 = 120~240ms）——
+           网络抖的时候上面 play() 会把它加厚，稳一会儿再慢慢放薄。
+           以前固定 4 帧（160ms）：网络一抖就补不上，听着断断续续。 */
+        if Date().timeIntervalSince(lastPlcAt) > 8, bufferTarget > 3 {
+            bufferTarget -= 1
+            lastPlcAt = Date()          // 稳了：每 8 秒往下退一档
+        }
+        let cushion = bufferTarget
+        if backlog > 0.4, pendingFrames.count > cushion {
             let hard = backlog > 1.5
-            while pendingFrames.count > 4 {
+            while pendingFrames.count > cushion {
                 let now = until.timeIntervalSinceNow
                 if hard ? (now <= 0.2) : (now <= 0.25) { break }
                 pendingFrames.removeFirst()
