@@ -1941,6 +1941,8 @@ struct ChatDetailView: View {
 
     /// 输入框上面那一排快捷按钮：图片 / 拍摄 / 位置 / 文件 / 转账 / 红包 / 常用语
     /// （用的都是下面那套已经存在的动作，不新增逻辑）
+    /// ⚠ 2026-10-12 用户「群里不要可以转账」+「都对齐下微信」：
+    /// 微信**群聊里没有转账**（转账是点某个人的头像单独转），所以群里这一排不画「转账」。
     private var quickBar: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 8) {
@@ -1948,7 +1950,9 @@ struct ChatDetailView: View {
                 quickChip("camera", Tr("拍摄"))
                 quickChip("location", Tr("位置"))
                 quickChip("file", Tr("文件"))
-                quickChip("transfer", Tr("转账"))
+                if !isGroup {
+                    quickChip("transfer", Tr("转账"))
+                }
                 quickChip("redpacket", Tr("红包"))
                 quickChip("card", Tr("名片"))
             }
@@ -2121,11 +2125,21 @@ struct ChatDetailView: View {
             if let q = quote {
                 HStack(spacing: 8) {
                     Rectangle().fill(C.green).frame(width: 3, height: 30)
+                    /* ⚠ 2026-10-12 用户「图片引用看不到图片」：
+                       引用的是图片/多图时，这里给一张**小缩略图**（微信的引用条就是这样），
+                       不再是光一个「[图片]」字样。 */
+                    if q.kindName == "image" || q.kindName == "images" {
+                        RemoteImage(path: quoteThumbPath(q), icon: "photo")
+                            .frame(width: 30, height: 30)
+                            .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
+                    }
                     VStack(alignment: .leading, spacing: 1) {
                         Text(q.senderId == myId ? Tr("我") : displayName(q))
                             .font(pf(11.5))
                             .foregroundColor(C.green)
-                        Text(q.kindName == "text" ? String(q.body.prefix(40)) : "[" + q.kindName + "]")
+                        Text(q.kindName == "text" ? String(q.body.prefix(40))
+                             : ((q.kindName == "image" || q.kindName == "images") ? Tr("图片")
+                                : "[" + q.kindName + "]"))
                             .font(pf(12.5))
                             .foregroundColor(C.subLabel)
                             .lineLimit(1)
@@ -2148,6 +2162,12 @@ struct ChatDetailView: View {
                    靠「按了多久」区分。上一版只保留了切换，按住毫无反应，
                    用户就以为「浮层没了」（线上真被这么反馈过）。 */
                 Image(systemName: voiceMode ? "keyboard" : "mic")
+                    /* ⚠ 2026-10-12 血的教训：这一颗**只能改颜色**。
+                       今天给它加过 background(Circle) + overlay(strokeBorder) + shadow
+                       三层玻璃效果，用户装上一进聊天就被系统杀掉（服务器日志停在
+                       「8 准备打开」没有「9 页面出现」，和 B127~B144 那次同一个签名）——
+                       ChatDetailView 是个巨型视图，**多一层视图/修饰就挂**。
+                       所以「会亮」只用颜色表达：录音中变绿（下面那个三元）。 */
                     .font(.system(size: 21, weight: .regular))
                     .foregroundColor(recorder.recording ? C.green : C.chatBarIcon)
                     .frame(width: L.composerIconBox, height: L.composerIconBox)
@@ -2290,6 +2310,8 @@ struct ChatDetailView: View {
                                     dictation.toggle { s in input = base.isEmpty ? s : (base + s) }
                                 } label: {
                                     Image(systemName: dictation.listening ? "mic.fill" : "mic")
+                                        /* 同上：这颗也只能改颜色（听写中变绿），
+                                           不能再套 background/overlay/shadow —— 会闪退 */
                                         .font(.system(size: 17))
                                         .foregroundColor(dictation.listening ? C.green : C.chatBarIcon)
                                         .frame(width: 30, height: 30)
@@ -2438,7 +2460,9 @@ struct ChatDetailView: View {
                        onCaptureSticker: { panel = .none; showCaptureSticker = true },
                        mine: myStickers)
         case .plus:
-            PlusPanel(items: plusItems,
+            /* 群聊里不显示「转账」（微信群聊也没有转账，要转就点头像单聊转）——
+               2026-10-12 用户：「群里不要可以转账」「都对齐下微信」。 */
+            PlusPanel(items: isGroup ? plusItems.filter { $0.action != "transfer" } : plusItems,
                       onTap: { item in handlePlus(item) },
                       onLongPress: { item in handlePlusLong(item) })
         case .mention:
@@ -2547,6 +2571,20 @@ struct ChatDetailView: View {
         guard let d = try? JSONSerialization.data(withJSONObject: body),
               let json = String(data: d, encoding: .utf8) else { return }
         send(kind: "music", content: json)
+    }
+
+    /// 引用条里那张小缩略图要用哪张图：
+    /// 单图 = 它自己的地址；多图（九宫格）= JSON 里的第一张。
+    private func quoteThumbPath(_ m: Message) -> String {
+        let body = m.body
+        if m.kindName == "image" { return imageRefPath(body) }
+        /* images 的正文是 {"paths":["/uploads/a.jpg", …]} */
+        if let d = body.data(using: .utf8),
+           let o = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
+           let arr = o["paths"] as? [String], let first = arr.first {
+            return imageRefPath(first)
+        }
+        return imageRefPath(body)
     }
 
     private func sendText() {
@@ -2802,6 +2840,9 @@ struct ChatDetailView: View {
         case .image(let img):
             uploading = true
             let px = img.sendPixelSize
+            /* ⚠ 2026-10-12 用户反复说「发图慢」：加一条**从点发送到气泡出现**的分段打点，
+               下次发一张图就能从服务器日志看到时间到底花在压、传、还是发消息上。 */
+            let tTap = Date()
             Task {
                 let t0 = Date()
                 do {
@@ -2814,6 +2855,12 @@ struct ChatDetailView: View {
                         messages.append(m)
                     }
                     let tSend = Date()
+                    let startDelay = t0.timeIntervalSince(tTap)
+                    Task { await API.shared.callDiag("发图 单张 起手等待=\(Int(startDelay * 1000))ms"
+                        + " 压+传=\(Int(tUp.timeIntervalSince(t0) * 1000))ms"
+                        + " 发送=\(Int(tSend.timeIntervalSince(tUp) * 1000))ms"
+                        + " 合计=\(Int(tSend.timeIntervalSince(tTap) * 1000))ms"
+                        + " 原图=\(original ? 1 : 0) 原始=\(Int(img.size.width))x\(Int(img.size.height))") }
                     Task { await API.shared.callDiag("发图(+) 压+传=\(Int(tUp.timeIntervalSince(t0) * 1000))ms"
                         + " 发送=\(Int(tSend.timeIntervalSince(tUp) * 1000))ms"
                         + " 原图=\(original ? 1 : 0) 原始=\(Int(img.size.width))x\(Int(img.size.height))") }
@@ -2831,6 +2878,12 @@ struct ChatDetailView: View {
             uploading = true
             Task {
                 do {
+                    /* ⚠ 2026-10-12 用户「图片发出速度快一点」：
+                       试过"4 张同时并行传"，用户实测**反而更慢**（手机同时压 4 张图，
+                       重绘/编码抢 CPU，还互相抢带宽）—— 用户明确要求：「发多图逻辑还是用
+                       之前那个快的」。所以改回**一张一张顺序传**（原来那套），
+                       只是底层上传换成了更快的二进制直传。顺手记一条耗时打点。 */
+                    let t0 = Date()
                     var urls: [String] = []
                     var dims: [(w: Int, h: Int)] = []
                     for img in list {
@@ -2839,6 +2892,8 @@ struct ChatDetailView: View {
                         dims.append(img.sendPixelSize)
                         seedLocalImage(up.url, img, data: up.data)
                     }
+                    CrashCatcher.note("发图", "顺序传完 \(urls.count)/\(list.count) 张，用时 "
+                                      + String(Int(Date().timeIntervalSince(t0) * 1000)) + "ms")
                     if urls.count >= 4 {
                         CrashCatcher.note("发图", "合成一条九宫格（\(urls.count) 张）")
                         let body = "{\"paths\":" + Self.jsonStringArray(urls) + "}"

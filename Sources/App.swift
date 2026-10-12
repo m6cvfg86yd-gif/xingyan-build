@@ -227,6 +227,25 @@ final class AppState: ObservableObject {
     /// 走最外层整页打开，不依赖「会话页的导航栈还在不在」——扫一扫从任何页面都能开，
     /// 以前那种「往会话页栈里 push」的写法，人不在会话页时通知就丢了（所以看着像不跳转）。
     @Published var openChat: Chat?
+    /// 点了推送通知要让会话页自己把某个会话推进去（2026-10-12）：
+    /// ⚠ 以前是直接 `openChat = c`（最外层 fullScreenCover 整页压上去）——
+    /// 用户反复报「点推送通知就闪退」，因为点通知进来时 App 可能还在冷启动，
+    /// 整页视图压上去会和启动那几帧打架被系统杀掉。
+    /// 现在改成把会话 id 放这儿，**由会话列表按它自己的导航** push（和手点一个会话一模一样）。
+    @Published var pendingPushChatId: String?
+    /// 置 true 时 MainTab 把底栏切回「会话」那一页（配合 openChatViaList 用）
+    @Published var wantChatsTab = false
+
+    /// **统一的「打开某个会话」入口**（2026-10-12）：
+    /// 以前各处都是 `app.openChat = c` —— 最外层 fullScreenCover 把整页聊天页压上去。
+    /// 那条路在「页面正在切换」的瞬间会被系统杀掉：点推送（用户报过）、**刚建完群**（用户报
+    /// 「创建了群也会闪退」）、扫码进群、搜索结果点进去……都是同一类。
+    /// 现在统一改成：切回会话 tab + 把会话 id 交给会话列表，由它用自己那条导航 push
+    /// —— 和用户手点一个会话**完全同一条路**，那条路一直是稳的。
+    func openChatViaList(_ c: Chat) {
+        wantChatsTab = true
+        pendingPushChatId = c.id
+    }
     /// 从聊天里点好友分享来的小游戏卡片 → 全屏打开那个小游戏。
     /// ⚠ 挂在**最外层**（MainTab）来弹，不放在聊天页里 —— 在聊天页里挂
     /// `fullScreenCover(item:)` 会让聊天页一打开就闪退（2026-10-11 踩过）。
