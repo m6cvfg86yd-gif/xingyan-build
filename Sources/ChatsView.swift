@@ -446,7 +446,6 @@ struct SwipeChatRow: View {
         }
     }
 }
-
 /* ============================================================ 微信（会话列表） */
 
 struct ChatsView: View {
@@ -1106,6 +1105,10 @@ struct ChatsView: View {
             .navigationDestination(for: Chat.self) { chat in
                 chatDest(chat)
             }
+            /* 点了推送通知：MainTab 把会话 id 放到 app.pendingPushChatId，
+               这里按**列表自己那条导航**把它推进去（和手点一个会话同一条路）。 */
+            .onAppear { openPendingPushChat(app.pendingPushChatId) }
+            .onChange(of: app.pendingPushChatId) { v in openPendingPushChat(v) }
             /* 公众号那两条会话：点进去是公众号页面（不是聊天页） */
             .navigationDestination(isPresented: $showOA) {
                 OfficialAccountPage(accountId: oaOpenId)
@@ -1207,6 +1210,33 @@ struct ChatsView: View {
             let err = await API.shared.deleteChat(chatId: chat.id)
             await app.loadChats()
             app.show(err ?? "已删除")
+        }
+    }
+
+    /// 点了推送通知要进的那个会话（app.pendingPushChatId）：
+    /// 列表还没加载好就等一会儿（最多 8 秒），加载好了**用列表自己的导航** push 进去。
+    /// 2026-10-12 用户：「点推送通知依旧闪退」—— 以前是 MainTab 用最外层 fullScreenCover
+    /// 整页压聊天页，冷启动那几帧会打架被系统杀掉；改成走这一条
+    /// （和用户手点一个会话**完全同一条路**，那条路日志里一直正常）。
+    private func openPendingPushChat(_ id: String?) {
+        guard let id, !id.isEmpty else { return }
+        Task { @MainActor in
+            for _ in 0..<40 {
+                if app.chats.contains(where: { $0.id == id }) { break }
+                await app.loadChats()
+                try? await Task.sleep(nanoseconds: 200_000_000)
+            }
+            guard let c = app.chats.first(where: { $0.id == id }) else {
+                app.pendingPushChatId = nil
+                app.show(Tr("找不到这个会话"))
+                CrashCatcher.note("推送", "列表里没有这个会话 " + id)
+                return
+            }
+            app.pendingPushChatId = nil
+            CrashCatcher.note("推送", "交给会话列表打开 " + id)
+            /* 让列表先画出来那一帧，再把会话推进去（不然 push 和首次渲染撞一起） */
+            try? await Task.sleep(nanoseconds: 350_000_000)
+            path.append(c)
         }
     }
 }
