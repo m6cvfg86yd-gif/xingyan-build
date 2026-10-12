@@ -4,6 +4,7 @@ import AudioToolbox
 import UIKit
 import Combine
 import WebRTC
+import Network
 
 /* ============================================================
    真人语音/视频通话（App ↔ App、App ↔ 网页版都能通）
@@ -186,6 +187,7 @@ final class CallCenter: NSObject, ObservableObject {
                 self?.handle(ev)
             }
         Task { await loadIce() }
+        startPathMonitor()
         /* 去系统设置里把麦克风打开、再回到 App：自动把采集抢回来（用户不用重拨） */
         _ = NotificationCenter.default.addObserver(forName: UIApplication.didBecomeActiveNotification,
                                                    object: nil, queue: .main) { [weak self] _ in
@@ -258,7 +260,7 @@ final class CallCenter: NSObject, ObservableObject {
         guard phase == .incoming else { return }
         if asAudio, isVideo {
             isVideo = false
-            sendCall(["action": "switch", "video": false])
+            sendCall(["action": "media", "media": "audio"])   // 协议是 media（服务器没有 switch）
         }
         Ringtone.shared.stop()
         relayOK = false                      // 接起来：中继状态重新算
@@ -283,6 +285,65 @@ final class CallCenter: NSObject, ObservableObject {
         guard !callId.isEmpty else { return }
         sendCall(["action": "reject"])
         finish(tip: "已拒绝")
+    }
+
+    /// 拒接并回一句（2026-10-13 用户要求，对齐微信「拒绝并回复」）：
+    /// 先往这个会话里发一条文字，再正常拒接 —— 对方那边会直接看到这句话。
+    func reject(withReply text: String) {
+        let say = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !callId.isEmpty else { return }
+        /* 说明一句走服务器的拒接通道（服务端知道这两个人是谁，直接往他们的单聊里插一条
+           —— 客户端这边不用自己去猜会话 id） */
+        if say.isEmpty { sendCall(["action": "reject"]) }
+        else { sendCall(["action": "reject", "text": say]) }
+        finish(tip: "已拒绝")
+    }
+
+    /* ---------------- ② 语音中切视频 / ③ 谁在说话 / ④ 拉人入会（2026-10-13 对标微信） ---------------- */
+
+    /// ③ 群里每个人的音量（id → 0…1），界面用来给「正在说话的人」画光圈
+    @Published var speakerLevels: [String: Double] = [:]
+    /// 自己刚才报出去的音量（防重复上报）
+    private var lastLevelSent: Double = -1
+    private var levelTask: Task<Void, Never>?
+
+    /// ② 语音通话中「切到视频」（对齐微信）：把 media 报成 video，两端各自把视频打开。
+    /// 视频走腾讯云 TRTC（我们本来就接了它），比临时给 WebRTC 加一路轨稳。
+    func upgradeToVideo() {
+        guard phase == .active, !isVideo, !isGroupCall else { return }
+        isVideo = true
+        sendCall(["action": "media", "media": "video"])
+        note("切到视频通话")
+        Task { await startTRTCIfPossible() }
+    }
+
+    /// ④ 通话中把群成员拉进**同一个**通话（不再只是发一条邀请消息）
+    func inviteToCall(_ userId: String) {
+        guard !roomId.isEmpty, !userId.isEmpty else { return }
+        sendCall(["action": "group-invite", "roomId": roomId, "toUserId": userId])
+        note("邀请 " + userId + " 加入通话")
+    }
+
+    /// ③ 每隔 300ms 把自己这边的音量报给服务器（只在群通话里用得上）
+    private func startLevelReporting() {
+        levelTask?.cancel()
+        levelTask = Task { @MainActor in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 300_000_000)
+                if Task.isCancelled { break }
+                guard phase.isBusy, isGroupCall else { continue }
+                let lv = Double(CallAudioPipe.shared.lastLevel)
+                if abs(lv - lastLevelSent) < 0.02 { continue }   // 没变就不发，省流量
+                lastLevelSent = lv
+                sendCall(["action": "level", "level": max(0, min(1, lv))])
+            }
+        }
+    }
+
+    /// ③ 别人报上来的音量（服务器每 250ms 汇总一次广播过来）
+    private func applyLevels(_ ev: PushEvent) {
+        guard isGroupCall else { return }
+        speakerLevels = ev.callLevels
     }
 
     /// 挂断 / 取消
@@ -319,7 +380,10 @@ final class CallCenter: NSObject, ObservableObject {
     func switchVideo() {
         guard phase == .active || phase == .connecting || phase == .outgoing else { return }
         isVideo.toggle()
-        sendCall(["action": "switch", "video": isVideo])
+        /* ⚠ 2026-10-13 修「语音→视频升级不生效」：以前发的是 `action:'switch'`，
+           而**服务器根本没有 switch 这个动作**（它只认 media）—— 对面永远收不到，
+           所以切了跟没切一样。现在按服务器的协议发 media。 */
+        sendCall(["action": "media", "media": isVideo ? "video" : "audio"])
         if isVideo {
             Task {
                 await beginMedia()
@@ -618,6 +682,26 @@ final class CallCenter: NSObject, ObservableObject {
                 if isVideo { Task { await startTRTCIfPossible() } }
             }
 
+        /* 对方切了媒体（服务器 relay 的是 action:'media'）—— 2026-10-13 加：
+           以前只认 switch，而服务器根本不会发 switch（它只发 media），
+           所以「对方切视频」这边毫无反应（语音→视频升级不生效的第二个原因）。 */
+        case "media":
+            guard ev.callId == callId else { return }
+            let wantVideo = (ev.callMedia == "video")
+            if wantVideo != isVideo {
+                isVideo = wantVideo
+                tip = wantVideo ? "对方切换成了视频通话" : "对方切换成了语音通话"
+                if wantVideo {
+                    Task {
+                        await beginMedia()
+                        await startTRTCIfPossible()
+                    }
+                } else {
+                    localVideoTrack?.isEnabled = false
+                    if usingTRTC { TRTCBridge.shared.setCameraOff(true) }
+                }
+            }
+
         /* ---------------- 群语音通话 ---------------- */
 
         case "group-incoming":
@@ -645,6 +729,11 @@ final class CallCenter: NSObject, ObservableObject {
             Ringtone.shared.startIncoming()
             UINotification.buzz()
 
+        case "levels":
+            /* ③ 「谁在说话」：服务端每 250ms 把整屋音量汇总广播过来 */
+            applyLevels(ev)
+            return
+
         case "group-ready":
             /* 我已经在房间里了（服务端回执）：进「通话中」开计时 */
             guard isGroupCall else { return }
@@ -665,6 +754,8 @@ final class CallCenter: NSObject, ObservableObject {
         case "group-joined", "group-left":
             guard isGroupCall, ev.callRoomId == roomId else { return }
             roster = ev.callRoster
+            /* ③ 群通话开起来就每 300ms 上报自己的音量（「谁在说话」高亮用） */
+            startLevelReporting()
             if action == "group-joined", !ev.callPeerName.isEmpty {
                 tip = ev.callPeerName + " 加入了通话"
             }
@@ -781,6 +872,36 @@ final class CallCenter: NSObject, ObservableObject {
             .map { String($0).trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty }
         if !list.isEmpty { iceServers = list.map { RTCIceServer(urlStrings: [$0]) } }
+    }
+
+    /* MARK: - 切网自动重连（2026-10-13 稳定性，对标微信）
+       微信在 Wi-Fi ↔ 4G 切换、短暂断流时能自己接回来；我们以前只有「网络不太稳定」
+       那行提示，3 秒就挂断。现在监听系统网络路径变化：
+         · 语音通话：媒体走「服务器转发」那条独立通道 → 换网后重抢麦克风、重接转发
+         · 视频通话：直接兜底切到腾讯云 TRTC（它对切网 / 弱网最稳）
+       并把「网络切换」写进通话打点，线上能一眼看出是不是切网导致的断线。 */
+    private let pathMonitor = NWPathMonitor()
+    private var lastPathStatus: NWPath.Status? = nil
+
+    private func startPathMonitor() {
+        pathMonitor.pathUpdateHandler = { [weak self] path in
+            Task { @MainActor in
+                guard let self = self else { return }
+                let prev = self.lastPathStatus
+                self.lastPathStatus = path.status
+                guard prev != nil, prev != path.status else { return }   // 只在真的变了时动手
+                guard self.phase == .active else { return }
+                self.note("网络切换（" + (path.status == .satisfied ? "已联网" : "断开") + "）→ 自动重连")
+                self.weakNet = true
+                if self.tip != "通话中" && self.tip != "视频通话中" { self.tip = "网络切换，正在重连…" }
+                if self.isVideo {
+                    if !self.usingTRTC { await self.startTRTCIfPossible() }
+                } else {
+                    CallAudioPipe.shared.resetHandOver()
+                }
+            }
+        }
+        pathMonitor.start(queue: DispatchQueue(label: "chris.call.path"))
     }
 
     private func makeFactory() -> RTCPeerConnectionFactory {
@@ -1247,16 +1368,40 @@ extension CallCenter: RTCPeerConnectionDelegate {
                                     detail: "", auto: 2)
                 }
             case .failed:
-                /* 通话中途断：也留 5 秒让用户看清原因 */
-                self.failLater("通话连接失败，可能是网络挡住了", hold: 5)
+                /* ⚠ 2026-10-13 稳定性（对标微信）：以前这里不分语音/视频，一律判「通话失败」。
+                   但**语音通话的媒体走的是「服务器转发」那条独立通道**（不依赖 WebRTC/P2P），
+                   WebRTC 挂了并不代表听不见/说不了 —— 直接判失败等于把还能用的通话掐掉。
+                   现在：语音只提示弱网并重抢麦；视频才先兜底切腾讯云 TRTC，再判失败。 */
+                if !self.isVideo {
+                    self.weakNet = true
+                    if self.tip != "通话中" { self.tip = "网络不太稳定，正在重连…" }
+                    self.note("WebRTC failed（语音走转发通道，通话继续）")
+                    CallAudioPipe.shared.resetHandOver()
+                } else {
+                    self.weakNet = true
+                    if self.tip != "视频通话中" { self.tip = "网络不太稳定，正在重连…" }
+                    self.note("WebRTC failed → 兜底切 TRTC")
+                    if !self.usingTRTC { await self.startTRTCIfPossible() }
+                    try? await Task.sleep(nanoseconds: 5_000_000_000)
+                    if self.phase == .active && !self.usingTRTC && self.pc?.connectionState == .failed {
+                        self.failLater("通话连接失败，可能是网络挡住了", hold: 5)
+                    }
+                }
             case .disconnected:
-                /* 弱网提示（微信也会写「网络不佳」）：先挂一行提示，3 秒还没回来才断 */
+                /* 弱网提示（微信也会写「网络不佳」）：**宽限从 3 秒放到 8 秒** ——
+                   微信切网那一下（Wi-Fi→4G）要几秒才接回来，3 秒就挂断太急。 */
                 self.weakNet = true
                 if self.tip != "通话中" && self.tip != "视频通话中" { self.tip = "网络不太稳定，正在重连…" }
-                // 断开 3 秒还没恢复就结束（和网页版一致）
-                try? await Task.sleep(nanoseconds: 3_000_000_000)
+                try? await Task.sleep(nanoseconds: 8_000_000_000)
                 if self.phase == .active && self.pc?.connectionState == .disconnected {
-                    self.finish(tip: "通话已断开")
+                    if self.isVideo && !self.usingTRTC {
+                        self.note("视频断线 8 秒 → 兜底切 TRTC")
+                        await self.startTRTCIfPossible()
+                        try? await Task.sleep(nanoseconds: 3_000_000_000)
+                    }
+                    if self.phase == .active && !self.usingTRTC && self.pc?.connectionState == .disconnected {
+                        self.finish(tip: "通话已断开")
+                    }
                 }
             default:
                 break

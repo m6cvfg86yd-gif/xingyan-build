@@ -15,6 +15,8 @@ import UIKit
 final class CallAudioPipe: NSObject, AVCaptureAudioDataOutputSampleBufferDelegate {
     static let shared = CallAudioPipe()
 
+    /// 本机麦克风最近的音量（0…1，按峰值归一）：群通话「谁在说话」上报用（2026-10-13）
+    private(set) var lastLevel: Double = 0
     /// 每帧多少采样（16000Hz × 0.04s = 640）
     private let sampleRate: Double = 16000
     private let frameSamples = 640
@@ -427,6 +429,9 @@ final class CallAudioPipe: NSObject, AVCaptureAudioDataOutputSampleBufferDelegat
         let chunk0 = Data(bytes: ch[0], count: Int(out.frameLength) * 2)
         let peak = peakOfInt16(chunk0)
         lastCapturePeak = peak
+        /* 顺手把电平归一成 0…1 存下来（群通话「谁在说话」上报给服务器）：
+           满量程 32767，按 0.35 满量程算"在说话"，超过就算 1。 */
+        lastLevel = max(0, min(1, Double(peak) / (32767.0 * 0.35)))
         /* 软件增益（简易 AGC）：输入偏小的时候提一把，太响的时候压一下 ——
            .default 模式下没有系统 AGC，不补一下对面听着还是很小。
            目标峰值约 6000（满量程的 18%），增益限在 0.5~6 倍之间；只对小于 4000 的做提升，

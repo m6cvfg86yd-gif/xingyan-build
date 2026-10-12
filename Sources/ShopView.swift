@@ -126,7 +126,10 @@ struct ShopView: View {
         }
         /* 拼多多风格 H5 商城：整页打开（改商城只要换服务器上的文件，不用重新出包） */
         .fullScreenCover(isPresented: $showMall) {
-            MallWebPage().environmentObject(app)
+            /* ⚠ 2026-10-12 用户要求商城要**原生**：这里也改成原生商城
+               （原来这里开的是服务器上的 H5 页面，用户看到的「又是 h5」就是它）。
+               H5 那页 MallWebPage.swift 没删，留着备用。 */
+            MallNativeView().environmentObject(app)
         }
     }
 
