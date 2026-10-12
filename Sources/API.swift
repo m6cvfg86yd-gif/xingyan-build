@@ -3497,6 +3497,34 @@ final class API {
         return try await post("/api/shop/order", b, as: ShopOrderPayload.self)
     }
 
+    /* ============================================================ 拼多多商城（原生版，2026-10-12）
+       GET  /api/mall     → { products, banners }（商城的商品和轮播图，服务器 data/mall.json 是真源）
+       POST /api/ops/mall → 管理侧（上架/下架/改价/删除/新增商品 + 换轮播图），只有 ops 账号能用。
+       页面见 MallNative.swift（商城）；管理侧见 MallManage.swift（管理页里的「拼多多商城」）。 */
+
+    struct MallPayload: Decodable {
+        var products: [DDProduct]?
+        var banners: [String]?
+        /// 商城名 / 标语（管理页里能改，用户要求「商城名」）
+        var name: String?
+        var slogan: String?
+    }
+
+    /// 商城数据：拿不到就返回空（App 会退回内置那 16 个商品，至少不是白屏）
+    func mallData() async -> (products: [DDProduct], banners: [String], name: String, slogan: String) {
+        guard let p: MallPayload = try? await get("/api/mall", as: MallPayload.self) else {
+            return ([], [], "", "")
+        }
+        return (p.products ?? [], p.banners ?? [], p.name ?? "", p.slogan ?? "")
+    }
+
+    /// 管理侧改商城：action = product（新增或改一件）/ remove（删一件）/
+    /// banners（整份换轮播图）/ settings（改商城名 + 标语）
+    @discardableResult
+    func opsMall(_ body: [String: Any]) async -> Bool {
+        (try? await post("/api/ops/mall", body, as: MallPayload.self)) != nil
+    }
+
     /* ============================================================ 小星（顶栏那颗眼睛）的三档
        GET/POST /api/me/eyes → { eyes: on|static|off, paid, price, balance }。
        on 是 ¥40 一次性买断（走零钱），static / off 免费。
@@ -4602,6 +4630,13 @@ final class API {
         guard let data = data else {
             throw APIError.message("图片处理失败")
         }
+        /* ⚠ 2026-10-12 用户「这个版本图片发出去有点慢，之前很快的」：
+           以前图片是**塞进 JSON 里 base64** 传的 —— base64 本身要多传 33%，
+           还要在手机上编码、在服务器上解码（两边都是白等的 CPU）。
+           现在和视频/文件一样走**二进制直传**（/api/upload/raw），
+           同样的图少传三分之一字节、少两次编解码，发图快一截。
+           失败再退回老路（老服务器没有 /api/upload/raw 时照样能发）。 */
+        if let url = try? await uploadRawJPEG(data) { return url }
         let b64 = data.base64EncodedString()
         let payload: UploadPayload = try await post("/api/upload",
                                                     ["dataUrl": "data:image/jpeg;base64," + b64,
@@ -4609,6 +4644,26 @@ final class API {
                                                     as: UploadPayload.self)
         guard let url = payload.url else { throw APIError.message("上传失败") }
         return url
+    }
+
+    /// 图片二进制直传：POST /api/upload/raw（Content-Type: image/jpeg），返回服务器路径
+    private func uploadRawJPEG(_ data: Data) async throws -> String {
+        guard let url = URL(string: base + "/api/upload/raw") else {
+            throw APIError.message("服务器地址不正确")
+        }
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.timeoutInterval = 120
+        req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        req.setValue("image/jpeg", forHTTPHeaderField: "Content-Type")
+        /* 告诉服务器「这张已经在手机上按规格压好了」—— 服务器就不会再 spawn 一次 ffmpeg
+           （它对 >300 万像素的图会自动缩一遍，那一下就是几百毫秒到 2 秒的卡顿） */
+        req.setValue("1", forHTTPHeaderField: "x-chris-compressed")
+        let (d, resp) = try await session.upload(for: req, from: data)
+        guard let http = resp as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
+            throw APIError.message("上传失败（HTTP \((resp as? HTTPURLResponse)?.statusCode ?? 0)）")
+        }
+        return try Self.rawUploadURL(from: d)
     }
 
     /// mentions：群里这条消息 @ 了谁（userId 列表）—— 服务端存下来，
@@ -4810,6 +4865,17 @@ extension UIImage {
         if long > maxSide {
             let k = maxSide / long
             target = CGSize(width: size.width * k, height: size.height * k)
+        }
+        /* ⚠ 2026-10-12 用户「图片发出去有点慢」——真凶在这儿：
+           服务器（checkImage）对**超过 300 万像素**的图会 spawnSync 跑一次 ffmpeg 再缩一遍，
+           而 1280×2736 正好是 350 万像素 → 每张图上传完之后服务器还要卡几百毫秒到 2 秒
+           （diag 实测：改二进制之前 200~500ms，之后 809ms / 2120ms，差别就是这次 ffmpeg）。
+           所以客户端先自己压到 240 万像素以内（画质肉眼看不出差别），服务器就不会再动手，
+           整个"发出去"的时间少掉那一大截。 */
+        let pixels = target.width * target.height
+        if pixels > 2_400_000 {
+            let k = (2_400_000 / pixels).squareRoot()
+            target = CGSize(width: (target.width * k).rounded(), height: (target.height * k).rounded())
         }
         let format = UIGraphicsImageRendererFormat.default()
         format.scale = 1

@@ -171,7 +171,7 @@ func openScannedCard(_ code: String, app: AppState) {
                        等扫一扫那层收起来再打开（不然整页盖整页会打架）。 */
                     if let c = res.chat {
                         try? await Task.sleep(nanoseconds: 450_000_000)
-                        app.openChat = c
+                        app.openChatViaList(c)
                     }
                 }
             }
