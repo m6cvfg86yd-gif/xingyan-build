@@ -86,8 +86,16 @@ struct DiscoverView: View {
                     MomentsView()
                 } else if key == "nearby" {
                     NearbyPageView()
-                } else if key == "shake" {
-                    ShakePageView()
+        } else if key == "shake" {
+            /* 2026-10-13：服务端 discover.json 里那行已经改名「漂流瓶」（action=bottle），
+               但 App 自己那份内置列表 / 老配置里可能还是 shake —— 这里**两个都进漂流瓶**，
+               用户点「摇一摇」那个位置看到的就一定是漂流瓶（不会再落到老的摇一摇页，
+               那一页没有内容，用户报的「漂流瓶里面没有内容」就是点到它了）。 */
+            BottlePageView()
+        } else if key == "bottle" {
+            /* 2026-10-12 用户：「摇一摇改成漂流瓶」——服务端 discover.json 里 d05
+               已经改名「漂流瓶」、action = bottle，点进来就是这一页（老的 shake 也走这儿） */
+            BottlePageView()
                 } else if key == "live" {
                     LiveListView()
                 } else if key == "games" {
@@ -154,6 +162,7 @@ struct DiscoverView: View {
         case "news": path.append("news")
         case "nearby": path.append("nearby")
         case "shake": path.append("shake")
+        case "bottle": path.append("bottle")          // 漂流瓶（摇一摇改成漂流瓶）
         case "live": path.append("live")
         case "games": path.append("games")
     case "channels": path.append("channels")
@@ -190,8 +199,9 @@ extension DiscoverItem {
                          color: "#F4525B", action: "soon", group: 2, enabled: true),
             DiscoverItem(id: "d04", label: "扫一扫", icon: "i.scan", svg: I.scan,
                          color: "#3D83E7", action: "soon", group: 3, enabled: true),
-            DiscoverItem(id: "d05", label: "摇一摇", icon: "i.shake", svg: I.shake,
-                         color: "#4489EA", action: "soon", group: 3, enabled: true),
+            /* 2026-10-12 用户：「摇一摇改成漂流瓶」（服务端 discover.json 同步改过） */
+            DiscoverItem(id: "d05", label: "漂流瓶", icon: "i.shake", svg: I.shake,
+                         color: "#2E7BD6", action: "bottle", group: 3, enabled: true),
             DiscoverItem(id: "d06", label: "看一看", icon: "i.look", svg: I.look,
                          color: "#7275E9", action: "look", group: 4, enabled: true),
             DiscoverItem(id: "d07", label: "搜一搜", icon: "i.searchRow", svg: I.searchRow,
@@ -368,6 +378,8 @@ struct MomentsView: View {
     /// 点「余下 x 条」进的那一页（用户要求：单独一整页看那一串）
     @State private var groupPage: MomentGroup?
     @State private var showGroupPage = false
+    /// 朋友圈「消息列表」（右上角那个小信封）：有没有人在等我点开
+    @State private var showNoticeList = false
 
     /// 和网页版一致：往下滚过「封面高度 - 52」时，顶部出现「朋友圈」三个字
     /// 两路测量 + LazyVStack 哨兵兜底，哪个先到算哪个
@@ -519,6 +531,11 @@ struct MomentsView: View {
             if let g = groupPage {
                 MomentGroupPage(title: g.title, moments: g.moments)
             }
+        }
+        /* 右上角那个小信封 →「消息列表」（谁赞了/评论了我），和微信一模一样 */
+        .navigationDestination(isPresented: $showNoticeList) {
+            MomentNoticesView(onOpen: { n in openNotice(n) })
+                .environmentObject(app)
         }
         .modifier(TapAvatarCard(cardUser: $cardUser))
         .hidesTabBar()
@@ -684,23 +701,27 @@ struct MomentsView: View {
             /* 顶上那一条遮罩（用户反馈「朋友圈顶上的遮罩没了」）：
                封面图顶到屏幕最上面时，返回箭头 / 相机 / 状态栏那几个白图标
                压在一张亮封面上根本看不见 —— 微信这里就压了一条由深到透的黑。
-               浓度和高度都能在后台改：momentTopMask（默认 0.36）/ momentTopMaskH（默认 150）。 */
-            LinearGradient(colors: [Color.black.opacity(max(0, UIConfig.num("momentTopMask", 0.36))),
+               ⚠ 2026-10-12 用户要求「遮罩要透一点」：默认浓度 0.36 → 0.20
+               （高度不变），封面本身能看清一些，白图标仍然够用。
+               浓度和高度都能在后台改：momentTopMask（默认 0.20）/ momentTopMaskH（默认 150）。 */
+            LinearGradient(colors: [Color.black.opacity(max(0, UIConfig.num("momentTopMask", 0.20))),
                                     Color.black.opacity(0)],
                            startPoint: .top, endPoint: .bottom)
                 .frame(height: max(L.safeTop + 56, UIConfig.num("momentTopMaskH", 150)))
                 .frame(maxHeight: .infinity, alignment: .top)
                 .allowsHitTesting(false)
 
-            LinearGradient(colors: [Color.black.opacity(0), Color.black.opacity(0.34), Color.black.opacity(0.52)],
+            /* 底下这条是给名字/签名当底衬的，同样按「透一点」调的（0.34/0.52 → 0.22/0.36） */
+            LinearGradient(colors: [Color.black.opacity(0), Color.black.opacity(0.22), Color.black.opacity(0.36)],
                            startPoint: .top, endPoint: .bottom)
                 .frame(height: L.coverH * 0.62)
                 .frame(maxHeight: .infinity, alignment: .bottom)
                 .allowsHitTesting(false)
 
             HStack(alignment: .bottom, spacing: 12) {
-                /* 昵称 + 个性签名：微信「个人相册」这一页就是这样 —— 名字下面那行小字
-                   就是「我 → 个人信息 → 个性签名」里写的那句。
+                /* 昵称 + 个性签名：微信「朋友圈」这一页的排法 ——
+                   名字在头像左边，**个性签名挂在头像下面**（居中、跟着头像的宽度）。
+                   （2026-10-13 用户确认：「微信不是在头像下面的吗」—— 上一版挪到名字下面了，挪回来。）
                    以前这里写的是 app.me，看好友的朋友圈也会显示自己的名字/头像，一起改掉。 */
                 VStack(alignment: .trailing, spacing: 3) {
                     Text(owner?.name ?? "")
@@ -710,19 +731,20 @@ struct MomentsView: View {
                         .lineLimit(1)
                 }
                 .padding(.bottom, 24)
-                /* 用户要求：**个性签名放到头像底下**（和微信一致）—— 以前是跟在名字右边。 */
                 VStack(spacing: 4) {
                     Avatar(path: owner?.avatarPath ?? "", size: L.coverAvatar, radius: 8)
                         .shadow(color: Color.black.opacity(0.28), radius: 5, x: 0, y: 2)
                     if let sign = signature {
+                        /* 签名压在封面照片上：**白字 + 轻描边**才看得清
+                           （以前浅色模式用的是黑字，压在深色照片上几乎看不见） */
                         Text(sign)
                             .font(pf(12.5))
-                            /* 用户要求：**浅色模式黑字、深色模式白字**（跟着主题走，不是一直白字） */
-                            .foregroundColor(C.label)
+                            .foregroundColor(.white)
                             .lineLimit(2)
                             .multilineTextAlignment(.center)
                             .fixedSize(horizontal: false, vertical: true)
                             .frame(width: L.coverAvatar + 56, alignment: .center)
+                            .shadow(color: Color.black.opacity(0.6), radius: 3, x: 0, y: 1)
                     }
                 }
             }
@@ -959,6 +981,24 @@ struct MomentsView: View {
 
                 Spacer(minLength: 0)
 
+                /* 朋友圈「消息列表」（微信顶上那个小信封）：有人赞了/评论了我，上面出红点。
+                   不显示具体数字，和微信一样一个小红点。 */
+                ZStack(alignment: .topTrailing) {
+                    Button { showNoticeList = true } label: {
+                        FlexIcon(custom: IconOverrides.custom("nav.momentsBell"), size: 21,
+                                 color: solid ? C.label : .white, symbol: "bell", weight: .medium)
+                            .frame(width: 40, height: 44)
+                            .shadow(color: solid ? .clear : Color.black.opacity(0.55), radius: 2, x: 0, y: 1)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    if app.momentNoticeUnread > 0 {
+                        Circle().fill(C.red)
+                            .frame(width: 8, height: 8)
+                            .offset(x: -7, y: 9)
+                    }
+                }
+
                 /* 微信那套：**点一下** = 弹「拍摄 / 从相册选择」；**长按** = 直接拍小视频。
                    这里不用 Button —— Button 自带的手势会把同时挂的长按吃掉
                    （真机上就是"长按没反应"），onTapGesture + onLongPressGesture 才稳。 */
@@ -999,6 +1039,36 @@ struct MomentsView: View {
         guard !all.isEmpty else { return }
         viewerPaths = all
         viewerIndex = all.firstIndex(of: path) ?? 0
+    }
+
+    /// 点「消息列表」里的一条：把对应的那条动态打开（微信也是点一下就回到那条动态）。
+    /// 那条如果还在更下面的页里，就先把最新一页拉回来再找。
+    private func openNotice(_ n: MomentNotice) {
+        let mid = n.momentId ?? ""
+        guard !mid.isEmpty else { return }
+        if let hit = moments.first(where: { $0.id == mid }) { openMoment(hit); return }
+        Task {
+            await pollNewMoments()
+            if let hit = moments.first(where: { $0.id == mid }) {
+                openMoment(hit)
+            } else {
+                app.show(Tr("那条动态在更下面的记录里，往下翻就能看到"))
+            }
+        }
+    }
+
+    /// 打开一条动态：九宫格进大图、视频进播放器、纯文字就在顶上提示一下
+    private func openMoment(_ m: Moment) {
+        if let paths = m.images, !paths.isEmpty {
+            viewerPaths = paths
+            viewerIndex = 0
+            return
+        }
+        if let v = m.video, !v.isEmpty {
+            let full = v.hasPrefix("http") ? v : API.shared.base + v
+            if let u = URL(string: full) { momentVideo = u; return }
+        }
+        app.show(m.content ?? "")
     }
 
     private var publishSheet: some View {
@@ -1326,6 +1396,7 @@ struct MomentsView: View {
             hasMoreMoments = feed.hasMore
             momentTotal = feed.total
             feedRange = feed.range          // 别人的可见范围（3d / 6m / all）→ 底下一句提示
+            app.momentNoticeUnread = feed.noticeUnread    // 小信封上的红点
             /* 照微信：本机留一份"你看过的那几屏"当缓存 —— 下次进来先铺缓存（秒开、断网也能看） */
             if target == nil && !mineOnly { LocalStore.saveMoments(moments) }
         } else {

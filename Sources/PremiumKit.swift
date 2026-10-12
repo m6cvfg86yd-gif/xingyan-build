@@ -214,13 +214,17 @@ struct PanelDangerRow: View {
     var title: String
     var tap: () -> Void
 
+    /// 危险动作的红：浅色模式下 #FA5151 压在白卡上偏"粉"、看着发灰，
+    /// 这里用更实的红（浅 #E03A3A / 深 #FF6B6B），一眼能看清。
+    private var dangerInk: Color { Color.dyn(0xE03A3A, 0xFF6B6B) }
+
     var body: some View {
         Button(action: tap) {
             HStack(spacing: 11) {
                 PanelIcon(symbol: symbol, colors: PanelTint.red, size: 28)
                 Text(title)
                     .font(pf(16))
-                    .foregroundColor(C.red)
+                    .foregroundColor(dangerInk)
                 Spacer(minLength: 0)
             }
             .padding(.horizontal, 14)
@@ -232,6 +236,64 @@ struct PanelDangerRow: View {
 }
 
 /// 卡片里那种小圆玻璃按钮（群成员右上角的「＋ / －」）
+/// 微信那种**居中确认框**（自己画，不用系统 confirmationDialog ——
+/// 系统那个标题又小又灰，用户反馈「移出群聊看不清」）。
+/// 排版照微信：白卡 12 圆角、标题 17pt 深色居中、两条横线分隔的按钮（危险动作红字）。
+struct PanelConfirmDialog: View {
+    var title: String
+    var okText: String
+    /// 危险动作（移出群聊 / 退出群聊 / 清空记录）→ 按钮用红字
+    var danger: Bool = true
+    var onOk: () -> Void
+    var onCancel: () -> Void
+
+    private var okColor: Color {
+        danger ? Color.dyn(0xE03A3A, 0xFF6B6B) : C.green
+    }
+
+    var body: some View {
+        ZStack {
+            Color.black.opacity(0.42)
+                .ignoresSafeArea()
+                .onTapGesture { onCancel() }
+            VStack(spacing: 0) {
+                Text(title)
+                    .font(pf(16.5, .medium))
+                    .foregroundColor(C.label)
+                    .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.horizontal, 22)
+                    .padding(.vertical, 24)
+                    .frame(minWidth: 250)
+                Rectangle().fill(C.hairline).frame(height: 0.5)
+                HStack(spacing: 0) {
+                    Button { onCancel() } label: {
+                        Text(Tr("取消"))
+                            .font(pf(16.5))
+                            .foregroundColor(C.label)
+                            .frame(maxWidth: .infinity).frame(height: 50)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    Rectangle().fill(C.hairline).frame(width: 0.5, height: 50)
+                    Button { onOk() } label: {
+                        Text(okText)
+                            .font(pf(16.5, .semibold))
+                            .foregroundColor(okColor)
+                            .frame(maxWidth: .infinity).frame(height: 50)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .background(C.cardBg)
+            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .frame(width: 272)
+            .shadow(color: Color.black.opacity(0.22), radius: 22, y: 8)
+        }
+    }
+}
+
 struct PanelCircleButton: View {
     var symbol: String
     var tint: Color = C.label
