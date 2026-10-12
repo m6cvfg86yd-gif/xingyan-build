@@ -334,7 +334,8 @@ struct MeView: View {
             ZStack(alignment: .top) {
                 LinearGradient(colors: [Color(hexString: moodC1, fallback: 0xD8F2E4),
                                         Color(hexString: moodC2, fallback: 0x1DC9BD)],
-                               startPoint: .topLeading, endPoint: .bottomTrailing)
+                               /* 竖向渐变：上浅下深（截图量出来是这样） */
+                               startPoint: .top, endPoint: .bottom)
                 /* 顶部薄压暗：状态栏那一条的图标/时间保证看得清（微信的状态色也这么做） */
                 LinearGradient(colors: [Color.black.opacity(0.10), Color.clear],
                                startPoint: .top, endPoint: .bottom)
@@ -370,11 +371,15 @@ struct MeView: View {
     /* 2026-10-12 用户要求「对齐微信做」：
        微信的「我」页**平时顶上什么封面都没有**，只有设了状态时顶上那一块才铺状态色。
        所以封面高度改成：有状态 = 盖住「状态栏 + 资料行」那一整块；没状态 = 0（完全不占位）。 */
-    /// 顶部染色块的高度（含系统状态栏）。
-    /// ⚠ 用户反馈「整个上面都是这个底色，不是就上面一条」——原来这里只写 106，
-    /// 而资料行整段（状态栏 + 10 + 资料行 124 + 下面 12）一共是 safeTop + 146，
-    /// 所以底下那 40pt 没被染上，看着就成"顶上一条"。现在按整段算。
-    private var coverH: CGFloat { moodOn ? L.safeTop + 146 : 0 }
+    /// 状态色那一块的高度（含系统状态栏）。
+    /// 按用户给的截图逐像素量出来的结论：**通顶、通边、铺到底栏上方** ——
+    /// 从屏幕最顶（状态栏底下就是它，时间/灵动岛画在它上面）一路铺到离底部
+    /// 一个底栏的高度，不是细条、也不是整屏。下面是竖向渐变（上浅下深）。
+    private var coverH: CGFloat {
+        guard moodOn else { return 0 }
+        let h = UIScreen.main.bounds.height - L.tabH - L.safeBottom
+        return max(560, h + L.safeTop)      // +safeTop：这块还要从状态栏底下往上顶出去
+    }
     /// 资料行顶部离屏幕顶的距离：就是状态栏那一条（没状态时也留，不然内容会顶到刘海）
     private var cardTopY: CGFloat { L.safeTop + 10 }
     /// 资料行里的头像。微信量出来是 68（方角 6）。
@@ -384,8 +389,8 @@ struct MeView: View {
     /// 没设状态就是空的 —— 微信「我」页平时顶上什么都没有。
     @ViewBuilder private var meCover: some View {
         if moodOn {
-            /* 用户要求：「状态点了顶部卡片要发生相应的颜色变化」——
-               设了状态就把顶上那一整块（状态栏 + 资料行 + 下沿那道缝）铺成这个状态的颜色。
+            /* 设了状态：这一整块（通顶、通边、一直铺到底栏上方）就是状态自己的颜色，
+               竖向渐变（上浅下深）—— 照用户给的微信截图量的。
                没设状态什么都不画：微信平时就是干净的页面底。 */
             profileTopBg
                 .frame(maxWidth: .infinity)
