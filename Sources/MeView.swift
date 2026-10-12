@@ -512,8 +512,11 @@ struct MeView: View {
 
             Chevron(size: 10, line: 1.8)
         }
+        /* 高度照微信真机截图量的：顶部那块从屏幕最顶到 y=726px（≈248pt，含状态栏），
+           下面是 10pt 灰缝。我们这边 = safeTop(59) + 10 + 这一行 + 12 ≈ 249，
+           所以这一行要给到 168。原来 124 比微信矮了一倍。 */
         .padding(.horizontal, 16)
-        .frame(height: 124)
+        .frame(height: 168)
         .frame(maxWidth: .infinity)
         /* 通顶实色条：微信这里**没有圆角、没有左右留边**，就是页面宽度的一条。
            （下面那些分组卡才是内缩 12 的圆角卡，两者别混。） */
