@@ -22,6 +22,8 @@ struct GroupInfoView: View {
     @State private var saving = false
     /* 补齐的那几项：群公告、群名称（群主可改）、群屏蔽、清空记录、退群/解散 */
     @State private var muted = false
+    /// 阅后即焚：开着的时候这个群里发的消息，读过 8 秒后自动消失
+    @State private var burn = false
     @State private var announce = ""
     @State private var showAnnounce = false
     @State private var announceDraft = ""
@@ -116,6 +118,7 @@ struct GroupInfoView: View {
         .task {
             pinned = chat.pinned == true
             muted = chat.muted == true
+            burn = chat.burn == true
             muteAll = chat.muteAll == true
             if let r = try? await API.shared.chatMembers(chatId: chat.id) {
                 members = r.members
@@ -658,6 +661,18 @@ struct GroupInfoView: View {
                     await app.loadChats()
                 }
             }
+            PanelDivider()
+            /* 阅后即焚（2026-10-12 用户要求）：开着的时候这个群里的消息，对方看过 8 秒后自动消失 */
+            PanelToggleRow(symbol: "flame.fill", colors: PanelTint.orange,
+                           title: Tr("阅后即焚"),
+                           subtitle: burn ? Tr("群里发的消息，看过 8 秒后自动消失") : nil,
+                           isOn: burn) { v in
+                burn = v
+                Task {
+                    burn = await API.shared.setChatBurn(chatId: chat.id, on: v)
+                    await app.loadChats()
+                }
+            }
         }
     }
 
@@ -836,6 +851,8 @@ struct DirectChatInfoView: View {
     @State private var peer: User?
     @State private var pinned = false
     @State private var muted = false
+    /// 阅后即焚：开着的时候这个人发的消息，读过 8 秒后自动消失
+    @State private var burn = false
     @State private var showSearch = false
     @State private var showCard = false
     /// 「⋯ → 设置当前聊天背景」：微信那个「选择背景图」窗口
@@ -884,6 +901,7 @@ struct DirectChatInfoView: View {
         .task {
             pinned = chat.pinned == true
             muted = chat.muted == true
+            burn = chat.burn == true
             if let r = try? await API.shared.chatMembers(chatId: chat.id) {
                 peer = r.members.first { $0.id != app.me?.id }
             }
@@ -995,6 +1013,17 @@ struct DirectChatInfoView: View {
                 }
             }
             PanelDivider()
+            /* 阅后即焚（2026-10-12 用户要求） */
+            PanelToggleRow(symbol: "flame.fill", colors: PanelTint.orange,
+                           title: Tr("阅后即焚"),
+                           subtitle: burn ? Tr("这个人发的消息，看过 8 秒后自动消失") : nil,
+                           isOn: burn) { v in
+                burn = v
+                Task {
+                    burn = await API.shared.setChatBurn(chatId: chat.id, on: v)
+                    await app.loadChats()
+                }
+            }
             PanelToggleRow(symbol: "pin.fill", colors: PanelTint.orange,
                            title: Tr("置顶聊天"),
                            subtitle: pinned ? Tr("已置顶，会排在会话列表最上面") : nil,

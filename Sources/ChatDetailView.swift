@@ -706,7 +706,14 @@ struct ChatDetailView: View {
         return app.contact(for: message.senderId ?? "")?.name ?? ""
     }
 
+    /// 这个会话**现在**是不是开着阅后即焚（以会话列表里那份为准，取不到才用快照）
+    private var burnOn: Bool { (app.chats.first { $0.id == chat.id }?.burn ?? chat.burn) ?? false }
+
     private var backgroundPath: String {
+        /* ⚠ 阅后即焚要用**最新的**会话状态：`chat` 是进页面那一刻的快照，
+           用户在信息页把开关打开以后快照里的 burn 还是老的（false），
+           所以这里以「会话列表里那份」为准，取不到才退回快照 —— 这就是
+           用户报「阅后即焚没生效」的第一个原因。 */
         /* 这个会话单独设过背景（聊天页「⋯ → 选择背景图」，只存本机）就用它 —— 和微信一样 */
         let per = ChatBgStore.shared.get(chat.id)
         if !per.isEmpty { return per == "auto" ? "" : per }
@@ -1272,6 +1279,12 @@ struct ChatDetailView: View {
                 if Task.isCancelled { break }
                 await load(initial: false)
                 await flushOutbox()            // 离线期间攒下的，联网后自己补发
+                /* 阅后即焚：**停在会话里也要烧**（以前只在进页面/刷新时扫一次，
+                   用户停在聊天页等一分钟什么都不会发生）。每 15 秒顺手扫一遍。 */
+                if burnOn {
+                    let gone = await API.shared.burnSweep(chatId: chat.id)
+                    if !gone.isEmpty { burnAway(gone) }
+                }
             }
         }
         // 服务器一推消息，立刻拉一次（不用等轮询）
@@ -1301,6 +1314,11 @@ struct ChatDetailView: View {
             /* 有人拍一拍（我被拍的时候震得重一点）：比"等消息拉回来"更即时 */
             if ev.type == "pat", ev.chatId == chat.id {
                 UIImpactFeedbackGenerator(style: ev.patTo == myId ? .medium : .light).impactOccurred()
+            }
+            /* 阅后即焚：服务端到点销毁了那几条 → 这一页立刻带着动画把它们收走
+               （只加代码，不动视图层；首帧有 DeferredChatView 那层轻占位挡着） */
+            if ev.type == "burn", ev.chatId == chat.id, !ev.burnIds.isEmpty {
+                burnAway(ev.burnIds)
             }
             // 一下子来很多条时合并成一次刷新，别把手机刷爆
             pushTask?.cancel()
@@ -1677,6 +1695,18 @@ struct ChatDetailView: View {
                     .padding(.bottom, gapAfter(message))
             } else {
                 messageRow(message)
+                    /* 阅后即焚的小火苗（2026-10-13 用户要求「气泡旁要有个小火苗」）：
+                       自己发的贴左边、别人发的贴右边，一眼看出「这条会烧掉」。
+                       只对开了焚毁标记的消息加这一层。 */
+                    .overlay(alignment: (message.senderId == myId) ? .leading : .trailing) {
+                        if message.burn == true {
+                            Image(systemName: "flame.fill")
+                                .font(.system(size: 11))
+                                .foregroundColor(Color(hex: 0xFF9A2E))
+                                .padding(.horizontal, 5)
+                                .offset(x: (message.senderId == myId) ? -13 : 13)
+                        }
+                    }
             }
         }
     }
@@ -3316,6 +3346,26 @@ struct ChatDetailView: View {
         rebuildIndex()          // 消息列表变了：把「id → 下标」的表重建一次
         loading = false
         autoOpenShopCard()
+        /* 阅后即焚（2026-10-13 接回来）：这个会话开着就顺手扫一遍 ——
+           我这边看过的那些，服务端看过满 1 分钟会销毁，回来的 id 直接从列表里去掉。
+           ⚠ 只加代码、不动视图层；外面还有 DeferredChatView 那层轻占位挡着首帧。 */
+        if burnOn {
+            let gone = await API.shared.burnSweep(chatId: chat.id)
+            if !gone.isEmpty { burnAway(gone) }
+        }
+    }
+
+    /// 「焚毁」这一下：服务端到点销毁了那几条 → 轻震一下 + 弹一句提示 +
+    /// 0.5 秒淡出收缩地把这几行收走（SwiftUI 自己就把「行消失」画成淡出收缩）。
+    private func burnAway(_ ids: [String]) {
+        guard !ids.isEmpty else { return }
+        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+        BurnFX.shared.fire()          // 焚烧动画（画在聊天页外面那层，见 BurnFX.swift）
+        app.show(Tr("🔥 消息已焚毁"))
+        withAnimation(.easeOut(duration: 0.5)) {
+            messages.removeAll { ids.contains($0.id) }
+        }
+        rebuildIndex()
     }
 
     /* 往上看更早的记录：服务端支持 before 翻页（一次 40 条），加载完把更早的接在前面 */
