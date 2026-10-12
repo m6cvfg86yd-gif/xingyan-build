@@ -52,6 +52,33 @@ struct ChatBackgroundSheet: View {
     /// 每张下面那行小字（方便一眼分清是哪张）
     static let names: [String] = ["浅灰渐变", "深灰渐变", "细斜纹", "细网格", "磨砂噪点", "同心圆"]
 
+    /* 后台「聊天壁纸」页配的那一份（默认壁纸 + 基础壁纸）。
+       进这一页拉一次；拉不到就用上面内置的 6 张 —— 老服务器、断网都不会白屏。 */
+    @State private var remotePresets: [ChatBgPayload.Item] = []
+    @State private var remoteVersion = ""
+
+    /// 这一页真正显示的壁纸：后台配了就用后台的，没有就退回内置那 6 张
+    private var shownPresets: [(path: String, name: String)] {
+        let remote = remotePresets.compactMap { it -> (path: String, name: String)? in
+            guard let p = it.path, !p.isEmpty else { return nil }
+            return (p, it.name ?? "")
+        }
+        if !remote.isEmpty { return remote }
+        var out: [(path: String, name: String)] = []
+        for (idx, p) in Self.presets.enumerated() {
+            out.append((p, Self.names[min(idx, Self.names.count - 1)]))
+        }
+        return out
+    }
+
+    /// 交给图片加载器之前在地址后面挂个版本号：
+    /// ImageStore 是按 path 缓存的，后台换了同一路径上的图，版本号一变缓存就失效。
+    /// （后台每一格基本都是「重新上传」，地址本来就是新的，所以这条主要是兜底。）
+    private func versioned(_ p: String) -> String {
+        guard !remoteVersion.isEmpty, !p.hasPrefix("data:") else { return p }
+        return p + (p.contains("?") ? "&" : "?") + "v=" + remoteVersion
+    }
+
     private var inChat: Bool { !chatId.isEmpty }
     @ObservedObject private var store = ChatBgStore.shared
     /// 现在选中的是哪一张（聊天里=本机给这个会话设的；全局=我资料里的）
@@ -86,14 +113,15 @@ struct ChatBackgroundSheet: View {
 
                     LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 10), count: 3),
                               spacing: 12) {
-                        ForEach(Array(Self.presets.enumerated()), id: \.offset) { idx, p in
-                            Button { pick(p) } label: {
+                        /* 用 shownPresets：后台「聊天壁纸」页配过就用后台那几张 */
+                        ForEach(Array(shownPresets.enumerated()), id: \.offset) { _, item in
+                            Button { pick(item.path) } label: {
                                 VStack(spacing: 5) {
                                     ZStack {
-                                        RemoteImage(path: p, mode: .fill)
+                                        RemoteImage(path: versioned(item.path), mode: .fill)
                                             .frame(width: 100, height: 148)
                                             .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                                        if current == p {
+                                        if current == item.path {
                                             RoundedRectangle(cornerRadius: 10, style: .continuous)
                                                 .stroke(C.green, lineWidth: 2.5)
                                             Image(systemName: "checkmark.circle.fill")
@@ -104,9 +132,12 @@ struct ChatBackgroundSheet: View {
                                                        alignment: .topTrailing)
                                         }
                                     }
-                                    Text(Tr(Self.names[min(idx, Self.names.count - 1)]))
-                                        .font(pf(11.5))
-                                        .foregroundColor(C.subLabel)
+                                    if !item.name.isEmpty {
+                                        Text(Tr(item.name))
+                                            .font(pf(11.5))
+                                            .foregroundColor(C.subLabel)
+                                            .lineLimit(1)
+                                    }
                                 }
                             }
                             .buttonStyle(.plain)
@@ -132,9 +163,13 @@ struct ChatBackgroundSheet: View {
                         }
                         .buttonStyle(.plain)
 
-                        if !inChat {
                         HairLine(inset: 16)
 
+                        /* 「从相册选一张」**聊天里也要有**。
+                           以前这一整行被 `if !inChat` 包着 —— 从「我 → 设置 → 聊天背景」
+                           进来才有，从聊天页「⋯ → 选择背景图」进来（单聊、群聊都是）
+                           根本看不到这一行，用户反馈的就是「群里面换不了相册背景」。
+                           微信是单聊/群聊里都能从相册选，选完只对当前这个聊天生效。 */
                         Button { picking = true } label: {
                             HStack {
                                 Text(Tr("从相册选一张")).font(pf(16)).foregroundColor(C.label)
@@ -148,7 +183,6 @@ struct ChatBackgroundSheet: View {
                             .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
-                        }
                     }
                     .background(C.cardBg)
 
@@ -166,6 +200,21 @@ struct ChatBackgroundSheet: View {
         .hidesTabBar()
         .sheet(isPresented: $picking) {
             PhotoPicker { image in upload(image) }
+        }
+        /* 进这一页拉一次后台「聊天壁纸」配的那份（拉不到就用内置的 6 张） */
+        .task { await loadRemote() }
+    }
+
+    /// 后台「聊天壁纸」页配的壁纸清单：默认壁纸 + 基础壁纸。
+    /// 拉到就整页跟着后台走；拉不到（老服务器 / 断网）就保持内置那 6 张。
+    private func loadRemote() async {
+        guard let r = await API.shared.chatBackgrounds() else { return }
+        remotePresets = r.presets ?? []
+        remoteVersion = r.version ?? ""
+        /* 「默认壁纸」：自己没挑过背景的人（auto）用后台配的这张。
+           后台存的那一份同时会写进 branding.chatBackground，两边不会打架。 */
+        if let def = r.default, !def.isEmpty, (app.me?.chatBackground ?? "auto") == "auto" {
+            app.defaultChatBackground = def
         }
     }
 
@@ -185,14 +234,26 @@ struct ChatBackgroundSheet: View {
         }
     }
 
-    /// 从相册选一张：还是走原来那套（原图上传 → 当成背景）
+    /// 从相册选一张：原图上传 → 当成背景。
+    ///
+    /// 两种进来方式效果不一样（以前这里没区分，聊天里选完相册会去改**全局**背景，
+    /// 也就是「换了半天，只有当前这个聊天没变，别的聊天全变了」）：
+    ///   · 聊天里进来的（chatId 有值）→ 只把这张设给**当前这个会话**，存本机，和微信一样；
+    ///   · 从「我 → 聊天背景」进来的 → 还是改自己的全局背景。
     private func upload(_ image: UIImage) {
         Task {
             busy = true
             if let url = try? await API.shared.uploadOriginal(image: image) {
-                await API.shared.changeBackground(url)
-                app.me = try? await API.shared.me()
-                app.show(Tr("聊天背景换好了"))
+                if inChat {
+                    ChatBgStore.shared.set(chatId, url)
+                    app.show(Tr("这个聊天的背景换好了"))
+                } else {
+                    await API.shared.changeBackground(url)
+                    app.me = try? await API.shared.me()
+                    app.show(Tr("聊天背景换好了"))
+                }
+            } else {
+                app.show(Tr("图片上传失败，换一张再试"))
             }
             busy = false
         }

@@ -1231,6 +1231,19 @@ private struct UploadPayload: Decodable {
     var image: Bool?
 }
 
+/// 「聊天背景」页的壁纸清单：后台「聊天壁纸」页配的
+/// （默认壁纸 + 若干张基础壁纸）。version 变了说明后台换过图。
+struct ChatBgPayload: Decodable {
+    struct Item: Decodable {
+        var path: String?
+        var name: String?
+    }
+    /// 默认壁纸：所有没自己设过背景的人看到的
+    var `default`: String?
+    var presets: [Item]?
+    var version: String?
+}
+
 /* ============================================================ 网络 */
 
 enum APIError: LocalizedError {
@@ -4238,6 +4251,12 @@ final class API {
 
     func changeBackground(_ path: String) async {
         await updateMe(["chatBackground": path])
+    }
+
+    /// 「聊天背景」页要的壁纸清单（后台「聊天壁纸」页配的：默认壁纸 + 基础壁纸）。
+    /// 拉不到就返回 nil —— 那一页会退回它自己内置的 6 张，老服务器/断网都不会白屏。
+    func chatBackgrounds() async -> ChatBgPayload? {
+        try? await get("/api/chat-bg", as: ChatBgPayload.self)
     }
 
     func moments(limit: Int = 20, userId: String? = nil) async throws -> [Moment] {
