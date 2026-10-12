@@ -114,6 +114,8 @@ struct CallView: View {
     @State private var pipX: CGFloat? = nil
     @State private var pipY: CGFloat? = nil
     @State private var pipDrag: CGSize = .zero
+    /// 「拒绝并回复」那个菜单（2026-10-13 用户要求，对齐微信）
+    @State private var showReplies = false
 
     private var blurRadius: CGFloat { UIConfig.num("callBackdropBlur", 60) }
     private var tint: CGFloat { UIConfig.num("callGlassTint", 0.45) }
@@ -153,6 +155,13 @@ struct CallView: View {
         }
         .sheet(isPresented: $showInvite) {
             inviteSheet
+        }
+        /* 拒绝并回复：微信那几句常用话（2026-10-13 用户要求） */
+        .confirmationDialog(Tr("拒绝并回复"), isPresented: $showReplies, titleVisibility: .visible) {
+            Button(Tr("在忙，稍后联系你")) { call.reject(withReply: "在忙，稍后联系你") }
+            Button(Tr("不方便接听，稍后回你")) { call.reject(withReply: "不方便接听，稍后回你") }
+            Button(Tr("在开车，晚点回你")) { call.reject(withReply: "在开车，晚点回你") }
+            Button(Tr("取消"), role: .cancel) { }
         }
         /* 通话中收到的新消息：每 2 秒扫一遍会话列表（微信也这么做） */
         .task(id: call.callId) {
@@ -201,7 +210,7 @@ struct CallView: View {
         Button {
             msgBanner = nil
             call.minimize()                     // 通话缩成小窗，继续通
-            if let c = app.chats.first(where: { $0.id == b.chatId }) { app.openChat = c }
+            if let c = app.chats.first(where: { $0.id == b.chatId }) { app.openChatViaList(c) }
         } label: {
             HStack(spacing: 7) {
                 Image(systemName: "message.fill").font(.system(size: 12, weight: .semibold))
@@ -550,6 +559,15 @@ struct CallView: View {
                                 .font(.system(size: 27, weight: .medium))
                         }
                     }
+                    /* 拒绝并回复（2026-10-13 用户要求，对齐微信）：不去接，但先回一句 */
+                    Button { showReplies = true } label: {
+                        Text(Tr("拒绝并回复"))
+                            .font(pf(14))
+                            .foregroundColor(.white.opacity(0.9))
+                            .padding(.horizontal, 16).frame(height: 34)
+                            .background(Capsule().fill(Color.white.opacity(0.16)))
+                    }
+                    .buttonStyle(.plain)
                     /* 视频来电：微信还能「语音接听」（先不接画面、只接声音） */
                     if call.isVideo && !call.isGroupCall {
                         Button { call.accept(asAudio: true) } label: {

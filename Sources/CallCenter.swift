@@ -4,6 +4,7 @@ import AudioToolbox
 import UIKit
 import Combine
 import WebRTC
+import Network
 
 /* ============================================================
    真人语音/视频通话（App ↔ App、App ↔ 网页版都能通）
@@ -186,6 +187,7 @@ final class CallCenter: NSObject, ObservableObject {
                 self?.handle(ev)
             }
         Task { await loadIce() }
+        startPathMonitor()
         /* 去系统设置里把麦克风打开、再回到 App：自动把采集抢回来（用户不用重拨） */
         _ = NotificationCenter.default.addObserver(forName: UIApplication.didBecomeActiveNotification,
                                                    object: nil, queue: .main) { [weak self] _ in
@@ -282,6 +284,18 @@ final class CallCenter: NSObject, ObservableObject {
     func reject() {
         guard !callId.isEmpty else { return }
         sendCall(["action": "reject"])
+        finish(tip: "已拒绝")
+    }
+
+    /// 拒接并回一句（2026-10-13 用户要求，对齐微信「拒绝并回复」）：
+    /// 先往这个会话里发一条文字，再正常拒接 —— 对方那边会直接看到这句话。
+    func reject(withReply text: String) {
+        let say = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !callId.isEmpty else { return }
+        /* 说明一句走服务器的拒接通道（服务端知道这两个人是谁，直接往他们的单聊里插一条
+           —— 客户端这边不用自己去猜会话 id） */
+        if say.isEmpty { sendCall(["action": "reject"]) }
+        else { sendCall(["action": "reject", "text": say]) }
         finish(tip: "已拒绝")
     }
 
@@ -783,6 +797,36 @@ final class CallCenter: NSObject, ObservableObject {
         if !list.isEmpty { iceServers = list.map { RTCIceServer(urlStrings: [$0]) } }
     }
 
+    /* MARK: - 切网自动重连（2026-10-13 稳定性，对标微信）
+       微信在 Wi-Fi ↔ 4G 切换、短暂断流时能自己接回来；我们以前只有「网络不太稳定」
+       那行提示，3 秒就挂断。现在监听系统网络路径变化：
+         · 语音通话：媒体走「服务器转发」那条独立通道 → 换网后重抢麦克风、重接转发
+         · 视频通话：直接兜底切到腾讯云 TRTC（它对切网 / 弱网最稳）
+       并把「网络切换」写进通话打点，线上能一眼看出是不是切网导致的断线。 */
+    private let pathMonitor = NWPathMonitor()
+    private var lastPathStatus: NWPath.Status? = nil
+
+    private func startPathMonitor() {
+        pathMonitor.pathUpdateHandler = { [weak self] path in
+            Task { @MainActor in
+                guard let self = self else { return }
+                let prev = self.lastPathStatus
+                self.lastPathStatus = path.status
+                guard prev != nil, prev != path.status else { return }   // 只在真的变了时动手
+                guard self.phase == .active else { return }
+                self.note("网络切换（" + (path.status == .satisfied ? "已联网" : "断开") + "）→ 自动重连")
+                self.weakNet = true
+                if self.tip != "通话中" && self.tip != "视频通话中" { self.tip = "网络切换，正在重连…" }
+                if self.isVideo {
+                    if !self.usingTRTC { await self.startTRTCIfPossible() }
+                } else {
+                    CallAudioPipe.shared.resetHandOver()
+                }
+            }
+        }
+        pathMonitor.start(queue: DispatchQueue(label: "chris.call.path"))
+    }
+
     private func makeFactory() -> RTCPeerConnectionFactory {
         if let f = factory { return f }
         let f = RTCPeerConnectionFactory(encoderFactory: RTCDefaultVideoEncoderFactory(),
@@ -1247,16 +1291,40 @@ extension CallCenter: RTCPeerConnectionDelegate {
                                     detail: "", auto: 2)
                 }
             case .failed:
-                /* 通话中途断：也留 5 秒让用户看清原因 */
-                self.failLater("通话连接失败，可能是网络挡住了", hold: 5)
+                /* ⚠ 2026-10-13 稳定性（对标微信）：以前这里不分语音/视频，一律判「通话失败」。
+                   但**语音通话的媒体走的是「服务器转发」那条独立通道**（不依赖 WebRTC/P2P），
+                   WebRTC 挂了并不代表听不见/说不了 —— 直接判失败等于把还能用的通话掐掉。
+                   现在：语音只提示弱网并重抢麦；视频才先兜底切腾讯云 TRTC，再判失败。 */
+                if !self.isVideo {
+                    self.weakNet = true
+                    if self.tip != "通话中" { self.tip = "网络不太稳定，正在重连…" }
+                    self.note("WebRTC failed（语音走转发通道，通话继续）")
+                    CallAudioPipe.shared.resetHandOver()
+                } else {
+                    self.weakNet = true
+                    if self.tip != "视频通话中" { self.tip = "网络不太稳定，正在重连…" }
+                    self.note("WebRTC failed → 兜底切 TRTC")
+                    if !self.usingTRTC { await self.startTRTCIfPossible() }
+                    try? await Task.sleep(nanoseconds: 5_000_000_000)
+                    if self.phase == .active && !self.usingTRTC && self.pc?.connectionState == .failed {
+                        self.failLater("通话连接失败，可能是网络挡住了", hold: 5)
+                    }
+                }
             case .disconnected:
-                /* 弱网提示（微信也会写「网络不佳」）：先挂一行提示，3 秒还没回来才断 */
+                /* 弱网提示（微信也会写「网络不佳」）：**宽限从 3 秒放到 8 秒** ——
+                   微信切网那一下（Wi-Fi→4G）要几秒才接回来，3 秒就挂断太急。 */
                 self.weakNet = true
                 if self.tip != "通话中" && self.tip != "视频通话中" { self.tip = "网络不太稳定，正在重连…" }
-                // 断开 3 秒还没恢复就结束（和网页版一致）
-                try? await Task.sleep(nanoseconds: 3_000_000_000)
+                try? await Task.sleep(nanoseconds: 8_000_000_000)
                 if self.phase == .active && self.pc?.connectionState == .disconnected {
-                    self.finish(tip: "通话已断开")
+                    if self.isVideo && !self.usingTRTC {
+                        self.note("视频断线 8 秒 → 兜底切 TRTC")
+                        await self.startTRTCIfPossible()
+                        try? await Task.sleep(nanoseconds: 3_000_000_000)
+                    }
+                    if self.phase == .active && !self.usingTRTC && self.pc?.connectionState == .disconnected {
+                        self.finish(tip: "通话已断开")
+                    }
                 }
             default:
                 break
