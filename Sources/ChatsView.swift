@@ -446,7 +446,6 @@ struct SwipeChatRow: View {
         }
     }
 }
-
 /* ============================================================ 微信（会话列表） */
 
 struct ChatsView: View {
@@ -710,10 +709,14 @@ struct ChatsView: View {
                 /* 四个色标都能在后台调（改完重开 App 生效，不用出包）：
                    floorBg1 … floorBg4（写法 "#浅色|#深色"，不配就用内置这组）。
                    默认比原来那组**加深了一档**（用户要求：二楼背景再深一点）。 */
-                LinearGradient(colors: [UIConfig.color("floorBg1", 0x121120, 0x121120),
-                                        UIConfig.color("floorBg2", 0x181626, 0x181626),
-                                        UIConfig.color("floorBg3", 0x1E1B2C, 0x1E1B2C),
-                                        UIConfig.color("floorBg4", 0x242132, 0x242132)],
+                /* 深色模式单独给一组**更明显的渐变**（用户 2026-10-13：「深色模式下二楼背景
+                   #1919 渐变一点」）—— 浅色那组不变，深色从上到下是「深靛 → 紫蓝」，
+                   比原来那组（#121120→#242132）跨度大一档，一眼能看出是渐变不是一块深色板。
+                   四个色标照旧能在后台覆盖：ui.json 写 floorBg1…4（"#浅|#深"）。 */
+                LinearGradient(colors: [UIConfig.color("floorBg1", 0x121120, 0x16161C),
+                                        UIConfig.color("floorBg2", 0x181626, 0x191A24),
+                                        UIConfig.color("floorBg3", 0x1E1B2C, 0x1E1C32),
+                                        UIConfig.color("floorBg4", 0x242132, 0x262244)],
                                startPoint: .top, endPoint: .bottom)
                 Rectangle().fill(.ultraThinMaterial)
                     .opacity(UIConfig.num("floorSmokeBlur", 0.35))
@@ -1106,6 +1109,10 @@ struct ChatsView: View {
             .navigationDestination(for: Chat.self) { chat in
                 chatDest(chat)
             }
+            /* 点了推送通知：MainTab 把会话 id 放到 app.pendingPushChatId，
+               这里按**列表自己那条导航**把它推进去（和手点一个会话同一条路）。 */
+            .onAppear { openPendingPushChat(app.pendingPushChatId) }
+            .onChange(of: app.pendingPushChatId) { v in openPendingPushChat(v) }
             /* 公众号那两条会话：点进去是公众号页面（不是聊天页） */
             .navigationDestination(isPresented: $showOA) {
                 OfficialAccountPage(accountId: oaOpenId)
@@ -1119,7 +1126,7 @@ struct ChatsView: View {
                         /* 建完群直接进这个群：走最外层整页打开，
                            不往导航栈里 push（push 在「刚 pop 掉建群页」那一下容易被系统丢掉，
                            表现就是「建完群没跳进去，要退出来重新点一下」）。 */
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { app.openChat = chat }
+                        app.openChatViaList(chat)
                     }
                 } else if key == "addFriend" {
                     AddFriendView()
@@ -1209,6 +1216,33 @@ struct ChatsView: View {
             app.show(err ?? "已删除")
         }
     }
+
+    /// 点了推送通知要进的那个会话（app.pendingPushChatId）：
+    /// 列表还没加载好就等一会儿（最多 8 秒），加载好了**用列表自己的导航** push 进去。
+    /// 2026-10-12 用户：「点推送通知依旧闪退」—— 以前是 MainTab 用最外层 fullScreenCover
+    /// 整页压聊天页，冷启动那几帧会打架被系统杀掉；改成走这一条
+    /// （和用户手点一个会话**完全同一条路**，那条路日志里一直正常）。
+    private func openPendingPushChat(_ id: String?) {
+        guard let id, !id.isEmpty else { return }
+        Task { @MainActor in
+            for _ in 0..<40 {
+                if app.chats.contains(where: { $0.id == id }) { break }
+                await app.loadChats()
+                try? await Task.sleep(nanoseconds: 200_000_000)
+            }
+            guard let c = app.chats.first(where: { $0.id == id }) else {
+                app.pendingPushChatId = nil
+                app.show(Tr("找不到这个会话"))
+                CrashCatcher.note("推送", "列表里没有这个会话 " + id)
+                return
+            }
+            app.pendingPushChatId = nil
+            CrashCatcher.note("推送", "交给会话列表打开 " + id)
+            /* 让列表先画出来那一帧，再把会话推进去（不然 push 和首次渲染撞一起） */
+            try? await Task.sleep(nanoseconds: 350_000_000)
+            path.append(c)
+        }
+    }
 }
 
 /// 会话页 / 星联页右上角那个 ＋：按下去亮一下（像灯被按亮），松手回弹
@@ -1273,7 +1307,10 @@ private struct FloorPop: ViewModifier {
         /* 顺带把内存也记上（B156 那版就是这么记的）：43MB 那种数字能一眼看出
            到底是不是"内存太大被系统杀掉"。2026-10-12 这次排查又把这条补回来了。 */
         CrashCatcher.note("聊天页", "8 准备打开 " + chat.id + memNote())
-        return ChatDetailView(chat: chat)
+        /* ⚠ 2026-10-13：不再直接把那个巨型聊天页塞进 push —— 先渲染一个很轻的占位，
+           等 0.4 秒转场过去再把真页面换上来（避免「场景更新看门狗」把进程杀掉，
+           见 ChatDeferred.swift 里的说明）。聊天页本身保持 B218 原样。 */
+        return DeferredChatView(chat: chat)
     }
 
     /// 「内存43MB(剩6613MB)」——进会话前记一条，用来判断是不是 jetsam（内存）杀的

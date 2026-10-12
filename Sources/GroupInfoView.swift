@@ -22,6 +22,8 @@ struct GroupInfoView: View {
     @State private var saving = false
     /* 补齐的那几项：群公告、群名称（群主可改）、群屏蔽、清空记录、退群/解散 */
     @State private var muted = false
+    /// 阅后即焚：开着的时候这个群里发的消息，读过 8 秒后自动消失
+    @State private var burn = false
     @State private var announce = ""
     @State private var showAnnounce = false
     @State private var announceDraft = ""
@@ -114,9 +116,15 @@ struct GroupInfoView: View {
         .swipeBack { dismiss() }
         .hidesTabBar()
         .task {
-            pinned = chat.pinned == true
-            muted = chat.muted == true
-            muteAll = chat.muteAll == true
+            /* ⚠ 取**会话列表里最新那份**，不能用传进来的快照：
+               这个页面的 `chat` 是进聊天页那一刻的拷贝，别人（或自己在聊天页里）
+               改过阅后即焚之后，快照里还是旧的 —— 用户反馈的
+               「阅后即焚按钮还勾着」就是这个。 */
+            let live = app.chats.first { $0.id == chat.id } ?? chat
+            pinned = live.pinned == true
+            muted = live.muted == true
+            burn = live.burn == true
+            muteAll = live.muteAll == true
             if let r = try? await API.shared.chatMembers(chatId: chat.id) {
                 members = r.members
                 ownerId = r.ownerId
@@ -155,24 +163,38 @@ struct GroupInfoView: View {
                 }
             }
         }
-        .confirmationDialog(Tr("清空聊天记录？"), isPresented: $confirmClear, titleVisibility: .visible) {
-            Button(Tr("清空"), role: .destructive) { clearHistory() }
-            Button(Tr("取消"), role: .cancel) { }
-        }
-        .confirmationDialog(isOwner ? "解散并退出群聊？" : "退出群聊？",
-                            isPresented: $confirmQuit, titleVisibility: .visible) {
-            Button(isOwner ? "解散并退出" : "退出", role: .destructive) { quitGroup() }
-            Button(Tr("取消"), role: .cancel) { }
-        }
-        .confirmationDialog(kickMode == "kick" ? "把 TA 移出群聊？" : "禁言 TA？",
-                            isPresented: Binding(get: { kickTarget != nil }, set: { if !$0 { kickTarget = nil } }),
-                            titleVisibility: .visible) {
-            if kickMode == "kick" {
-                Button(Tr("移出群聊"), role: .destructive) { kick() }
-            } else {
-                Button(Tr("禁言"), role: .destructive) { muteMember() }
+        /* 清空聊天记录：也是自己画的确认框（和「移出群聊」同一套，字看得清） */
+        .overlay {
+            if confirmClear {
+                PanelConfirmDialog(title: Tr("确定要清空这个聊天的记录吗？"),
+                                   okText: Tr("清空"), danger: true,
+                                   onOk: { confirmClear = false; clearHistory() },
+                                   onCancel: { confirmClear = false })
             }
-            Button(Tr("取消"), role: .cancel) { kickTarget = nil }
+        }
+        /* 退出/解散群聊：同样用自己画的确认框（红字看得清） */
+        .overlay {
+            if confirmQuit {
+                PanelConfirmDialog(title: isOwner ? "解散并退出该群聊？" : "退出该群聊？",
+                                   okText: isOwner ? Tr("解散并退出") : Tr("退出"),
+                                   danger: true,
+                                   onOk: { confirmQuit = false; quitGroup() },
+                                   onCancel: { confirmQuit = false })
+            }
+        }
+        /* 移出群聊 / 禁言：用**我们自己画的确认框**（微信那种白卡 + 红字）
+           —— 系统 confirmationDialog 的标题又小又灰，用户反馈「移出群聊看不清」。 */
+        .overlay {
+            if let target = kickTarget {
+                PanelConfirmDialog(
+                    title: kickMode == "kick"
+                        ? ("确定要将「" + target.name + "」移出群聊吗？")
+                        : ("确定要将「" + target.name + "」禁言吗？"),
+                    okText: kickMode == "kick" ? Tr("移出群聊") : Tr("禁言"),
+                    danger: true,
+                    onOk: { if kickMode == "kick" { kick() } else { muteMember() } },
+                    onCancel: { kickTarget = nil })
+            }
         }
     }
 
@@ -486,9 +508,11 @@ struct GroupInfoView: View {
                                         kickTarget = u
                                     } label: {
                                         Image(systemName: "minus.circle.fill")
-                                            .font(.system(size: 18))
+                                            .font(.system(size: 20))
                                             .foregroundColor(C.red)
                                             .background(Circle().fill(Color.white))
+                                            .overlay(Circle().stroke(Color.white, lineWidth: 1.2))
+                                            .shadow(color: Color.black.opacity(0.18), radius: 2, y: 1)
                                     }
                                     .buttonStyle(.plain)
                                     .offset(x: -6, y: -6)
@@ -497,8 +521,10 @@ struct GroupInfoView: View {
                             /* 设了群昵称就显示群昵称（微信的成员列表就是这样） */
                             HStack(spacing: 3) {
                                 Text(u.groupName)
-                                    .font(pf(10.5))
-                                    .foregroundColor(C.subLabel)
+                                    /* 成员名字按微信那样加深一点、放大一点（原来 10.5pt 的浅灰，
+                                       在浅色底上几乎看不清） */
+                                    .font(pf(11))
+                                    .foregroundColor(Color.dyn(0x4A4A4A, 0xD8D8D8))
                                     .lineLimit(1)
                                 /* 名字旁边挂等级图标（QQ 那套） */
                                 if let lv = u.qqLevel, lv > 0, GrowthFlags.showInContacts != false {
@@ -519,7 +545,9 @@ struct GroupInfoView: View {
                                                  systemImage: "character.cursor.ibeam") }
                             }
                             if isOwner && u.id != app.me?.id {
-                                Button {
+                                /* 「移出群聊」按微信那样标成红色（destructive）——
+                                   以前是普通墨色，在浅色菜单里那片灰字确实看不清 */
+                                Button(role: .destructive) {
                                     kickMode = "kick"
                                     kickTarget = u
                                 } label: { Label(Tr("移出群聊"), systemImage: "person.badge.minus") }
@@ -655,6 +683,18 @@ struct GroupInfoView: View {
                 Task {
                     let now = await API.shared.setMuted(chatId: chat.id, muted: v)
                     muted = now
+                    await app.loadChats()
+                }
+            }
+            PanelDivider()
+            /* 阅后即焚（2026-10-12 用户要求）：开着的时候这个群里的消息，对方看过 8 秒后自动消失 */
+            PanelToggleRow(symbol: "flame.fill", colors: PanelTint.orange,
+                           title: Tr("阅后即焚"),
+                           subtitle: burn ? Tr("群里发的消息，看过 8 秒后自动消失") : nil,
+                           isOn: burn) { v in
+                burn = v
+                Task {
+                    burn = await API.shared.setChatBurn(chatId: chat.id, on: v)
                     await app.loadChats()
                 }
             }
@@ -836,6 +876,8 @@ struct DirectChatInfoView: View {
     @State private var peer: User?
     @State private var pinned = false
     @State private var muted = false
+    /// 阅后即焚：开着的时候这个人发的消息，读过 8 秒后自动消失
+    @State private var burn = false
     @State private var showSearch = false
     @State private var showCard = false
     /// 「⋯ → 设置当前聊天背景」：微信那个「选择背景图」窗口
@@ -882,8 +924,11 @@ struct DirectChatInfoView: View {
         .swipeBack { dismiss() }
         .hidesTabBar()
         .task {
-            pinned = chat.pinned == true
-            muted = chat.muted == true
+            /* 同群信息页：阅后即焚要按会话列表里最新那份显示（快照会过时） */
+            let live = app.chats.first { $0.id == chat.id } ?? chat
+            pinned = live.pinned == true
+            muted = live.muted == true
+            burn = live.burn == true
             if let r = try? await API.shared.chatMembers(chatId: chat.id) {
                 peer = r.members.first { $0.id != app.me?.id }
             }
@@ -928,13 +973,22 @@ struct DirectChatInfoView: View {
                     .environmentObject(app)
             }
         }
-        .confirmationDialog(Tr("清空聊天记录？"), isPresented: $confirmClear, titleVisibility: .visible) {
-            Button(Tr("清空"), role: .destructive) { clearHistory() }
-            Button(Tr("取消"), role: .cancel) { }
+        /* 清空 / 删除：都换成自己画的确认框（白卡 + 红字，比系统那个清楚） */
+        .overlay {
+            if confirmClear {
+                PanelConfirmDialog(title: Tr("确定要清空这个聊天的记录吗？"),
+                                   okText: Tr("清空"), danger: true,
+                                   onOk: { confirmClear = false; clearHistory() },
+                                   onCancel: { confirmClear = false })
+            }
         }
-        .confirmationDialog(Tr("删除该聊天？"), isPresented: $confirmDelete, titleVisibility: .visible) {
-            Button(Tr("删除"), role: .destructive) { deleteChat() }
-            Button(Tr("取消"), role: .cancel) { }
+        .overlay {
+            if confirmDelete {
+                PanelConfirmDialog(title: Tr("确定要删除这个聊天吗？"),
+                                   okText: Tr("删除"), danger: true,
+                                   onOk: { confirmDelete = false; deleteChat() },
+                                   onCancel: { confirmDelete = false })
+            }
         }
     }
 
@@ -995,6 +1049,17 @@ struct DirectChatInfoView: View {
                 }
             }
             PanelDivider()
+            /* 阅后即焚（2026-10-12 用户要求） */
+            PanelToggleRow(symbol: "flame.fill", colors: PanelTint.orange,
+                           title: Tr("阅后即焚"),
+                           subtitle: burn ? Tr("这个人发的消息，看过 8 秒后自动消失") : nil,
+                           isOn: burn) { v in
+                burn = v
+                Task {
+                    burn = await API.shared.setChatBurn(chatId: chat.id, on: v)
+                    await app.loadChats()
+                }
+            }
             PanelToggleRow(symbol: "pin.fill", colors: PanelTint.orange,
                            title: Tr("置顶聊天"),
                            subtitle: pinned ? Tr("已置顶，会排在会话列表最上面") : nil,

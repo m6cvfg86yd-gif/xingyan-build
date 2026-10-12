@@ -108,7 +108,9 @@ struct ForwardPickerView: View {
     var onSent: () -> Void
 
     @State private var keyword = ""
-    @State private var busy = ""
+    @State private var sending = false
+    /// 勾了哪几个聊天（微信是「先勾人 → 点发送」，不是一个一个点进去就发）
+    @State private var picked: Set<String> = []
 
     private var list: [Chat] {
         let base = app.chats
@@ -132,7 +134,10 @@ struct ForwardPickerView: View {
                 LazyVStack(spacing: 0) {
                     ForEach(list) { chat in
                         Button {
-                            send(to: chat)
+                            /* 点一下只勾/取消，不直接发（以前点一下就发，而且每行都画着
+                               对勾 —— 用户看着就像"默认全勾上了"，还说不出到底发给了谁） */
+                            if picked.contains(chat.id) { picked.remove(chat.id) }
+                            else { picked.insert(chat.id) }
                         } label: {
                             HStack(spacing: 12) {
                                 Avatar(path: chat.avatar ?? "", size: 44, radius: 6)
@@ -141,12 +146,10 @@ struct ForwardPickerView: View {
                                     .foregroundColor(C.label)
                                     .lineLimit(1)
                                 Spacer(minLength: 0)
-                                if busy == chat.id { ProgressView() }
-                                else {
-                                    Image(systemName: "checkmark.circle")
-                                        .font(.system(size: 18))
-                                        .foregroundColor(C.green)
-                                }
+                                /* 没勾 = 空心圈；勾了 = 绿色实心对勾（和微信一样） */
+                                Image(systemName: picked.contains(chat.id) ? "checkmark.circle.fill" : "circle")
+                                    .font(.system(size: 19))
+                                    .foregroundColor(picked.contains(chat.id) ? C.green : C.searchIcon)
                             }
                             .padding(.horizontal, 16)
                             .frame(height: 66)
@@ -159,21 +162,54 @@ struct ForwardPickerView: View {
                 }
             }
             .background(C.pageBg)
+
+            /* 底下那条：显示选了几个 + 发送（一个都没选的时候是灰的） */
+            HStack(spacing: 12) {
+                Text(picked.isEmpty
+                     ? Tr("选择要转发到的聊天")
+                     : (Tr("已选") + " " + String(picked.count) + " " + Tr("个聊天")))
+                    .font(pf(14))
+                    .foregroundColor(C.subLabel)
+                Spacer(minLength: 8)
+                Button { sendSelected() } label: {
+                    Text(sending ? Tr("发送中…") : Tr("发送"))
+                        .font(pf(16, .medium))
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 22)
+                        .frame(height: 40)
+                        .background(RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .fill(picked.isEmpty || sending ? C.subLabel : C.green))
+                }
+                .buttonStyle(.plain)
+                .disabled(picked.isEmpty || sending)
+            }
+            .padding(.horizontal, 16)
+            .padding(.top, 10)
+            .padding(.bottom, L.safeBottom + 10)
+            .background(C.tabBg)
+            .overlay(alignment: .top) { Rectangle().fill(C.navLine).frame(height: 0.5) }
         }
         .background(C.pageBg.ignoresSafeArea())
         .toolbar(.hidden, for: .navigationBar)
     }
 
-    private func send(to chat: Chat) {
-        busy = chat.id
+    /// 发送：把内容依次发给**勾中的每一个**聊天
+    private func sendSelected() {
+        let targets = list.filter { picked.contains($0.id) }
+        guard !targets.isEmpty else { return }
+        sending = true
         Task {
-            for it in items {
-                _ = try? await API.shared.send(chatId: chat.id, kind: it.kind, content: it.content)
+            for chat in targets {
+                for it in items {
+                    _ = try? await API.shared.send(chatId: chat.id, kind: it.kind, content: it.content)
+                }
             }
-            busy = ""
-            app.show(items.count > 1
-                     ? (Tr("已转发") + " \(items.count) " + Tr("条给") + "「" + chat.name + "」")
-                     : (Tr("已转发给") + "「" + chat.name + "」"))
+            sending = false
+            if targets.count == 1 {
+                app.show(Tr("已转发给") + "「" + targets[0].name + "」")
+            } else {
+                app.show(Tr("已转发给") + " " + String(targets.count) + " " + Tr("个聊天"))
+            }
             onSent()
             dismiss()
         }

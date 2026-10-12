@@ -140,6 +140,8 @@ final class TRTCBridge: NSObject, ObservableObject {
             /* 采集之前先把清晰度 / 镜像 / 美颜套上（改完不用挂断重打） */
             applyVideoPrefs()
             c.startLocalPreview(true, view: localView)
+            /* 模糊背景开着的话，采集开始之后要把处理回调挂上 */
+            if VideoBlur.shared.enabled { setBackgroundBlur(true) }
         }
     }
 
@@ -178,6 +180,21 @@ final class TRTCBridge: NSObject, ObservableObject {
         let lv = Float(CallPrefs.beauty)
         mgr.setBeautyLevel(lv * 3)
         mgr.setWhitenessLevel(lv * 1.5)
+    }
+
+    /* ---------------- 视频通话的「模糊背景」（对齐微信那一档） ----------------
+       把本地采集的画面交给自己的处理回调（VideoBlur）：
+       TRTC 那边按 BGRA 的 PixelBuffer 回帧，我们糊完背景再写回 dstFrame。
+       关掉时把回调摘掉，采集路径回到 SDK 默认（少一层处理、更省电）。 */
+    func setBackgroundBlur(_ on: Bool) {
+        guard let c = cloud, let fmt = TRTCVideoPixelFormat(rawValue: 6),
+              let buf = TRTCVideoBufferType(rawValue: 1) else { return }   // 6=32BGRA 1=PixelBuffer
+        if on, isVideo {
+            c.setLocalVideoProcessDelegete(VideoBlur.shared, pixelFormat: fmt, bufferType: buf)
+        } else {
+            c.setLocalVideoProcessDelegete(nil, pixelFormat: fmt, bufferType: buf)
+            VideoBlur.shared.reset()
+        }
     }
 
     /// 把我选的变声预设套到通话上（TRTC 音频效果管理器）。
