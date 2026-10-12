@@ -55,30 +55,28 @@ struct MainTabView: View {
                            ? 0
                            : L.tabH + L.safeBottom)
             }
-            /* 登录后同步最近聊天记录 —— 2026-10-12 用户要求「对齐微信」：
-               微信这里**不是**一张居中的大卡片、也**不会**把整个界面压暗，就是顶栏下面
-               一条很淡的小胶囊：小转圈 + 一行「正在同步消息…」，同步完淡淡消失，全程不挡操作。
-               以前那套是黑底压暗 + 玻璃卡 + 两行大字，太重了。 */
-            .overlay(alignment: .top) {
+            /* 登录后同步最近聊天记录：顶上挂一条小小的进度提示（同步是后台做的，不拦着用） */
+            /* 登录后同步：微信那种居中的「正在同步最近的聊天记录…」卡片
+               （同步很快，卡片是淡入淡出；不拦着用户操作） */
+            .overlay {
                 if app.syncing || !app.syncText.isEmpty {
-                    VStack {
-                        HStack(spacing: 8) {
-                            if app.syncing { ProgressView().scaleEffect(0.72) }
-                            Text(app.syncing ? "正在同步消息…"
-                                             : (app.syncText.isEmpty ? "消息同步完成" : app.syncText))
-                                .font(pf(13.5))
-                                .foregroundColor(C.subLabel)
-                                .lineLimit(1)
+                    ZStack {
+                        Color.black.opacity(0.16).ignoresSafeArea()
+                        VStack(spacing: 14) {
+                            if app.syncing { ProgressView().scaleEffect(1.15) }
+                            Text(app.syncing ? "正在同步最近的聊天记录…"
+                                             : (app.syncText.isEmpty ? "已同步最近的聊天记录" : app.syncText))
+                                .font(pf(14))
+                                .foregroundColor(C.label)
+                                .multilineTextAlignment(.center)
                         }
-                        .padding(.horizontal, 16)
-                        .padding(.vertical, 9)
-                        .background { CardGlassBox(radius: 16) }
-                        .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        .padding(.horizontal, 26)
+                        .padding(.vertical, 22)
+                        .background { CardGlassBox(radius: 14) }
+                        .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous)
                             .stroke(C.hairline, lineWidth: 0.5))
-                        .shadow(color: .black.opacity(0.10), radius: 10, y: 3)
-                        Spacer(minLength: 0)
+                        .shadow(color: .black.opacity(0.18), radius: 16, y: 4)
                     }
-                    .padding(.top, L.safeTop + 46)
                     .transition(.opacity)
                     .allowsHitTesting(false)
                 }
@@ -717,9 +715,6 @@ struct NavBar<Right: View>: View {
     let onLongPressTitle: (() -> Void)?
     /// 返回箭头右边可以插一小块内容（聊天页那个未读数字就放这儿）
     let leftExtra: AnyView?
-    /// 左上角用**文字**代替返回箭头：微信「切换账号」页左上角就是「关闭」两个字。
-    /// 默认 nil = 还是原来的箭头，**其它页面一点不受影响**。
-    var backText: String? = nil
     /// 苹果那套浮动玻璃：返回=圆形玻璃、标题=胶囊玻璃、右边=胶囊玻璃，其余地方全透明（露出内容）
     /// **默认全站都开**（用户要求：所有页面都沿用 iOS 26 这套玻璃做全套升级）。
     /// 想整体退回老的整条顶栏：后台 ui.json 写 navFloating = 0。
@@ -732,7 +727,6 @@ struct NavBar<Right: View>: View {
          back: (() -> Void)? = nil,
          onLongPressTitle: (() -> Void)? = nil,
          leftExtra: AnyView? = nil,
-         backText: String? = nil,
          floating: Bool = true,
          leftExtraGlass: Bool = true,
          @ViewBuilder right: () -> Right) {
@@ -740,7 +734,6 @@ struct NavBar<Right: View>: View {
         self.back = back
         self.onLongPressTitle = onLongPressTitle
         self.leftExtra = leftExtra
-        self.backText = backText
         self.floating = floating
         self.leftExtraGlass = leftExtraGlass
         self.right = right()
@@ -771,22 +764,12 @@ struct NavBar<Right: View>: View {
             HStack(spacing: 0) {
                 if let back = back {
                     Button(action: back) {
-                        if let bt = backText {
-                            /* 文字版（微信「切换账号」左上角的「关闭」）：
-                               走的是普通文字，不套圆形玻璃、不套箭头 */
-                            Text(Tr(bt))
-                                .font(pf(17))
-                                .foregroundColor(C.label)
-                                .padding(.horizontal, 4)
-                                .frame(height: useFloating ? 36 : L.navH)
-                        } else {
-                            FlexIcon(custom: IconOverrides.custom("nav.back"), size: 20,
-                                     color: C.label, symbol: "chevron.left", weight: .medium)
-                                .frame(width: useFloating ? 36 : 44, height: useFloating ? 36 : L.navH)
-                                .background {
-                                    if useFloating { GlassBackground(shape: Circle(), shadow: true, seed: 0.10) }
-                                }
-                        }
+                        FlexIcon(custom: IconOverrides.custom("nav.back"), size: 20,
+                                 color: C.label, symbol: "chevron.left", weight: .medium)
+                            .frame(width: useFloating ? 36 : 44, height: useFloating ? 36 : L.navH)
+                            .background {
+                                if useFloating { GlassBackground(shape: Circle(), shadow: true, seed: 0.10) }
+                            }
                     }
                     .buttonStyle(.plain)
                     .padding(.leading, useFloating ? 10 : 0)

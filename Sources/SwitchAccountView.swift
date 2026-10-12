@@ -29,8 +29,25 @@ struct SwitchAccountView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            /* 左上角照微信用「关闭」两个字，不是返回箭头（用户发来的真机截图就是这样） */
-            NavBar(title: Tr("切换账号"), back: { dismiss() }, backText: "关闭") {
+            /* 左上角照微信用「关闭」两个字，不是返回箭头（用户发来的真机截图就是这样）。
+               ⚠ 2026-10-12：以前这是给全站共用的 NavBar 加了一个 backText 分支实现的，
+               结果那一改把**聊天页**也一起改了 —— 用户那台机器一进聊天就被系统杀掉
+               （日志停在「8 准备打开」，和 B127~B144 那次一模一样）。
+               NavBar 已经一字不差退回 B203 那版，这一页就自己画一条顶栏，
+               再也不动那个公共组件。 */
+            HStack(spacing: 0) {
+                Button { dismiss() } label: {
+                    Text(Tr("关闭"))
+                        .font(pf(17))
+                        .foregroundColor(C.label)
+                        .frame(height: L.navH)
+                        .padding(.horizontal, 16)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                Spacer(minLength: 0)
+                Text(Tr("切换账号")).font(pf(17, .semibold)).foregroundColor(C.label)
+                Spacer(minLength: 0)
                 Button {
                     withAnimation(.easeInOut(duration: 0.18)) { managing.toggle() }
                 } label: {
@@ -38,10 +55,13 @@ struct SwitchAccountView: View {
                         .font(pf(16))
                         .foregroundColor(managing ? C.green : C.label)
                         .frame(height: L.navH)
-                        .padding(.trailing, 16)
+                        .padding(.horizontal, 16)
+                        .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
             }
+            .frame(height: L.navH)
+            .background(C.navBg)
 
             ScrollView(showsIndicators: false) {
                 VStack(spacing: 0) {

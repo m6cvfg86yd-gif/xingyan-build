@@ -282,6 +282,13 @@ final class DDStore: ObservableObject {
 
 /* ---------------------------------------------------------- 小零件 */
 
+extension View {
+    /// 商城一律按**浅色**渲染：用户要求「商城背景不要黑色的」——
+    /// 深色模式下 App 的底色是 #191919，商城这一页保持拼多多那种白底/浅灰底
+    /// （颜色走 App 那套 C.* 的浅色值：页面 #EDEDED、卡片 #FFFFFF、文字深灰）。
+    func ddLight() -> some View { environment(\.colorScheme, .light) }
+}
+
 /// 商品图（emoji + 暖色渐变底，和 H5 的观感一致）
 struct DDThumb: View {
     var em: String
@@ -348,6 +355,9 @@ struct MallNativeView: View {
         .sheet(isPresented: $showOrders) {
             DDOrdersView().environmentObject(app)
         }
+        .ddLight()
+        /* 顺带把状态栏也按浅色算：不然深色模式下状态栏是白字、压在浅色商城上会看不清 */
+        .preferredColorScheme(.light)
     }
 
     private var titles = ["商城", "种草", "消息", "购物车", "我的"]
@@ -924,6 +934,7 @@ struct DDCartTab: View {
             .padding(.top, 6)
         }
         .background(C.pageBg.ignoresSafeArea())
+        .ddLight()
     }
 
     private func toggle(_ pid: String) {
@@ -1095,6 +1106,7 @@ struct DDMineTab: View {
             .padding(.bottom, max(10, L.safeBottom))
         }
         .background(C.pageBg.ignoresSafeArea())
+        .ddLight()
     }
 }
 
@@ -1130,6 +1142,7 @@ struct DDDetailView: View {
             DDOrderSheet(product: product, group: group)
                 .environmentObject(app)
         }
+        .ddLight()
     }
 
     private var topBar: some View {
@@ -1405,6 +1418,7 @@ struct DDOrderSheet: View {
         }
         .background(C.pageBg.ignoresSafeArea())
         .onAppear { addr = store.address }
+        .ddLight()
     }
 
     private func pick(_ title: String, _ sub: String, _ isGroup: Bool) -> some View {
@@ -1495,6 +1509,7 @@ struct DDOrdersView: View {
             }
         }
         .background(C.pageBg.ignoresSafeArea())
+        .ddLight()
     }
 
     private func card(_ o: DDOrder) -> some View {
@@ -1590,6 +1605,7 @@ struct DDFavView: View {
             }
         }
         .background(C.pageBg.ignoresSafeArea())
+        .ddLight()
     }
 }
 
@@ -1681,6 +1697,7 @@ struct DDSearchView: View {
             }
         }
         .background(C.pageBg.ignoresSafeArea())
+        .ddLight()
     }
 
     private func chips(_ arr: [String], fill: Bool) -> some View {

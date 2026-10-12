@@ -47,7 +47,10 @@ struct MeView: View {
                         /* 用户要求：我页的卡片底色**和会话页每行一致**（暗色 #141419）。
                            后台 ui.json 写 meGlass = 0 就是实色卡（吃 cardBg）；
                            留默认 1 还是原来那张透出封面的玻璃卡。 */
-                        /* 对齐微信：卡片一律实色（原来那个透出封面的玻璃卡去掉了） */
+                        /* 对齐微信：卡片一律实色（原来那个透出封面的玻璃卡去掉了）。
+                           ⚠ 用户反馈「外面的框全没了」——GroupCard 传 bg: 那条分支是
+                           **不留边、没圆角**的（玻璃那条才自带内缩+圆角），所以去掉玻璃时
+                           把卡片的框也丢了。这里手动把内缩 12 和圆角 12 补回来。 */
                         GroupCard(bg: C.meCardBg) {
                             ForEach(grouped[gi].indices, id: \.self) { ri in
                                 let item = grouped[gi][ri]
@@ -289,7 +292,8 @@ struct MeView: View {
     /// 而 GroupGap 画的是两条**通顶全宽**的细线（老的平铺列表留下的一对）——
     /// 从卡片边上多伸出去一截，看着就是"多出来的线"。这里只留一条灰缝。
     private var meGap: some View {
-        Rectangle().fill(C.pageBg).frame(height: L.groupGap)
+        /* 照微信截图量的：上下两块之间那道灰缝是 10pt */
+        Rectangle().fill(C.pageBg).frame(height: 10)
     }
 
     private var rowLine: some View {
