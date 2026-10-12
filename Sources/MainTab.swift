@@ -212,7 +212,11 @@ struct MainTabView: View {
                         if UIApplication.shared.applicationState == .active { break }
                         try? await Task.sleep(nanoseconds: 200_000_000)
                     }
-                    try? await Task.sleep(nanoseconds: 250_000_000)
+                    /* 再等久一点（250ms → 1.2 秒）：聊天页是个超大视图，
+                       冷启动那几秒里还有同步/预取在跑，抢在一起就会被系统 watchdog 杀
+                       （2026-10-12 用户反复报「点推送通知就闪退」，日志里内存只有 45MB）。 */
+                    while app.syncing { try? await Task.sleep(nanoseconds: 200_000_000) }
+                    try? await Task.sleep(nanoseconds: 1_200_000_000)
                     app.openChat = c
                 } else {
                     app.show(Tr("找不到这个会话"))

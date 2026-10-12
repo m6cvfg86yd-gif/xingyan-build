@@ -16,6 +16,10 @@ struct RealNameView: View {
     @State private var idCard = ""
     @State private var busy = false
     @State private var error = ""
+    /// 人脸核身那一页（微信：实名之前先刷脸）
+    @State private var showFace = false
+    /// 这一轮是不是已经核过脸了（核过就直接提交）
+    @State private var faceOK = false
     @FocusState private var focus: Field?
 
     private enum Field: Hashable { case name, id }
@@ -79,6 +83,22 @@ struct RealNameView: View {
                 HairLine(inset: 16)
                 row(Tr("认证时间"), i.at.prefix(10).description)
             }
+            /* 已经实名过的人也要能用「人脸核身」那一页（用户反馈：实名过了就看不到了）。
+               点一下进刷脸页（正对屏幕 → 眨眨眼 → 摇摇头），试一次/重新录一次都行；
+               这里不再重复提交实名，只记一条结果。 */
+            HairLine(inset: 16)
+            Button { showFace = true } label: {
+                HStack(spacing: 12) {
+                    Text(Tr("人脸核身")).font(pf(16)).foregroundColor(C.label)
+                    Spacer(minLength: 8)
+                    Text(faceOK ? Tr("已通过") : Tr("去验证"))
+                        .font(pf(14)).foregroundColor(C.subLabel)
+                    Chevron(size: 9, line: 1.6)
+                }
+                .padding(.horizontal, 16).frame(height: 52)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
         }
         .background(sheetBg)
     }
@@ -131,9 +151,20 @@ struct RealNameView: View {
             }
 
             Button {
-                submit()
+                /* 微信的规矩：提交实名之前先刷一次脸（人脸核身）。
+                   这里是真的开摄像头做活体（正对屏幕 → 眨眨眼 → 摇摇头），过了才允许提交。
+                   管理页有开关（ui.json 的 realnameFace）：判定不准的时候可以关掉，
+                   关掉后直接提交，不挡用户。 */
+                if UIConfig.num("realnameFace", 1) > 0 {
+                    showFace = true
+                } else {
+                    faceOK = true
+                    submit()
+                }
             } label: {
-                Text(busy ? Tr("提交中…") : Tr("提交认证"))
+                Text(busy ? Tr("提交中…")
+                          : ((faceOK || UIConfig.num("realnameFace", 1) <= 0)
+                             ? Tr("提交认证") : Tr("开始人脸验证")))
                     .font(pf(17, .medium))
                     .foregroundColor(.white)
                     .frame(maxWidth: .infinity)
@@ -145,6 +176,24 @@ struct RealNameView: View {
             .disabled(!canSubmit || busy)
             .padding(16)
             .background(sheetBg)
+            .sheet(isPresented: $showFace) {
+                FaceLivenessView { ok in
+                    showFace = false
+                    if ok {
+                        faceOK = true
+                        DiagLog.shared.note("实名认证：人脸核身通过")
+                        /* 还没实名的：核身过了就提交；已实名的：只提示一下（不重复提交） */
+                        if info?.verified == true {
+                            app.show(Tr("人脸核身通过 ✅"))
+                        } else {
+                            submit()
+                        }
+                    } else {
+                        app.show(Tr("人脸验证没通过，可以重来一次"))
+                    }
+                }
+                .environmentObject(app)
+            }
         }
     }
 

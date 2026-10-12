@@ -2995,6 +2995,23 @@ final class API {
     func deleteFavorite(_ id: String) async {
         _ = try? await request("DELETE", "/api/favorites/" + id)
     }
+
+    /// 改一条收藏（编辑正文 / 改标题 / 置顶）—— 笔记的「编辑」「置顶」用它。
+    /// 服务端 2026-10-12 新增 PATCH /api/favorites/<id>，改完 id 和位置都不变。
+    @discardableResult
+    func updateFavorite(id: String, content: String? = nil, title: String? = nil,
+                        pinned: Bool? = nil) async -> Bool {
+        var b: [String: Any] = [:]
+        if let c = content { b["content"] = c }
+        if let t = title { b["title"] = t }
+        if let p = pinned { b["pinned"] = p }
+        do {
+            _ = try await request("PATCH", "/api/favorites/" + id, body: b)
+            return true
+        } catch {
+            return false
+        }
+    }
     struct BizInvoiceResult: Decodable {
         var invoice: BizInvoiceRaw?
         var invoices: [BizInvoiceRaw]?
@@ -3632,6 +3649,52 @@ final class API {
 
     private func countOf(_ d: [String: Any], _ key: String) -> Int? {
         (d[key] as? [Any])?.count
+    }
+
+    /* ============================================================ 红包封面（管理页可换）
+       和后台 manage.html 的「红包封面」是同一份数据（data/redpacket-covers.json）：
+         GET  /api/ops/rpcovers → { covers: { defaultId, covers: [...] } }（含停用的）
+         POST /api/ops/rpcovers ← { covers: [...], defaultId }（整份覆盖，跟后台同一套校验） */
+
+    struct RPCover: Decodable, Identifiable, Hashable {
+        var id: String
+        var name: String?
+        var image: String?
+        var thumb: String?
+        var color: String?
+        var enabled: Bool?
+    }
+    struct RPCoversFile: Decodable {
+        var defaultId: String?
+        var covers: [RPCover]?
+    }
+    private struct RPCoversPayload: Decodable { var covers: RPCoversFile? }
+    private struct RPSavedPayload: Decodable { var covers: RPCoversFile? }
+
+    func opsRPCovers() async throws -> (covers: [RPCover], defaultId: String) {
+        let r: RPCoversPayload = try await get("/api/ops/rpcovers", as: RPCoversPayload.self)
+        return (r.covers?.covers ?? [], r.covers?.defaultId ?? "")
+    }
+
+    @discardableResult
+    func opsRPSave(covers: [[String: Any]], defaultId: String) async throws -> [RPCover] {
+        var b: [String: Any] = ["covers": covers]
+        if !defaultId.isEmpty { b["defaultId"] = defaultId }
+        let r: RPSavedPayload = try await post("/api/ops/rpcovers", b, as: RPSavedPayload.self)
+        return r.covers?.covers ?? []
+    }
+
+    /* ============================================================ 管理：改一个开关（ops）
+       写的是 data/ui.json 里的一个键（比如「实名前先刷脸」realnameFace）。
+       /api/ui 每次现读文件，所以改完把 UI 配置重拉一次就生效。 */
+    @discardableResult
+    func opsSetUIKey(_ key: String, _ value: Any) async -> Bool {
+        do {
+            _ = try await request("POST", "/api/ops/ui", body: ["key": key, "value": value])
+            return true
+        } catch {
+            return false
+        }
     }
 
     /// 会员中心要的全部东西：档位 + 价格 + 权益文案 + 我的状态 + 开通记录
@@ -4587,8 +4650,12 @@ final class API {
         _ = try? await request("POST", "/api/moments/seen", body: [:])
     }
 
-    func commentMoment(id: String, text: String) async {
-        _ = try? await request("POST", "/api/moments/\(id)/comments", body: ["content": text])
+    func commentMoment(id: String, text: String, replyTo: String = "") async {
+        var b: [String: Any] = ["content": text]
+        /* 回复某条评论：带上那个人的 userId，服务端会存 replyTo，
+           对方那边就显示成「A 回复 B：内容」（微信就是这样） */
+        if !replyTo.isEmpty { b["replyTo"] = replyTo }
+        _ = try? await request("POST", "/api/moments/\(id)/comments", body: b)
     }
 
     func deleteMoment(id: String) async {

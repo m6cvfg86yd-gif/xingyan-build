@@ -62,6 +62,13 @@ final class CallAudioPipe: NSObject, AVCaptureAudioDataOutputSampleBufferDelegat
     private var queuedUntil = Date.distantPast
     /// 这一通里排得最长的一次延迟（>1.5 秒就会被丢帧压回来），上报出来看得见
     private var latencyPeak = 0.0
+    /* 电平表（2026-10-12 加）：光看「收到/排播多少帧」分不出**采到的是不是静音**、
+       **播出去的到底有没有声** —— 用户报的「都在通话中但一个字听不见」就是这种。
+       这里记最近一帧的峰值（Int16，0 = 完全静音），写进通话结束那条上报里。 */
+    private var lastCapturePeak = 0
+    private var lastPlayPeak = 0
+    /// 采集端「不出帧」被自动重抢了几次（用户报的「一会会我的声音没了、对方还在」）
+    private(set) var captureStalls = 0
 
     /// 通话结束时上报给服务器，写进 call-trace.log
     var playDiag: String {
@@ -70,6 +77,22 @@ final class CallAudioPipe: NSObject, AVCaptureAudioDataOutputSampleBufferDelegat
             + " 延迟峰值=\(String(format: "%.1f", latencyPeak))s"
             + " 引擎=\(player.isRunning ? "跑" : "停")"
             + " 播放器=\(playerReady ? (playerNode.isPlaying ? "跑" : "停") : "没起")"
+            + " 采集电平=\(lastCapturePeak) 播放电平=\(lastPlayPeak)"
+            + " 重抢麦=\(captureStalls)次"
+    }
+
+    /// 一段 16-bit 小端 PCM 的峰值（0 = 静音）
+    private func peakOfInt16(_ data: Data) -> Int {
+        var mx = 0
+        let bytes = [UInt8](data)
+        var i = 0
+        while i + 1 < bytes.count {
+            let raw = UInt16(bytes[i]) | (UInt16(bytes[i + 1]) << 8)
+            let a = abs(Int(Int16(bitPattern: raw)))
+            if a > mx { mx = a }
+            i += 2
+        }
+        return mx
     }
 
     private var started = false
@@ -179,12 +202,33 @@ final class CallAudioPipe: NSObject, AVCaptureAudioDataOutputSampleBufferDelegat
         guard watchdog == nil else { return }
         let t = DispatchSource.makeTimerSource(queue: playQueue)
         t.schedule(deadline: .now() + 1.5, repeating: 2.0)
+        /* 「一会儿我这边就没声了、对方还在」= 采集还标着 running，其实已经不出帧了。
+           老看门狗只看 capture.isRunning，这种情况它看不出来 ——
+           这里盯 framesOut：连着两拍（≈4 秒）一帧没多，就**强制重抢麦克风**。
+           （自己静音时采集照样出帧，所以不会误判。） */
+        var lastOut = -1
+        var stalledTicks = 0
         t.setEventHandler { [weak self] in
             guard let self = self, self.started, !self.handedOver else { return }
             self.startPlaybackOnQueue()
             /* 采集端也要盯：系统把采集掐停了（打断 / 路由变化）却没人管的话，
                就是「我听得见对面、对面听不见我」。 */
-            if !self.capture.isRunning { self.repairNow() }
+            if !self.capture.isRunning {
+                self.repairNow()
+                return
+            }
+            if self.framesOut == lastOut {
+                stalledTicks += 1
+                if stalledTicks >= 2 {
+                    stalledTicks = 0
+                    self.captureStalls += 1
+                    self.lastError = "采集不出帧，已自动重抢麦克风"
+                    self.repairNow(force: true)
+                }
+            } else {
+                stalledTicks = 0
+                lastOut = self.framesOut
+            }
         }
         watchdog = t
         t.resume()
@@ -369,7 +413,9 @@ final class CallAudioPipe: NSObject, AVCaptureAudioDataOutputSampleBufferDelegat
             return inBuf
         }
         guard err == nil, out.frameLength > 0, let ch = out.int16ChannelData else { return }
-        pending.append(Data(bytes: ch[0], count: Int(out.frameLength) * 2))
+        let chunk0 = Data(bytes: ch[0], count: Int(out.frameLength) * 2)
+        lastCapturePeak = peakOfInt16(chunk0)
+        pending.append(chunk0)
         let frameBytes = frameSamples * 2
         while pending.count >= frameBytes {
             let chunk = pending.prefix(frameBytes)
@@ -383,6 +429,7 @@ final class CallAudioPipe: NSObject, AVCaptureAudioDataOutputSampleBufferDelegat
     func play(_ data: Data) {
         guard !data.isEmpty else { return }
         framesIn += 1
+        lastPlayPeak = peakOfInt16(data)
         playQueue.async { [weak self] in self?.playOnQueue(data) }
     }
 
@@ -404,15 +451,24 @@ final class CallAudioPipe: NSObject, AVCaptureAudioDataOutputSampleBufferDelegat
     /// 上一版是"只保留 3 帧"，结果播放端被拖慢（日志里 收到=286 排播=200），听着就是一顿一顿。
     private func drainPending(_ fmt: AVAudioFormat) {
         var until = max(Date(), queuedUntil)
-        let queued = until.timeIntervalSinceNow
-        if queued > 1.5, pendingFrames.count > 4 {
-            var remain = queued
-            while pendingFrames.count > 4, remain > 0.35 {
+        /* 抖动缓冲（2026-10-12 改进，用户报「通了有杂音」）：
+           以前是「积压超过 1.5 秒才一次性狠丢一堆」—— 一次丢掉 ~1 秒的音频，
+           听感上就是一声爆响/一顿断续（杂音的主要来源）。
+           现在分两档、只单帧丢，并且**始终保 4 帧（160ms）垫子**：
+             · 积压 > 400ms：温和追（一帧一帧丢，把播放点往前挪）
+             · 积压 > 1500ms：快追（已经没法好好听了，丢到 200ms 为止）
+           追的过程是"播放点往前挪 40ms"，不是把已排进播放器的内容扔掉，
+           所以听不出大窟窿，最多一两声轻微顿挫。 */
+        let backlog = until.timeIntervalSinceNow
+        if backlog > 0.4, pendingFrames.count > 4 {
+            let hard = backlog > 1.5
+            while pendingFrames.count > 4 {
+                let now = until.timeIntervalSinceNow
+                if hard ? (now <= 0.2) : (now <= 0.25) { break }
                 pendingFrames.removeFirst()
-                remain -= 0.04
                 framesDropped += 1
+                until = until.addingTimeInterval(-0.04)
             }
-            until = Date().addingTimeInterval(max(0.04, remain))
         }
         while !pendingFrames.isEmpty {
             let d = pendingFrames.removeFirst()

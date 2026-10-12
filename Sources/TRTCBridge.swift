@@ -69,6 +69,8 @@ final class TRTCBridge: NSObject, ObservableObject {
     private var peerUserId = ""
     /// 是否已经开始真正采集（麦克风 / 摄像头）
     private var active = false
+    /// 「音视频通话」设置改了（清晰度 / 镜像 / 美颜）：通话中立刻套上
+    private var prefsObserver: NSObjectProtocol? = nil
 
     private override init() { super.init() }
 
@@ -105,6 +107,16 @@ final class TRTCBridge: NSObject, ObservableObject {
         let c = TRTCCloud.sharedInstance()
         c.delegate = self
         cloud = c
+        if prefsObserver == nil {
+            prefsObserver = NotificationCenter.default.addObserver(
+                forName: Notification.Name("chrisCallPrefsChanged"), object: nil, queue: .main
+            ) { [weak self] _ in
+                Task { @MainActor in
+                    self?.applyVideoPrefs()
+                    self?.applyBeauty()
+                }
+            }
+        }
         remoteView = UIView()
         localView = UIView()
         /* 真人变声：进房就按「设置 → 通用 → 语音变声」选好的那个套上。
@@ -124,7 +136,48 @@ final class TRTCBridge: NSObject, ObservableObject {
         active = true
         c.startLocalAudio(.default)
         c.muteLocalAudio(false)
-        if isVideo { c.startLocalPreview(true, view: localView) }
+        if isVideo {
+            /* 采集之前先把清晰度 / 镜像 / 美颜套上（改完不用挂断重打） */
+            applyVideoPrefs()
+            c.startLocalPreview(true, view: localView)
+        }
+    }
+
+    /* ---------------- 视频清晰度 / 镜像 / 美颜（对齐微信） ----------------
+       全用 rawValue 构造枚举：TRTC 的 Swift 名字在不同版本里改过好几回
+       （下面 setSpeaker 也是这个理由），原始值是从 SDK 头文件里核对出来的：
+         TRTCVideoResolution: 640_360=108 · 1280_720=112 · 1920_1080=114
+         TRTCVideoResolutionMode: Landscape 0 · Portrait 1
+         TRTCVideoFillMode: Fill 0 · Fit 1
+         TRTCVideoMirrorType: Auto 0 · Enable 1 · Disable 2
+         TXBeautyStyle: Smooth 0 · Nature 1
+       ⚠ 720p/1080p 比默认 360p 吃流量，所以默认给「高清」，用户可在
+         我 → 设置 → 功能 → 音视频通话 里切。 */
+    func applyVideoPrefs() {
+        guard let c = cloud, isVideo else { return }
+        let p = CallPrefs.encoderParams()
+        let enc = TRTCVideoEncParam()
+        if let res = TRTCVideoResolution(rawValue: p.resolution) { enc.videoResolution = res }
+        if let mode = TRTCVideoResolutionMode(rawValue: 1) { enc.resMode = mode }   // 竖屏
+        enc.videoFps = p.fps
+        enc.videoBitrate = p.bitrate
+        c.setVideoEncoderParam(enc)
+
+        let r = TRTCRenderParams()
+        if let fill = TRTCVideoFillMode(rawValue: 0) { r.fillMode = fill }
+        if let mir = TRTCVideoMirrorType(rawValue: CallPrefs.mirror ? 1 : 2) { r.mirrorType = mir }
+        c.setLocalRenderParams(r)
+
+        applyBeauty()
+    }
+
+    /// 美颜（0 关 / 1 低 / 2 中 / 3 高 → 磨皮 0/3/6/9、提亮 0/1.5/3/4.5）
+    func applyBeauty() {
+        guard let mgr = cloud?.getBeautyManager() else { return }
+        if let style = TXBeautyStyle(rawValue: 1) { mgr.setBeautyStyle(style) }   // 自然
+        let lv = Float(CallPrefs.beauty)
+        mgr.setBeautyLevel(lv * 3)
+        mgr.setWhitenessLevel(lv * 1.5)
     }
 
     /// 把我选的变声预设套到通话上（TRTC 音频效果管理器）。
@@ -156,6 +209,10 @@ final class TRTCBridge: NSObject, ObservableObject {
     }
 
     func stop() {
+        if let ob = prefsObserver {
+            NotificationCenter.default.removeObserver(ob)
+            prefsObserver = nil
+        }
         cloud?.stopLocalPreview()
         cloud?.stopLocalAudio()
         if !peerUserId.isEmpty { cloud?.stopRemoteView(peerUserId) }

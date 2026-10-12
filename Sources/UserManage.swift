@@ -73,6 +73,13 @@ struct UserManageView: View {
     @State private var logKind = ""
     @State private var logLoading = false
     @State private var logDetail: API.AppLogRow? = nil
+    /* ---- 红包封面（管理页可换）---- */
+    @State private var rpCovers: [API.RPCover] = []
+    @State private var rpDefault = ""
+    @State private var rpEdit: API.RPCover? = nil
+    @State private var rpNew = false
+    /* ---- 开关（写 ui.json 的键）---- */
+    @State private var faceForRealName = UIConfig.num("realnameFace", 1) > 0
 
     var body: some View {
         VStack(spacing: 0) {
@@ -87,6 +94,8 @@ struct UserManageView: View {
                     officialSection
                     shopSection
                     cardsSection
+                    rpCoversSection
+                    switchSection
                     logsSection
                     if !msg.isEmpty {
                         Text(msg).font(pf(12.5)).foregroundColor(C.subLabel)
@@ -155,6 +164,20 @@ struct UserManageView: View {
         /* 点一条汇入的日志：看完整正文 + 调用栈 */
         .sheet(item: $logDetail) { r in
             AppLogDetailSheet(row: r)
+        }
+        /* 改一张红包封面 */
+        .sheet(item: $rpEdit) { c in
+            RPCoverEditSheet(cover: c, isDefault: rpDefault == c.id) { r in
+                applyRpEdit(r, editing: c)
+            }
+            .environmentObject(app)
+        }
+        /* 新增一张红包封面 */
+        .sheet(isPresented: $rpNew) {
+            RPCoverEditSheet(cover: nil, isDefault: false) { r in
+                applyRpEdit(r, editing: nil)
+            }
+            .environmentObject(app)
         }
     }
 
@@ -435,6 +458,143 @@ struct UserManageView: View {
             logRows = r.rows ?? []
         }
         logLoading = false
+    }
+
+    /* ------------------------------------------------------- 红包封面（管理页可换）
+       数据就是 data/redpacket-covers.json，和后台 manage.html 的「红包封面」互通：
+       改完发红包页立刻能看到（服务端保存时顺手更新内存缓存，不用重启）。 */
+
+    /* ------------------------------------------------------- 开关（写 ui.json 的键）
+       用户要求「要给管理一个开关」：第一个就是**实名认证前要不要先刷脸（人脸核身）**。
+       判定不准的时候管理一键关掉，用户就不会被挡在实名那一步。
+       服务端 POST /api/ops/ui 改 data/ui.json，改完这里重拉一次 UI 配置就生效。 */
+
+    private var switchSection: some View {
+        card(Tr("开关")) {
+            HStack(spacing: 12) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(Tr("实名认证先刷脸")).font(pf(16)).foregroundColor(C.label)
+                    Text(Tr("关掉后只填姓名+身份证号就能提交")).font(pf(12)).foregroundColor(C.subLabel)
+                }
+                Spacer(minLength: 6)
+                Toggle("", isOn: Binding(
+                    get: { faceForRealName },
+                    set: { v in
+                        faceForRealName = v
+                        Task {
+                            let ok = await API.shared.opsSetUIKey("realnameFace", v ? 1 : 0)
+                            /* 改完把 UI 配置重拉一次，本机立刻按新开关走 */
+                            if ok, let cfg = await API.shared.uiConfig() { UIConfig.apply(cfg.ui) }
+                            msg = ok ? Tr("已") + (v ? Tr("开启") : Tr("关闭")) + Tr("实名前刷脸")
+                                     : Tr("保存失败")
+                        }
+                    }))
+                    .labelsHidden().tint(C.green)
+            }
+            .padding(.horizontal, 16).frame(height: 62)
+        }
+    }
+
+    private var rpCoversSection: some View {
+        card(Tr("红包封面（发红包时能挑的那几张）")) {
+            if rpCovers.isEmpty {
+                hint(Tr("还没有封面，下面点「新增一张封面」"))
+            } else {
+                ForEach(Array(rpCovers.enumerated()), id: \.element.id) { i, c in
+                    if i > 0 { HairLine(inset: 70) }
+                    HStack(spacing: 12) {
+                        ZStack {
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .fill(Color(hexString: c.color ?? "#B3241C", fallback: 0xB3241C))
+                            if let img = (c.thumb?.isEmpty == false ? c.thumb : c.image), !img.isEmpty {
+                                RemoteImage(path: img).frame(width: 46, height: 46)
+                                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                            }
+                        }
+                        .frame(width: 46, height: 46)
+                        VStack(alignment: .leading, spacing: 3) {
+                            HStack(spacing: 6) {
+                                Text(c.name ?? "").font(pf(15.5)).foregroundColor(C.label).lineLimit(1)
+                                if rpDefault == c.id {
+                                    Text(Tr("默认"))
+                                        .font(pf(10.5)).foregroundColor(.white)
+                                        .padding(.horizontal, 5).padding(.vertical, 1.5)
+                                        .background(RoundedRectangle(cornerRadius: 4).fill(C.green))
+                                }
+                            }
+                            Text((c.enabled == false ? Tr("已停用") : Tr("在用")) + " · " + (c.color ?? ""))
+                                .font(pf(11.5)).foregroundColor(C.subLabel).lineLimit(1)
+                        }
+                        Spacer(minLength: 4)
+                        Button { rpEdit = c } label: {
+                            Text(Tr("编辑")).font(pf(13)).foregroundColor(C.green)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    .padding(.horizontal, 14).frame(height: 62)
+                }
+            }
+            HairLine(inset: 16)
+            row(Tr("新增一张封面"), Tr("点这里")) { rpNew = true }
+        }
+    }
+
+    private func loadRpCovers() async {
+        if let r = try? await API.shared.opsRPCovers() {
+            rpCovers = r.covers
+            rpDefault = r.defaultId
+        }
+    }
+
+    /// 把整份封面存回去（服务端就是按整份覆盖处理的，和后台同一套）
+    private func saveRpCovers(_ list: [API.RPCover], defaultId: String) async -> Bool {
+        let arr: [[String: Any]] = list.map { c in
+            var d: [String: Any] = [
+                "id": c.id,
+                "name": c.name ?? "",
+                "image": c.image ?? "",
+                "thumb": c.thumb ?? c.image ?? "",
+                "color": c.color ?? "#B3241C",
+                "enabled": c.enabled != false
+            ]
+            d["id"] = c.id
+            return d
+        }
+        do {
+            let saved = try await API.shared.opsRPSave(covers: arr, defaultId: defaultId)
+            rpCovers = saved
+            rpDefault = defaultId
+            return true
+        } catch {
+            msg = (error as? APIError)?.errorDescription ?? "保存封面失败"
+            return false
+        }
+    }
+
+    /// 编辑结果 → 拼一整份列表 → 存回去（新封面用一个临时 id，服务端会换成 cv 开头的正式 id）
+    private func applyRpEdit(_ r: RPCoverEditResult, editing: API.RPCover?) {
+        var list = rpCovers
+        var def = rpDefault
+        if r.deleted, let id = editing?.id {
+            list.removeAll { $0.id == id }
+            if def == id { def = list.first?.id ?? "" }
+        } else if let c = r.cover {
+            if let old = editing, let i = list.firstIndex(where: { $0.id == old.id }) {
+                list[i] = API.RPCover(id: old.id, name: c.name, image: c.image,
+                                      thumb: c.thumb, color: c.color, enabled: c.enabled)
+                if r.makeDefault { def = old.id }
+            } else {
+                let tmp = "cv" + String(Int(Date().timeIntervalSince1970 * 1000) % 100000)
+                list.append(API.RPCover(id: tmp, name: c.name, image: c.image,
+                                        thumb: c.thumb, color: c.color, enabled: c.enabled))
+                if r.makeDefault || def.isEmpty { def = tmp }
+            }
+        }
+        Task {
+            if await saveRpCovers(list, defaultId: def) {
+                msg = Tr("红包封面已保存（发红包页立刻能看到）")
+            }
+        }
     }
 
     /* ------------------------------------------------------- 上新音乐 */
@@ -777,6 +937,7 @@ struct UserManageView: View {
         snTypes = cfg.types
         await loadShop()          // 小店商品（含已下架的）
         await loadLogs()          // 汇入的 App 日志 / 崩溃
+        await loadRpCovers()      // 红包封面
         loading = false
     }
 

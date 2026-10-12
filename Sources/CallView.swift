@@ -99,6 +99,16 @@ struct CallView: View {
     /// 腾讯云 TRTC 的画面从它自己的 view 里来
     @ObservedObject private var trtc = TRTCBridge.shared
     @EnvironmentObject var app: AppState
+    /// 通话中收到的新消息（微信会在通话页顶上弹一行「XX：内容」，点一下进那个会话）
+    private struct CallMsgBanner: Equatable {
+        var chatId: String
+        var name: String
+        var text: String
+    }
+    @State private var msgBanner: CallMsgBanner? = nil
+    @State private var bannerTask: Task<Void, Never>? = nil
+    /// 每条会话上次看到的最后一条消息 id（第一次只记、不弹）
+    @State private var lastMsgSeen: [String: String] = [:]
     @State private var showInvite = false
     /* 通话页里「自己那个小画面」（画中画）：默认贴右下角，可以拖着走，松手吸附到左右边 */
     @State private var pipX: CGFloat? = nil
@@ -122,7 +132,10 @@ struct CallView: View {
         ZStack {
             backdrop
 
-            if call.isVideo && call.phase == .active {
+            if call.isGroupCall {
+                /* 群视频：每人一路画面（宫格）；群语音：头像墙 */
+                if call.isVideo { groupVideoLayer } else { groupLayer }
+            } else if call.isVideo && call.phase == .active {
                 videoLayer
             } else {
                 avatarLayer
@@ -130,6 +143,7 @@ struct CallView: View {
 
             VStack(spacing: 0) {
                 topBar
+                if let b = msgBanner { msgBannerView(b) }
                 Spacer(minLength: 0)
                 /* 麦克风没开 / 没起来：明说「对方听不到你」并给自助入口 ——
                    以前这种情况界面一切正常，用户根本不知道是哪儿的问题。 */
@@ -140,6 +154,71 @@ struct CallView: View {
         .sheet(isPresented: $showInvite) {
             inviteSheet
         }
+        /* 通话中收到的新消息：每 2 秒扫一遍会话列表（微信也这么做） */
+        .task(id: call.callId) {
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                if Task.isCancelled { break }
+                scanNewMessages()
+            }
+        }
+    }
+
+    /// 通话中收到的新消息 → 顶上弹一条（点了就缩成小窗、进那个会话，通话不中断）
+    private func scanNewMessages() {
+        switch call.phase {
+        case .idle: return
+        default: break
+        }
+        let mine = app.me?.id ?? ""
+        for c in app.chats {
+            guard let lm = c.lastMessage, let mid = lm.id, !mid.isEmpty else { continue }
+            let sender = lm.senderId ?? ""
+            if sender == mine || sender.isEmpty { lastMsgSeen[c.id] = mid; continue }
+            let old = lastMsgSeen[c.id]
+            lastMsgSeen[c.id] = mid
+            guard let old = old, old != mid else { continue }        // 第一次进来只记，不弹旧的
+            if c.muted == true { continue }                          // 免打扰的不弹
+            let t = (lm.preview ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            showBanner(chatId: c.id, name: c.title ?? Tr("新消息"),
+                       text: t.isEmpty ? Tr("[新消息]") : t)
+            return
+        }
+    }
+
+    private func showBanner(chatId: String, name: String, text: String) {
+        withAnimation(.easeOut(duration: 0.18)) {
+            msgBanner = CallMsgBanner(chatId: chatId, name: name, text: String(text.prefix(30)))
+        }
+        bannerTask?.cancel()
+        bannerTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 4_000_000_000)
+            if !Task.isCancelled { withAnimation(.easeOut(duration: 0.18)) { msgBanner = nil } }
+        }
+    }
+
+    private func msgBannerView(_ b: CallMsgBanner) -> some View {
+        Button {
+            msgBanner = nil
+            call.minimize()                     // 通话缩成小窗，继续通
+            if let c = app.chats.first(where: { $0.id == b.chatId }) { app.openChat = c }
+        } label: {
+            HStack(spacing: 7) {
+                Image(systemName: "message.fill").font(.system(size: 12, weight: .semibold))
+                Text(b.name).font(pf(13, .medium)).lineLimit(1)
+                Text(b.text).font(pf(13)).lineLimit(1).foregroundColor(.white.opacity(0.82))
+                Spacer(minLength: 0)
+            }
+            .foregroundColor(.white)
+            .padding(.horizontal, 12)
+            .frame(height: 34)
+            .background(Capsule().fill(Color.black.opacity(0.55)))
+            .padding(.horizontal, 14)
+            .padding(.top, 6)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .transition(.move(edge: .top).combined(with: .opacity))
     }
 
     /* ---------------------------------------------------------- 背景 */
@@ -338,7 +417,95 @@ struct CallView: View {
 
     /* ---------------------------------------------------------- 文字 */
 
+    /// 群视频：**每人一路画面**排成两列宫格（自己的画面缩在右下角小窗里）。
+    /// 画面是 TRTC 直接画进 UIView 的（meetingView(for:) 按 userId 分派，见 TRTCBridge）。
+    private var groupVideoLayer: some View {
+        ZStack(alignment: .bottomTrailing) {
+            ScrollView(showsIndicators: false) {
+                LazyVGrid(columns: [GridItem(.flexible(), spacing: 8),
+                                    GridItem(.flexible(), spacing: 8)], spacing: 8) {
+                    ForEach(call.roster.filter { $0.userId != app.me?.id }) { m in
+                        VStack(spacing: 4) {
+                            TRTCVideoView(view: TRTCBridge.shared.meetingView(for: m.userId))
+                                .frame(height: 152)
+                                .background(Color.black)
+                                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                            HStack(spacing: 4) {
+                                if m.muted {
+                                    Image(systemName: "mic.slash.fill")
+                                        .font(.system(size: 10, weight: .semibold))
+                                        .foregroundColor(.white.opacity(0.8))
+                                }
+                                Text(m.name.isEmpty ? Tr("成员") : m.name)
+                                    .font(pf(12.5))
+                                    .foregroundColor(.white.opacity(0.88))
+                                    .lineLimit(1)
+                            }
+                        }
+                    }
+                }
+                .padding(.horizontal, 10)
+                .padding(.top, 6)
+                .padding(.bottom, 140)
+            }
+            /* 自己的画面（小窗） */
+            TRTCVideoView(view: TRTCBridge.shared.localView)
+                .frame(width: 96, height: 130)
+                .background(Color.black)
+                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .stroke(Color.white.opacity(0.22), lineWidth: 1))
+                .padding(.trailing, 14)
+                .padding(.bottom, 96)
+        }
+    }
+
+    /// 群语音：中间一面「头像墙」（微信的群语音就是一堆头像排着 + 谁在静音）
+    private var groupLayer: some View {
+        VStack(spacing: 14) {
+            Text(call.groupTitle.isEmpty ? Tr("群语音通话") : call.groupTitle)
+                .font(pf(17, .semibold))
+                .foregroundColor(.white.opacity(0.92))
+                .lineLimit(1)
+            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 16), count: 3),
+                      spacing: 16) {
+                ForEach(call.roster) { m in
+                    VStack(spacing: 6) {
+                        ZStack {
+                            Avatar(path: m.avatar, size: 62, radius: 12)
+                            if m.muted {
+                                Image(systemName: "mic.slash.fill")
+                                    .font(.system(size: 10.5, weight: .semibold))
+                                    .foregroundColor(.white)
+                                    .padding(4)
+                                    .background(Circle().fill(Color.black.opacity(0.55)))
+                                    .offset(x: 23, y: 23)
+                            }
+                        }
+                        Text(m.name.isEmpty ? Tr("成员") : m.name)
+                            .font(pf(12.5))
+                            .foregroundColor(.white.opacity(0.85))
+                            .lineLimit(1)
+                    }
+                }
+            }
+            .padding(.horizontal, 34)
+            Text("\(call.roster.count) " + Tr("人在通话中"))
+                .font(pf(12.5))
+                .foregroundColor(.white.opacity(0.6))
+        }
+    }
+
     private var statusText: String {
+        if call.isGroupCall {
+            switch call.phase {
+            case .incoming:   return "邀请你加入群语音通话…"
+            case .outgoing:   return "正在邀请群成员…"
+            case .connecting: return "正在接通…"
+            case .active:     return timeText
+            case .idle:       return ""
+            }
+        }
         switch call.phase {
         case .incoming:   return call.isVideo ? "邀请你视频通话…" : "邀请你语音通话…"
         case .outgoing:   return "正在等待对方接受邀请…"
@@ -354,6 +521,12 @@ struct CallView: View {
         if call.phase == .idle { return "" }
         if t == "未接听" || t == "对方已拒绝" || t == "对方不在线" { return t + "，建议稍后尝试" }
         if t.contains("失败") || t.contains("断开") { return t }
+        /* 弱网（微信也会写一行）：先于"对方状态"显示，因为这时候最要紧 */
+        if call.weakNet { return "网络不太稳定，正在重连…" }
+        /* 对方那边的状态（微信视频通话里对方关了摄像头会写这么一行小字）——
+           以前对面关摄像头，我们这边只有一片黑，看不出是关了还是断了。 */
+        if call.peerCameraOff { return "对方已关闭摄像头" }
+        if call.peerMuted { return "对方已静音" }
         return ""
     }
 
@@ -366,12 +539,28 @@ struct CallView: View {
     private var bottomBar: some View {
         Group {
             if call.phase == .incoming {
-                HStack(spacing: 51) {
-                    roundKey(label: "拒绝", bg: Color(hex: 0xFA5151)) { call.reject() }
-                    roundKey(label: "接听", bg: Color(hex: 0x19A47A), ink: .white,
-                             action: { call.accept() }) {
-                        Image(systemName: "phone.fill")
-                            .font(.system(size: 27, weight: .medium))
+                VStack(spacing: 16) {
+                    HStack(spacing: 51) {
+                        roundKey(label: "拒绝", bg: Color(hex: 0xFA5151)) { call.reject() }
+                        roundKey(label: "接听", bg: Color(hex: 0x19A47A), ink: .white,
+                                 action: {
+                                     if call.isGroupCall { call.acceptGroupCall() } else { call.accept() }
+                                 }) {
+                            Image(systemName: "phone.fill")
+                                .font(.system(size: 27, weight: .medium))
+                        }
+                    }
+                    /* 视频来电：微信还能「语音接听」（先不接画面、只接声音） */
+                    if call.isVideo && !call.isGroupCall {
+                        Button { call.accept(asAudio: true) } label: {
+                            Text(Tr("语音接听"))
+                                .font(pf(15, .medium))
+                                .foregroundColor(.white.opacity(0.92))
+                                .padding(.horizontal, 18)
+                                .frame(height: 34)
+                                .background(Capsule().fill(Color.white.opacity(0.16)))
+                        }
+                        .buttonStyle(.plain)
                     }
                 }
                 .padding(.bottom, 54)
@@ -398,15 +587,27 @@ struct CallView: View {
                     }
                     .padding(.horizontal, call.phase == .active ? 48 : 16)
                     hangupKey
+                    if call.phase == .active && !call.isGroupCall {
+                        Button { call.switchVideo() } label: { switchLabel }
+                            .buttonStyle(.plain)
+                            .padding(.top, 10)
+                    }
                 }
                 .padding(.bottom, 40)
             } else {
                 if call.phase == .active {
                     /* 接通后（vx 参考图那张）：一行三颗 —— 麦克风 / 挂断 / 扬声器，挂断居中 */
-                    HStack(spacing: 51) {
-                        micKey
-                        hangupKey
-                        speakerKey
+                    VStack(spacing: 14) {
+                        HStack(spacing: 51) {
+                            micKey
+                            hangupKey
+                            speakerKey
+                        }
+                        /* 群语音里不做「切视频」（群视频是第二期），单聊才给这一颗 */
+                        if !call.isGroupCall {
+                            Button { call.switchVideo() } label: { switchLabel }
+                                .buttonStyle(.plain)
+                        }
                     }
                     .padding(.bottom, 54)
                 } else {
@@ -420,6 +621,16 @@ struct CallView: View {
                 }
             }
         }
+    }
+
+    /// 「切换为视频通话 / 切换为语音通话」那一小颗（通话中才有，微信也有这个）
+    private var switchLabel: some View {
+        Text(call.isVideo ? Tr("切换为语音通话") : Tr("切换为视频通话"))
+            .font(pf(14))
+            .foregroundColor(.white.opacity(0.9))
+            .padding(.horizontal, 16)
+            .frame(height: 32)
+            .background(Capsule().fill(Color.white.opacity(0.16)))
     }
 
     private var micKey: some View {

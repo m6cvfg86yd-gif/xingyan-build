@@ -210,9 +210,13 @@ extension DiscoverItem {
                          color: "#59C47E", action: "service", group: 1, enabled: true),
             DiscoverItem(id: "m02", label: "收藏", icon: "i.star", svg: I.star,
                          color: "#4489EA", action: "favorites", group: 2, enabled: true),
-            /* 卡包（2026-10-12 照微信加）：优惠券 / 会员卡 / 礼品卡 / 票，点进去看核销码 */
-            DiscoverItem(id: "m07", label: "卡包", icon: "i.wallet", svg: I.wallet,
-                         color: "#E0A33A", action: "cards", group: 2, enabled: true),
+            /* 小店与卡包（2026-10-12 照微信加）。
+               2026-10-12 用户要求「去掉卡包」——原来这里有一行单独叫「卡包」的，
+               和后台 me-page.json 里的「小店与卡包」重复了；后台那行已经删掉，
+               内置兜底这份也改成同一行（label / action 都跟后台对齐），
+               免得断网走兜底时又冒出一个「卡包」。 */
+            DiscoverItem(id: "m07", label: "小店与卡包", icon: "i.wallet", svg: I.wallet,
+                         color: "#E08A22", action: "shop", group: 2, enabled: true),
             DiscoverItem(id: "m03", label: "朋友圈", icon: "i.album", svg: I.album,
                          color: "#7275E9", action: "moments", group: 2, enabled: true),
             DiscoverItem(id: "m04", label: "作品", icon: "i.works", svg: I.works,
@@ -318,6 +322,9 @@ struct MomentsView: View {
     @State private var uploading = false
     @State private var commenting: Moment?
     @State private var commentText = ""
+    /// 回复谁（点别人的评论时填上：userId + 名字）—— 微信的「回复 A：」
+    @State private var replyToId = ""
+    @State private var replyToName = ""
     @State private var actionMoment: Moment?
     /// 点开朋友圈的图片：paths = 这条动态的图片，index = 点的那张
     @State private var viewerPaths: [String] = []
@@ -625,13 +632,15 @@ struct MomentsView: View {
             PhotoPicker { image in coverDraft = image }
         }
         .sheet(isPresented: $posting) { publishSheet }
-        .alert("评论", isPresented: Binding(
-            get: { commenting != nil },
-            set: { if !$0 { commenting = nil } }
-        )) {
-            TextField("说点什么", text: $commentText)
-            Button(Tr("发送")) { submitComment() }
-            Button(Tr("取消"), role: .cancel) { commenting = nil }
+        /* 评论**不弹框**（用户要求对齐微信）：底下滑出一条输入条，浮在键盘上面 ——
+           safeAreaInset 会自动把键盘算进安全区，所以输入条始终在键盘上方。 */
+        .safeAreaInset(edge: .bottom) {
+            if commenting != nil {
+                MomentCommentBar(text: $commentText,
+                                 replyTo: replyToName,
+                                 onSend: { submitComment() },
+                                 onCancel: { closeCommentBar() })
+            }
         }
         .confirmationDialog(Tr("这条动态"), isPresented: Binding(
             get: { actionMoment != nil },
@@ -645,6 +654,8 @@ struct MomentsView: View {
                 }
                 Button(Tr("评论")) {
                     commentText = ""
+                    replyToId = ""
+                    replyToName = ""
                     commenting = m
                 }
                 if m.mine == true {
@@ -736,8 +747,13 @@ struct MomentsView: View {
                   onDeleteComment: { cid in deleteComment(moment.id, cid) },
                   myId: app.me?.id ?? "",
                   onLike: { like(moment) },
-                  onComment: { commentText = ""; commenting = moment },
+                  onComment: { commentText = ""; replyToId = ""; replyToName = ""; commenting = moment },
                   onDeleteMoment: { remove(moment) },
+                  onReplyComment: { uid, name in
+                      replyToId = uid
+                      replyToName = name
+                      commenting = moment
+                  },
                   onTogglePin: { togglePin(moment) })
     }
 
@@ -1515,12 +1531,21 @@ struct MomentsView: View {
     private func submitComment() {
         guard let moment = commenting else { return }
         let text = commentText.trimmingCharacters(in: .whitespacesAndNewlines)
-        commenting = nil
         if text.isEmpty { return }
+        let to = replyToId
+        closeCommentBar()
         Task {
-            await API.shared.commentMoment(id: moment.id, text: text)
+            await API.shared.commentMoment(id: moment.id, text: text, replyTo: to)
             await reload()
         }
+    }
+
+    /// 收起底部评论条（发完 / 取消 / 点空白都走它）
+    private func closeCommentBar() {
+        commenting = nil
+        commentText = ""
+        replyToId = ""
+        replyToName = ""
     }
 
     private func remove(_ moment: Moment) {
@@ -1608,6 +1633,8 @@ struct MomentRow: View {
     var onLike: (() -> Void)? = nil
     var onComment: (() -> Void)? = nil
     var onDeleteMoment: (() -> Void)? = nil
+    /// 点别人的评论 → 回复他（微信：点一下就在底部输入条里带上「回复 A：」）
+    var onReplyComment: ((String, String) -> Void)? = nil
     /// 置顶 / 取消置顶（只对自己的动态）
     var onTogglePin: (() -> Void)? = nil
 
@@ -1744,11 +1771,15 @@ struct MomentRow: View {
                                 .padding(.vertical, 5)
                                 .contentShape(Rectangle())
                                 /* 微信：点自己发的评论 → 问你要不要删除 */
-                                .onTapGesture {
-                                    if onDeleteComment != nil, !myId.isEmpty, c.userId == myId {
-                                        deletingComment = c.id
+                               .onTapGesture {
+                                    if !myId.isEmpty, c.userId == myId {
+                                        /* 点自己发的评论 → 微信那样问要不要删 */
+                                        if onDeleteComment != nil { deletingComment = c.id }
+                                    } else if let reply = onReplyComment {
+                                        /* 点别人的评论 → 回复他（底部输入条里带上「回复 A：」） */
+                                        reply(c.userId ?? "", c.nickname ?? "")
                                     }
-                                }
+                               }
                         }
                     }
                     .padding(.horizontal, 8)

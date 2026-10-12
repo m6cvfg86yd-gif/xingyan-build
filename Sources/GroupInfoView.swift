@@ -590,6 +590,23 @@ struct GroupInfoView: View {
             PanelDivider()
             PanelRow(symbol: "crown.fill", colors: PanelTint.orange,
                      title: Tr("群主"), value: ownerName, chevron: false) { }
+
+            /* 群语音通话（多人）：微信在「聊天信息」里也有这一条 */
+            PanelDivider()
+            PanelRow(symbol: "phone.arrow.up.right.fill", colors: PanelTint.green,
+                     title: Tr("群语音通话"),
+                     value: Tr("和群里的人一起语音")) {
+                CallCenter.shared.startGroupCall(chatId: chat.id, title: chat.name ?? "")
+                dismiss()
+            }
+            /* 群视频通话（多人画面）：2026-10-12 补 —— 走腾讯云 TRTC，每人一路画面 */
+            PanelDivider()
+            PanelRow(symbol: "video.fill", colors: PanelTint.green,
+                     title: Tr("群视频通话"),
+                     value: Tr("和群里的人一起视频")) {
+                CallCenter.shared.startGroupCall(chatId: chat.id, title: chat.name ?? "", video: true)
+                dismiss()
+            }
         }
     }
 

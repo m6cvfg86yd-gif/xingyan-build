@@ -2120,8 +2120,22 @@ struct PhotoPager: View {
     }
 
     var body: some View {
+        GeometryReader { geo in
         ZStack {
+            /* 背景：微信看大图不是纯黑底 —— 是**这张图自己的模糊版**铺满，
+               中间再压一层黑，所以画面透出来的颜色和大图是一套（用户要求「和微信一样」）。
+               模糊版单独用 600 的解码上限，别为了背景再解一张大图（省内存）。 */
             Color.black.ignoresSafeArea()
+            if let p = currentPath {
+                RemoteImage(path: p, mode: .fill, maxSide: 600)
+                    .frame(width: geo.size.width, height: geo.size.height)
+                    .clipped()
+                    .blur(radius: 34)
+                    .opacity(0.55)
+                    .overlay(Color.black.opacity(0.18))
+                    .ignoresSafeArea()
+                    .animation(.easeOut(duration: 0.2), value: index)
+            }
 
             TabView(selection: $index) {
                 ForEach(paths.indices, id: \.self) { i in
@@ -2174,6 +2188,7 @@ struct PhotoPager: View {
             }
         }
         .sheet(isPresented: $showShare) { ShareSheet(items: shareItems) }
+        }
     }
 
     /// 左上角那颗返回

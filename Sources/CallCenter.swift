@@ -21,6 +21,19 @@ import WebRTC
    「🎨 登录页/语音通话」里配了 iceServers 就用配的，没配就用公共 STUN。
    ============================================================ */
 
+/// 群语音通话里的一个人（画头像墙用）
+struct GroupCallMember: Identifiable, Equatable {
+    var userId: String
+    var name: String
+    var avatar: String
+    var muted: Bool
+    var id: String { userId }
+}
+
+/* ⚠ @MainActor 必须紧贴在 CallCenter 头上 —— 他们的半成品把它写在了新加的
+   struct 上面，等于 CallCenter 整个丢了 MainActor 标注，于是
+   「main actor-isolated property ... from a nonisolated context」一口气报了三十多条。
+   2026-10-12 修。 */
 @MainActor
 final class CallCenter: NSObject, ObservableObject {
     static let shared = CallCenter()
@@ -98,10 +111,26 @@ final class CallCenter: NSObject, ObservableObject {
     /// 麦克风没权限 / 没起来：通话页上直接挂一条「对方听不到你」的提示 + 「去开启」。
     /// 以前这种情况界面一切正常、对面一个字听不到，用户完全不知道问题出在哪。
     @Published private(set) var micBlocked = false
+    /* 对方那边的状态（和微信一样画出来）：
+       「对方已静音」/「对方已关闭摄像头」—— 以前对面关了摄像头，你这边只有一片黑，
+       完全不知道是他关了还是网络断了（用户要求补上）。 */
+    @Published private(set) var peerMuted = false
+    @Published private(set) var peerCameraOff = false
+    /// 网络不稳定（WebRTC 掉到 disconnected）：通话页会写一行「网络不太稳定，正在重连…」
+    @Published private(set) var weakNet = false
+    /* ================= 群语音通话（多人，2026-10-12） =================
+       一个群聊一个房间，语音走服务端混音（见服务器 group-* 那几个 action）；
+       客户端还是"推一路、收一路"，音频管线复用 CallAudioPipe。 */
+    @Published private(set) var isGroupCall = false
+    @Published private(set) var roomId = ""
+    @Published private(set) var groupChatId = ""
+    @Published private(set) var groupTitle = ""
+    @Published private(set) var roster: [GroupCallMember] = []
 
     private var factory: RTCPeerConnectionFactory?
     private var pc: RTCPeerConnection?
-    private var callId = ""
+    /// 这一通的 id（CallView 里 .task(id:) 要读它，所以不能是 private）
+    private(set) var callId = ""
     /// 当前通话的对方（聊天页靠它判断"这通电话是不是跟这个人打的"）
     private(set) var peerId = ""
     private var iAmCaller = false
@@ -224,8 +253,13 @@ final class CallCenter: NSObject, ObservableObject {
     }
 
     /// 接听（来电界面点绿键）
-    func accept() {
+    /// 接听。asAudio = true 就是「视频来电用语音接听」（微信视频来电也有这一档）
+    func accept(asAudio: Bool = false) {
         guard phase == .incoming else { return }
+        if asAudio, isVideo {
+            isVideo = false
+            sendCall(["action": "switch", "video": false])
+        }
         Ringtone.shared.stop()
         relayOK = false                      // 接起来：中继状态重新算
         /* 上一通要是静音着挂的，这里必须复位 —— 不然这一通采到了也一帧都不发，
@@ -254,6 +288,7 @@ final class CallCenter: NSObject, ObservableObject {
     /// 挂断 / 取消
     func hangup() {
         guard phase.isBusy else { return }
+        if isGroupCall { leaveGroupCall(); return }
         failTask?.cancel()
         failTask = nil
         let started = (phase == .active)
@@ -267,6 +302,8 @@ final class CallCenter: NSObject, ObservableObject {
         muted.toggle()
         audioTrack?.isEnabled = !muted
         if usingTRTC { TRTCBridge.shared.setMuted(muted) }
+        /* 告诉对方「我静音了」—— 他那边会画一行「对方已静音」（微信就是这样） */
+        sendCall(["action": "state", "muted": muted, "camOff": cameraOff])
     }
 
     func toggleCamera() {
@@ -274,6 +311,26 @@ final class CallCenter: NSObject, ObservableObject {
         cameraOff.toggle()
         localVideoTrack?.isEnabled = !cameraOff
         if usingTRTC { TRTCBridge.shared.setCameraOff(cameraOff) }
+        sendCall(["action": "state", "muted": muted, "camOff": cameraOff])
+    }
+
+    /// 通话中切「语音 ↔ 视频」（不挂断，微信有这个）：
+    /// 先通知对方，再在本地把视频轨道开/关。
+    func switchVideo() {
+        guard phase == .active || phase == .connecting || phase == .outgoing else { return }
+        isVideo.toggle()
+        sendCall(["action": "switch", "video": isVideo])
+        if isVideo {
+            Task {
+                await beginMedia()
+                await startTRTCIfPossible()
+            }
+            tip = "正在切换为视频通话…"
+        } else {
+            localVideoTrack?.isEnabled = false
+            if usingTRTC { TRTCBridge.shared.setCameraOff(true) }
+            tip = "已切换为语音通话"
+        }
     }
 
     /// 扬声器开关：语音通话默认走听筒（关），视频通话默认开
@@ -285,6 +342,108 @@ final class CallCenter: NSObject, ObservableObject {
 
     func minimize() { minimized = true }
     func restore() { minimized = false }
+
+    /* ==================== 群语音通话（多人） ==================== */
+
+    /// 在群里发起群语音（群聊的「聊天信息」或「＋」里点进来）
+    func startGroupCall(chatId: String, title: String, video: Bool = false) {
+        guard phase == .idle else { errorText = "你正在通话中"; return }
+        isGroupCall = true
+        isVideo = video
+        groupChatId = chatId
+        groupTitle = title
+        roomId = ""
+        roster = []
+        peerName = title
+        peerAvatar = ""
+        muted = false
+        cameraOff = false
+        seconds = 0
+        tip = "正在邀请群成员…"
+        phase = .outgoing
+        iAmCaller = true
+        /* 群语音走服务端混音；**群视频**走腾讯云 TRTC（多人画面只有它这条路），
+           所以视频这一档不启服务端转发，等进房回执到了由 joinGroupTRTC() 接管。 */
+        if !video { startGroupAudio() }         // 先把自己的声音通道起起来
+        Realtime.shared.sendJSON(["type": "call", "action": "group-start", "chatId": chatId,
+                                  "media": video ? "video" : "audio"])
+        startConnectWatch()
+    }
+
+    /// 别人拉我进群语音：接听
+    func acceptGroupCall() {
+        guard phase == .incoming || phase == .outgoing else { return }
+        Ringtone.shared.stop()
+        muted = false
+        micBlocked = false
+        tip = "正在接通…"
+        phase = .connecting
+        iAmCaller = false
+        if isVideo {
+            /* 群视频：自己的采集交给 TRTC，别启服务端那路（两个引擎抢麦会都没声） */
+        } else {
+            startGroupAudio()
+        }
+        Realtime.shared.sendJSON(["type": "call", "action": "group-join",
+                                  "roomId": roomId, "media": isVideo ? "video" : "audio"])
+        if isVideo { Task { await joinGroupTRTC() } }
+        startConnectWatch()
+    }
+
+    /// 群视频：进 TRTC 房间（每人一路画面，TRTC 自动订阅；画面由 CallView 的宫格去取）
+    private func joinGroupTRTC() async {
+        guard isGroupCall, isVideo, !roomId.isEmpty, !trtcJoined, !usingTRTC else { return }
+        let bridge = TRTCBridge.shared
+        bridge.onJoined = { [weak self] ok in
+            guard let self = self, ok else { return }
+            guard self.phase != .idle else { return }
+            self.trtcJoined = true
+            self.usingTRTC = true
+            /* ⚠ 老规矩：进房之后才 activate()（TRTC 一进房就抢麦会把别的采集挤空） */
+            bridge.activate()
+            self.note("群视频：TRTC 已进房并开始采集")
+        }
+        if await bridge.start(roomSeed: roomId, video: true) {
+            note("群视频：正在进 TRTC 房间")
+        } else {
+            note("群视频：TRTC 进不去，退回语音转发")
+            if !serverAudioOn { startGroupAudio() }
+        }
+    }
+
+    /// 退出群语音（挂断）
+    func leaveGroupCall() {
+        if !roomId.isEmpty {
+            Realtime.shared.sendJSON(["type": "call", "action": "group-leave", "roomId": roomId])
+        }
+        /* 群视频：把腾讯云那路也退了 + 收掉每个人的画面 */
+        if isVideo || TRTCBridge.shared.joined {
+            TRTCBridge.shared.stopMeetingViews()
+            TRTCBridge.shared.stop()
+        }
+        CallAudioPipe.shared.onFrame = nil
+        CallAudioPipe.shared.stop()
+        serverAudioOn = false
+        isGroupCall = false
+        roomId = ""
+        groupChatId = ""
+        roster = []
+        finish(tip: "通话结束")
+    }
+
+    /// 群语音的音频通道：一帧 40ms，走服务端混音
+    private func startGroupAudio() {
+        guard !serverAudioOn else { return }
+        serverAudioOn = true
+        audioTrack?.isEnabled = false              // 语音不走 WebRTC，别叠一份
+        CallAudioPipe.shared.onFrame = { [weak self] data in
+            guard let self = self, !self.muted, !self.roomId.isEmpty else { return }
+            Realtime.shared.sendJSON(["type": "call", "action": "group-audio",
+                                      "roomId": self.roomId,
+                                      "data": data.base64EncodedString()])
+        }
+        CallAudioPipe.shared.start()
+    }
 
     /// 邀请好友加入通话：给对方发一条邀请消息（点它就能回拨过来）。
     /// 提示：多人同时在一个通话里需要服务器支持多路，这块还没做，所以现在是把人叫进来。
@@ -426,6 +585,8 @@ final class CallCenter: NSObject, ObservableObject {
             iAmCaller = false
             muted = false
             cameraOff = false
+            peerMuted = false                 // 新的一通：对面那些状态先复位
+            peerCameraOff = false
             seconds = 0
             remoteOfferSDP = ev.callSDP
             tip = isVideo ? "邀请你视频通话…" : "邀请你语音通话…"
@@ -441,6 +602,76 @@ final class CallCenter: NSObject, ObservableObject {
         case "ringing":
             guard ev.callId == callId else { return }
             tip = isVideo ? "正在等待对方接受邀请…" : "正在呼叫…"
+
+        /* 对方静音了 / 关了摄像头 —— 画到通话页上（微信就是这两行小字） */
+        case "state":
+            guard ev.callId == callId else { return }
+            peerMuted = ev.callPeerMuted
+            peerCameraOff = ev.callPeerCameraOff
+
+        /* 对方在通话中切了「语音 ↔ 视频」 */
+        case "switch":
+            guard ev.callId == callId else { return }
+            if ev.callPeerVideo != isVideo {
+                isVideo = ev.callPeerVideo
+                tip = isVideo ? "对方切换成了视频通话" : "对方切换成了语音通话"
+                if isVideo { Task { await startTRTCIfPossible() } }
+            }
+
+        /* ---------------- 群语音通话 ---------------- */
+
+        case "group-incoming":
+            /* 群里有人发起了群语音 / 群视频：弹来电页（已经在别的通话里就自动拒） */
+            guard phase == .idle else { return }
+            isGroupCall = true
+            isVideo = ev.callPeerVideo          // 服务端带 video:true 就是群视频
+            roomId = ev.callRoomId
+            groupChatId = ev.callChatId
+            groupTitle = ev.callPeerName.isEmpty ? (isVideo ? "群视频通话" : "群语音通话") : ev.callPeerName
+            peerName = groupTitle
+            peerAvatar = ev.callPeerAvatar
+            roster = ev.callRoster
+            muted = false
+            cameraOff = false
+            seconds = 0
+            tip = isVideo ? "邀请你加入群视频通话…" : "邀请你加入群语音通话…"
+            phase = .incoming
+            startRingTimeout()
+            if UIApplication.shared.applicationState != .active {
+                LocalNotify.incomingCall(callId: roomId,
+                                         peerName: groupTitle + (isVideo ? "（群视频）" : "（群语音）"),
+                                         video: isVideo)
+            }
+            Ringtone.shared.startIncoming()
+            UINotification.buzz()
+
+        case "group-ready":
+            /* 我已经在房间里了（服务端回执）：进「通话中」开计时 */
+            guard isGroupCall else { return }
+            roomId = ev.callRoomId.isEmpty ? roomId : ev.callRoomId
+            groupChatId = ev.callChatId.isEmpty ? groupChatId : ev.callChatId
+            if !ev.callRoster.isEmpty { roster = ev.callRoster }
+            Ringtone.shared.stop()
+            ringTimer?.invalidate(); ringTimer = nil
+            connectTimer?.invalidate(); connectTimer = nil
+            if phase != .active {
+                phase = .active
+                tip = "通话中"
+                startTimer()
+            }
+            /* 群视频：房间号到手了，进腾讯云房间出画面 */
+            if isVideo, !trtcJoined { Task { await joinGroupTRTC() } }
+
+        case "group-joined", "group-left":
+            guard isGroupCall, ev.callRoomId == roomId else { return }
+            roster = ev.callRoster
+            if action == "group-joined", !ev.callPeerName.isEmpty {
+                tip = ev.callPeerName + " 加入了通话"
+            }
+
+        case "group-audio":
+            guard isGroupCall, let b64 = ev.callAudioData, let d = Data(base64Encoded: b64) else { return }
+            CallAudioPipe.shared.play(d)
 
         case "accepted":
             guard ev.callId == callId else { return }
@@ -1003,6 +1234,7 @@ extension CallCenter: RTCPeerConnectionDelegate {
         Task { @MainActor in
             switch newState {
             case .connected:
+                self.weakNet = false
                 if self.phase != .active {
                     Ringtone.shared.stop()
                     self.phase = .active
@@ -1018,6 +1250,9 @@ extension CallCenter: RTCPeerConnectionDelegate {
                 /* 通话中途断：也留 5 秒让用户看清原因 */
                 self.failLater("通话连接失败，可能是网络挡住了", hold: 5)
             case .disconnected:
+                /* 弱网提示（微信也会写「网络不佳」）：先挂一行提示，3 秒还没回来才断 */
+                self.weakNet = true
+                if self.tip != "通话中" && self.tip != "视频通话中" { self.tip = "网络不太稳定，正在重连…" }
                 // 断开 3 秒还没恢复就结束（和网页版一致）
                 try? await Task.sleep(nanoseconds: 3_000_000_000)
                 if self.phase == .active && self.pc?.connectionState == .disconnected {
