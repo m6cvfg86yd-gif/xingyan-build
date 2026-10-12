@@ -208,6 +208,12 @@ final class AppState: ObservableObject {
     @Published var moments: [Moment] = []
     /// 朋友圈有没有新的（别人发了就 > 0，「发现」上挂红点）
     @Published var momentsUnread = 0
+    /// 朋友圈「消息列表」未读数（谁赞了/评论了我）：朋友圈右上角小信封上的红点
+    @Published var momentNoticeUnread = 0
+    /// 聊天输入栏上面那排「快捷按钮」（管理 → 聊天快捷 里能增删/排序/改名/开关）
+    @Published var quickChips: [QuickChip] = QuickChip.defaults
+    /// 输入框右边那个「＋」按钮的外观（颜色 / 大小 / 图片）
+    @Published var plusButton = PlusButtonCfg()
     /// 切换界面语言时 +1：让整棵界面树重建，所有文案立刻变
     @Published var langVersion = 0
     /// 启动页是否已经展示过（放全局：界面刷新、从后台切回来都不会重弹）
@@ -227,6 +233,25 @@ final class AppState: ObservableObject {
     /// 走最外层整页打开，不依赖「会话页的导航栈还在不在」——扫一扫从任何页面都能开，
     /// 以前那种「往会话页栈里 push」的写法，人不在会话页时通知就丢了（所以看着像不跳转）。
     @Published var openChat: Chat?
+    /// 点了推送通知要让会话页自己把某个会话推进去（2026-10-12）：
+    /// ⚠ 以前是直接 `openChat = c`（最外层 fullScreenCover 整页压上去）——
+    /// 用户反复报「点推送通知就闪退」，因为点通知进来时 App 可能还在冷启动，
+    /// 整页视图压上去会和启动那几帧打架被系统杀掉。
+    /// 现在改成把会话 id 放这儿，**由会话列表按它自己的导航** push（和手点一个会话一模一样）。
+    @Published var pendingPushChatId: String?
+    /// 置 true 时 MainTab 把底栏切回「会话」那一页（配合 openChatViaList 用）
+    @Published var wantChatsTab = false
+
+    /// **统一的「打开某个会话」入口**（2026-10-12）：
+    /// 以前各处都是 `app.openChat = c` —— 最外层 fullScreenCover 把整页聊天页压上去。
+    /// 那条路在「页面正在切换」的瞬间会被系统杀掉：点推送（用户报过）、**刚建完群**（用户报
+    /// 「创建了群也会闪退」）、扫码进群、搜索结果点进去……都是同一类。
+    /// 现在统一改成：切回会话 tab + 把会话 id 交给会话列表，由它用自己那条导航 push
+    /// —— 和用户手点一个会话**完全同一条路**，那条路一直是稳的。
+    func openChatViaList(_ c: Chat) {
+        wantChatsTab = true
+        pendingPushChatId = c.id
+    }
     /// 从聊天里点好友分享来的小游戏卡片 → 全屏打开那个小游戏。
     /// ⚠ 挂在**最外层**（MainTab）来弹，不放在聊天页里 —— 在聊天页里挂
     /// `fullScreenCover(item:)` 会让聊天页一打开就闪退（2026-10-11 踩过）。
@@ -294,6 +319,7 @@ final class AppState: ObservableObject {
             show("系统公告：" + ev.announce)
         }
         if let n = ev.momentUnread { momentsUnread = n }      // ready 里带的朋友圈未读数
+        if let n = ev.momentNoticeUnread { momentNoticeUnread = n }   // 朋友圈「消息列表」未读数
         if let n = ev.friendRequests {
             /* 长连接重连（手机刚从后台回来）时把「新的朋友」红点补上；
                数字变了就把通讯录重拉一次，行里那个红点数字也跟着新 */
@@ -329,6 +355,21 @@ final class AppState: ObservableObject {
         case "moment":
             momentsUnread = max(1, momentsUnread)          // 有人发朋友圈：先点红点，再拉一次
             coalesce { [weak self] in await self?.loadMoments() }
+        case "moment-notice":
+            /* 朋友圈「消息列表」：谁赞了/评论了我。小信封上的红点立刻变，
+               顺便真弹一条通知（微信也是收得到这个提醒的）。 */
+            if let n = ev.momentNoticeUnread { momentNoticeUnread = n }
+            else if ev.momentNotice != nil { momentNoticeUnread += 1 }
+            if let nt = ev.momentNotice {
+                let who = nt.name ?? "有人"
+                let what: String
+                switch nt.kind ?? "" {
+                case "like": what = "赞了你的朋友圈"
+                case "reply": what = "回复了你"
+                default: what = "评论了你的朋友圈"
+                }
+                LocalNotify.incoming(title: "朋友圈", body: who + what, badge: unreadForIcon)
+            }
         case "friend", "presence", "profile":
             coalesce { [weak self] in await self?.loadContacts() }
         case "toast":
@@ -437,6 +478,9 @@ final class AppState: ObservableObject {
             defaultChatBackground = b.chatBackground ?? ""
             splashImage = b.splash ?? ""
         }
+        /* 聊天输入栏那一份配置（快捷按钮 + 「＋」按钮外观）跟着一起拉：
+           管理里改完不用重开 App，回到前台就生效 */
+        await loadChatQuick()
         /* 顺手把「线路入口」列表拉一份存起来：后台改了备用地址，用户在下次进前台就生效，
            不用等出新包。主入口连不上时，下一次请求会自动换到这份列表里的下一条。 */
         await API.shared.loadEndpointList()
@@ -701,7 +745,16 @@ final class AppState: ObservableObject {
         if let feed = try? await API.shared.momentsFeed() {
             moments = feed.moments
             momentsUnread = feed.unread
+            momentNoticeUnread = feed.noticeUnread      // 朋友圈小信封上的红点
         }
+    }
+
+    /// 拉聊天输入栏那份配置（快捷按钮 + 「＋」按钮外观）。
+    /// 拉不到就保持原来那排默认的，绝不把用户的按钮清空。
+    func loadChatQuick() async {
+        guard let c = try? await API.shared.plusConfig() else { return }
+        if !c.quick.isEmpty { quickChips = c.quick }
+        plusButton = c.plus
     }
 
     func logout() async {
@@ -1876,6 +1929,8 @@ struct AccountLoginSheet: View {
     @State private var error: String?
     @State private var showReg = false
     @State private var showUnban = false
+    /// 账号被冻结后的「解冻账号」弹层（AccountSafety.swift）
+    @State private var showUnfreeze = false
     @State private var showReset = false
     /// 登录滑动验证换来的一次性通行证 + 换题用的 key
     @State private var sliderTicket = ""
@@ -1963,6 +2018,24 @@ struct AccountLoginSheet: View {
                         }
                         .padding(.top, 12)
                     }
+                    /* 账号被冻结（本人冻的 / 管理冻的）：登录页直接给「解冻账号」入口
+                       —— 和微信一样，冻了以后在登录页点一下就能自己解开 */
+                    if isFrozen {
+                        Button {
+                            showUnfreeze = true
+                        } label: {
+                            HStack(spacing: 6) {
+                                Image(systemName: "snowflake")
+                                Text(Tr("账号被冻结了？点这里自助解冻"))
+                            }
+                            .font(.system(size: 14, weight: .medium))
+                            .foregroundColor(.white)
+                            .frame(maxWidth: .infinity, minHeight: 46)
+                            .background(LoginTheme.accent2)
+                            .cornerRadius(14)
+                        }
+                        .padding(.top, 12)
+                    }
                     Button { submit() } label: {
                         HStack(spacing: 8) {
                             if busy { ProgressView().progressViewStyle(.circular).tint(.white) }
@@ -2006,8 +2079,12 @@ struct AccountLoginSheet: View {
                 })
             }
             .sheet(isPresented: $showReset) { ResetPasswordSheet() }
-            .sheet(isPresented: $showUnban) {
+        .sheet(isPresented: $showUnban) {
                 UnbanSheet(preUser: username, prePass: password)
+            }
+            /* 账号被冻结：登录页自助解冻（账号 + 密码，可补身份证号）—— AccountSafety.swift */
+            .sheet(isPresented: $showUnfreeze) {
+                UnfreezeSheet().environmentObject(app)
             }
         }
     }
@@ -2015,6 +2092,10 @@ struct AccountLoginSheet: View {
     private var isBanned: Bool {
         let e = error ?? ""
         return e.contains("禁用") || e.contains("封禁")
+    }
+    /// 服务器回的「该账号已被冻结…」→ 登录页把「解冻账号」入口露出来
+    private var isFrozen: Bool {
+        (error ?? "").contains("冻结")
     }
 
     private func row<C: View>(@ViewBuilder _ c: () -> C) -> some View {
