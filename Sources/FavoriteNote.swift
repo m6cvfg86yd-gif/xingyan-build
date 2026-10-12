@@ -27,15 +27,32 @@ struct FavoriteNoteComposeSheet: View {
     @State private var busy = false
     @State private var msg = ""
     @FocusState private var focused: Bool
-    /// 笔记里插图片（微信笔记也能插）：走相册选一张，传上去，正文里插一行 [图]路径
+    /// 笔记里插图片（微信笔记也能插）：走相册选一张，传上去，**在编辑区下面把图排出来**
     @State private var showPic = false
     @State private var picBusy = false
+    /// 已经插进去的图（存的时候才拼回正文那几行 [图]路径 —— 编辑时不再给用户看"代码"）
+    @State private var pics: [String] = []
 
     init(editingId: String = "", initial: String = "", onSaved: @escaping () -> Void) {
         self.editingId = editingId
         self.initial = initial
         self.onSaved = onSaved
-        _text = State(initialValue: initial)
+        /* 老笔记里 [图]路径 那几行拆出来当图片，剩下的当正文 ——
+           这样编辑一条插过图的笔记，看到的还是图，而不是一串路径 */
+        var body: [String] = []
+        var imgs: [String] = []
+        for line in initial.components(separatedBy: "\n") {
+            if line.hasPrefix("[图]") { imgs.append(String(line.dropFirst(3))) }
+            else { body.append(line) }
+        }
+        _text = State(initialValue: body.joined(separator: "\n")
+            .trimmingCharacters(in: .whitespacesAndNewlines))
+        _pics = State(initialValue: imgs)
+    }
+
+    /// 有字、或者只插了图没写字，都算一条能存的笔记
+    private var canSave: Bool {
+        !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !pics.isEmpty
     }
 
     var body: some View {
@@ -44,12 +61,11 @@ struct FavoriteNoteComposeSheet: View {
                 Button { Task { await save() } } label: {
                     Text(busy ? Tr("保存中…") : Tr("保存"))
                         .font(pf(15, .medium))
-                        .foregroundColor(text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                                         ? C.subLabel : C.green)
+                        .foregroundColor(canSave ? C.green : C.subLabel)
                         .padding(.horizontal, 14).frame(height: 32)
                 }
                 .buttonStyle(.plain)
-                .disabled(busy || text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .disabled(busy || !canSave)
             }
 
             VStack(spacing: 0) {
@@ -68,6 +84,32 @@ struct FavoriteNoteComposeSheet: View {
                         .focused($focused)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+
+                /* 插进来的图片就摆在正文下面（微信笔记也是这样：图是真图，不是一行代码）。
+                   每张右上角一个 ✕，点一下就拿掉。 */
+                if !pics.isEmpty {
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 92), spacing: 8)], spacing: 8) {
+                        ForEach(pics, id: \.self) { p in
+                            ZStack(alignment: .topTrailing) {
+                                RemoteImage(path: p, mode: .fill, maxSide: 600)
+                                    .frame(height: 92)
+                                    .frame(maxWidth: .infinity)
+                                    .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                                Button { pics.removeAll { $0 == p } } label: {
+                                    Image(systemName: "xmark.circle.fill")
+                                        .font(.system(size: 17))
+                                        .foregroundColor(.white)
+                                        .shadow(color: .black.opacity(0.35), radius: 1.5)
+                                        .padding(4)
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        }
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.top, 6)
+                    .padding(.bottom, 10)
+                }
             }
             .background(C.cardBg)
             .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
@@ -127,14 +169,13 @@ struct FavoriteNoteComposeSheet: View {
         }
     }
 
-    /// 选了一张图：传上去，然后在正文末尾插一行 [图]路径（详情页会把这种行画成图）
+    /// 选了一张图：传上去，然后加进 `pics`（编辑区下面立刻出现这张图）
     private func insertImage(_ img: UIImage) {
         picBusy = true
         Task {
             do {
                 let url = try await API.shared.upload(image: img)
-                if !text.isEmpty && !text.hasSuffix("\n") { text += "\n" }
-                text += "[图]" + url + "\n"
+                pics.append(url)
                 msg = Tr("图片已插入")
             } catch {
                 msg = (error as? APIError)?.errorDescription ?? "图片上传失败"
@@ -144,7 +185,12 @@ struct FavoriteNoteComposeSheet: View {
     }
 
     private func save() async {
-        let body = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        /* 存的时候才把图拼回正文：文字在前，图片按插入顺序跟在后面（每张一行 [图]路径） */
+        var body = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !pics.isEmpty {
+            let imgs = pics.map { "[图]" + $0 }.joined(separator: "\n")
+            body = body.isEmpty ? imgs : (body + "\n" + imgs)
+        }
         guard !body.isEmpty else { return }
         busy = true
         msg = ""
@@ -186,6 +232,13 @@ struct FavoriteNoteDetailSheet: View {
     @State private var copied = false
     @State private var isPinned = false
     @State private var showForward = false
+    /// 点笔记里的图看大图（用 overlay 弹，不在聊天页那层挂全屏 cover）
+    @State private var viewerPath: String?
+
+    /// 这条笔记里插了图没有（转发时决定当「笔记卡片」还是当普通文字发）
+    private var hasPic: Bool {
+        content.components(separatedBy: "\n").contains { $0.hasPrefix("[图]") }
+    }
 
     /// 笔记正文按行拆（[图]路径 那几行画成图片，其它当文字）
     private var lines: [String] {
@@ -216,10 +269,7 @@ struct FavoriteNoteDetailSheet: View {
                         ForEach(Array(lines.enumerated()), id: \.offset) { _, line in
                             if line.hasPrefix("[图]") {
                                 let path = String(line.dropFirst(3))
-                                RemoteImage(path: path)
-                                    .scaledToFit()
-                                    .frame(maxWidth: .infinity)
-                                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                                NoteImageBlock(path: path) { p in viewerPath = p }
                             } else if !line.isEmpty {
                                 Text(line)
                                     .font(pf(16))
@@ -299,10 +349,18 @@ struct FavoriteNoteDetailSheet: View {
         .background(C.pageBg.ignoresSafeArea())
         .toolbar(.hidden, for: .navigationBar)
         .swipeBack { dismiss() }
+        .overlay {
+            if let p = viewerPath, !p.isEmpty {
+                PhotoPager(paths: [p], startIndex: 0, showActions: true) { viewerPath = nil }
+            }
+        }
         .task { isPinned = pinned }
         /* 转发给朋友：走聊天那套「先选人」（ForwardPickerView） */
         .sheet(isPresented: $showForward) {
-            ForwardPickerView(items: [ForwardItem(kind: "text", content: content)]) { }
+            /* 笔记里有图 → 发「笔记卡片」（对面点开才看全文、图是真图）；
+               纯文字 → 直接当文字发。以前一律按 text 发，插过图的笔记转过去
+               对面看到的就是一行行 [图]路径。 */
+            ForwardPickerView(items: [ForwardItem(kind: hasPic ? "note" : "text", content: content)]) { }
                 .environmentObject(app)
         }
         .sheet(isPresented: $editing) {
