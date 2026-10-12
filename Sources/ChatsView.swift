@@ -255,11 +255,18 @@ struct SwipeChatRow: View {
     private var cardRadius: CGFloat { UIConfig.num("swipeRadius", 13) }
     private var iconSize: CGFloat { UIConfig.num("swipeIcon", 13.5) }
     private var cardH: CGFloat { max(20, L.rowH - cardInset * 2) }
+    /// 滑开进度 0~1（按钮按它淡入 + 放大；拉到底就是 1）
+    private var swipeProgress: CGFloat {
+        min(1, max(0, -offset / max(1, fullW)))
+    }
     /// 开 / 换层的时候轻震一下
     private let haptic = UIImpactFeedbackGenerator(style: .light)
     /// 吸附用的弹簧：**轻微过冲再回稳** —— 用户要的「阻尼感」就是它
     private var swipeSpring: Animation {
-        .interpolatingSpring(mass: 0.9, stiffness: 250, damping: 25)
+        /* 2026-10-12 用户「阻尼感还是不够」：把弹簧调绵一点 ——
+           质量大一点、刚度小一点（回稳更慢更顺），阻尼比略低于 1（会轻轻过冲再稳）。
+           以前 mass 0.9 / stiffness 250 在 iOS 26 上收得太脆，像"啪"一下砸回去。 */
+        .interpolatingSpring(mass: 1.08, stiffness: 185, damping: 21)
     }
 
     /* 会话列表每一行也用「卡片底色」，和通讯录的卡片一个色；
@@ -277,11 +284,16 @@ struct SwipeChatRow: View {
                 .background(rowBg)
                 .overlay(alignment: .bottom) { HairLine(inset: L.dividerLeft) }
                 .offset(x: offset)
+                /* 滑开的时候行内容右侧投一点影子 —— 和下面那层按钮拉开距离，看着有厚度 */
+                .shadow(color: .black.opacity(offset < -1 ? 0.10 : 0), radius: 8, x: 4, y: 0)
                 .contentShape(Rectangle())
                 .zIndex(1)
 
-            /* ② 操作按钮：画在最上层，只露出滑开的那一块 —— 这样点一定点得到 */
+            /* ② 操作按钮：画在最上层，只露出滑开的那一块 —— 这样点一定点得到。
+               滑的过程中按钮**淡入 + 从 96% 放大到 100%**（有阻尼感的那种进场）。 */
             actionButtons
+                .opacity(0.30 + 0.70 * swipeProgress)
+                .scaleEffect(0.96 + 0.04 * swipeProgress, anchor: .trailing)
                 .allowsHitTesting(offset != 0)
                 .zIndex(2)
         }
@@ -314,11 +326,23 @@ struct SwipeChatRow: View {
                 onChanged: { dx in
                     var x = startOffset + dx
                     if x > 0 {
-                        /* 往右拖过头：只跟一点点，最多探出 10 —— 有阻尼才不像硬底 */
-                        x = min(10, x * 0.22)
-                    } else if x < -fullW {
-                        /* 拉过三格之后：越拉越沉（只跟 30%，最多再多 92） */
-                        x = -(fullW + min(92, (-x - fullW) * 0.30))
+                        /* 往右拖过头：只跟一点点，最多探出 12 —— 有阻尼才不像硬底 */
+                        x = min(12, x * 0.20)
+                    } else {
+                        /* ⚠ 2026-10-12 用户「阻尼感还是不够」：以前是**一股脑 1:1 跟手**，
+                           只在拉过三格之后才变沉。现在分三段：
+                             ① 前 72% 跟手（够快）；
+                             ② 最后 28% 只跟 62%（开始发沉，有明显"拉到底"的阻力）；
+                             ③ 拉满三格之后只跟 22%，最多再多 64（像拉到底的橡皮筋）。 */
+                        let d = -x
+                        let soft = fullW * 0.72
+                        if d <= soft {
+                            x = -d
+                        } else if d <= fullW {
+                            x = -(soft + (d - soft) * 0.62)
+                        } else {
+                            x = -(fullW + min(64, (d - fullW) * 0.22))
+                        }
                     }
                     offset = x
                     /* 多拉一截就预览第二层（那一条撑满 240，变成「不显示该聊天」） */
@@ -339,49 +363,110 @@ struct SwipeChatRow: View {
     }
 
     private var actionButtons: some View {
-        HStack(spacing: 0) {
+        /* 2026-10-12 用户：「左滑的 3 个按钮做高级点」——
+           以前是**一整块卡片**里塞三个格子 + 白细线分隔（看着像老式表格）。现在改成
+           三颗独立的**玻璃药丸**：各自圆角、各自投影、图标坐在一枚半透明小圆底上，
+           上面一道玻璃高光、下沿压一点暗做出厚度，按下去会轻轻缩一下。 */
+        HStack(spacing: gap) {
             switch mode {
             case .none:
-                /* 第一层：标为未读 / 不显示 / 删除，各一个按钮宽 */
-                bar("标为未读", "envelope.badge.fill", 0x2ECC9A, 0x12A377, btnW) {
+                /* 第一层：标为未读 / 不显示 / 删除 */
+                pill("标为未读", "envelope.badge.fill", 0x35D6A4, 0x0E8F6A, pillW) {
                     onUnread()
                     close()
                 }
-                bar("不显示", "eye.slash.fill", 0xFFB153, 0xEE8A12, btnW, sep: true) {
+                pill("不显示", "eye.slash.fill", 0xFFBE66, 0xD97605, pillW) {
                     mode = .hideConfirm
                     haptic.impactOccurred()
                     withAnimation(swipeSpring) { offset = -fullW }
                 }
-                bar("删除", "trash.fill", 0xFF6B62, 0xE23B33, btnW, sep: true) {
+                pill("删除", "trash.fill", 0xFF7A70, 0xC32620, pillW) {
                     mode = .delConfirm
                     haptic.impactOccurred()
                     withAnimation(swipeSpring) { offset = -fullW }
                 }
             case .hideConfirm:
                 /* 第二层：整条撑满，再点一下才真的不显示 */
-                bar("不显示该聊天", "eye.slash.fill", 0xFFB153, 0xEE8A12, fullW) {
+                pill("不显示该聊天", "eye.slash.fill", 0xFFBE66, 0xD97605, fullW, wide: true) {
                     onHide(false)
                     close()
                 }
             case .delConfirm:
                 /* 第二层：整条撑满，再点一下才真的删掉 */
-                bar("清空记录同时不显示聊天", "trash.fill", 0xF2544C, 0xD62A23, fullW) {
+                pill("清空记录同时不显示聊天", "trash.fill", 0xFF7A70, 0xBA1F19, fullW, wide: true) {
                     onDelete()
                     close()
                 }
             }
         }
         .frame(height: cardH)
-        .clipShape(RoundedRectangle(cornerRadius: cardRadius, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: cardRadius, style: .continuous)
-                .strokeBorder(Color.white.opacity(0.22), lineWidth: 0.6)
-        )
         .padding(.vertical, cardInset)
         .frame(width: max(0, -offset), height: L.rowH, alignment: .trailing)
         .clipped()
-        /* 卡片浮在行上面那一层投影（.clipped 之后才加，投出来才是卡片自己的形状） */
-        .shadow(color: .black.opacity(0.16), radius: 9, x: 0, y: 3)
+    }
+
+    /// 三颗药丸之间的缝（总宽仍然是 btnW × 3，滑开的距离不变）
+    private var gap: CGFloat { 5 }
+    private var pillW: CGFloat { max(30, (fullW - gap * 2) / 3) }
+
+    /// 一颗操作药丸（wide = 第二层那种整条撑满的）
+    private func pill(_ title: String, _ symbol: String,
+                      _ top: UInt32, _ bottom: UInt32,
+                      _ width: CGFloat, wide: Bool = false,
+                      action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Group {
+                if wide {
+                    HStack(spacing: 9) {
+                        icon(symbol, big: true)
+                        Text(title)
+                            .font(pfExact(btnFont, .semibold))
+                            .foregroundColor(.white)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.7)
+                    }
+                } else {
+                    VStack(spacing: 5) {
+                        icon(symbol, big: false)
+                        Text(title)
+                            .font(pfExact(btnFont - 1.5, .semibold))
+                            .foregroundColor(.white)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.66)
+                    }
+                }
+            }
+            .frame(width: max(0, width), height: cardH)
+            .background(pillFace(top: top, bottom: bottom))
+            .contentShape(RoundedRectangle(cornerRadius: cardRadius, style: .continuous))
+        }
+        .buttonStyle(SwipeBarPressStyle())
+    }
+
+    /// 药丸的底：主体渐变 + 上面一道玻璃高光 + 下沿压暗做厚度 + 一圈极淡的白描边
+    private func pillFace(top: UInt32, bottom: UInt32) -> some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: cardRadius, style: .continuous)
+                .fill(LinearGradient(colors: [Color(hex: top), Color(hex: bottom)],
+                                     startPoint: .top, endPoint: .bottom))
+            RoundedRectangle(cornerRadius: cardRadius, style: .continuous)
+                .fill(LinearGradient(colors: [Color.white.opacity(0.26), Color.clear,
+                                              Color.black.opacity(0.12)],
+                                     startPoint: .top, endPoint: .bottom))
+            RoundedRectangle(cornerRadius: cardRadius, style: .continuous)
+                .strokeBorder(Color.white.opacity(0.24), lineWidth: 0.6)
+        }
+        .shadow(color: Color(hex: bottom).opacity(0.38), radius: 7, x: 0, y: 3)
+    }
+
+    /// 图标：坐在一枚半透明小圆底上（比裸图标精致一档）
+    private func icon(_ symbol: String, big: Bool) -> some View {
+        Image(systemName: symbol)
+            .font(.system(size: big ? iconSize + 1 : iconSize, weight: .semibold))
+            .foregroundColor(.white)
+            .frame(width: big ? 26 : 25, height: big ? 26 : 25)
+            .background(Circle().fill(Color.white.opacity(0.20)))
+            .overlay(Circle().strokeBorder(Color.white.opacity(0.30), lineWidth: 0.5))
     }
 
     /// 松手吸附：**带阻尼的弹簧**（会轻轻回稳一下，不是硬切过去）
@@ -407,43 +492,21 @@ struct SwipeChatRow: View {
 
     /// 一个可以点的格子：小图标 + 文字竖排、白字、底色上下一点渐变
     /// （不用 Button：Button 在会滑动的行里容易点不到）
-    private func bar(_ title: String, _ symbol: String,
-                     _ top: UInt32, _ bottom: UInt32, _ width: CGFloat,
-                     sep: Bool = false,
-                     action: @escaping () -> Void) -> some View {
-        VStack(spacing: 3.5) {
-            Image(systemName: symbol)
-                .font(.system(size: iconSize, weight: .semibold))
-                .foregroundColor(.white.opacity(0.96))
-            Text(title)
-                .font(pfExact(btnFont, .medium))
-                .foregroundColor(.white)
-                .lineLimit(1)
-                .minimumScaleFactor(0.7)
-        }
-        .frame(width: max(0, width), height: cardH)
-        .background(
-            LinearGradient(colors: [Color(hex: top), Color(hex: bottom)],
-                           startPoint: .top, endPoint: .bottom)
-        )
-        /* 格子之间一条白细线（两端留空，不顶到卡片边） */
-        .overlay(alignment: .leading) {
-            if sep {
-                Rectangle()
-                    .fill(Color.white.opacity(0.22))
-                    .frame(width: 0.7)
-                    .padding(.vertical, 11)
-            }
-        }
-        .contentShape(Rectangle())
-        .onTapGesture { action() }
-    }
-
     private func close() {
         withAnimation(swipeSpring) {
             offset = 0
             mode = .none
         }
+    }
+}
+
+/// 左滑那几颗药丸按下去的效果：轻轻缩一下 + 压一点暗（像真按在玻璃上）
+struct SwipeBarPressStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .scaleEffect(configuration.isPressed ? 0.94 : 1)
+            .brightness(configuration.isPressed ? -0.06 : 0)
+            .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
     }
 }
 
@@ -1106,6 +1169,10 @@ struct ChatsView: View {
             .navigationDestination(for: Chat.self) { chat in
                 chatDest(chat)
             }
+            /* 点了推送通知：MainTab 把会话 id 放到 app.pendingPushChatId，
+               这里按**列表自己那条导航**把它推进去（和手点一个会话同一条路）。 */
+            .onAppear { openPendingPushChat(app.pendingPushChatId) }
+            .onChange(of: app.pendingPushChatId) { v in openPendingPushChat(v) }
             /* 公众号那两条会话：点进去是公众号页面（不是聊天页） */
             .navigationDestination(isPresented: $showOA) {
                 OfficialAccountPage(accountId: oaOpenId)
@@ -1207,6 +1274,33 @@ struct ChatsView: View {
             let err = await API.shared.deleteChat(chatId: chat.id)
             await app.loadChats()
             app.show(err ?? "已删除")
+        }
+    }
+
+    /// 点了推送通知要进的那个会话（app.pendingPushChatId）：
+    /// 列表还没加载好就等一会儿（最多 8 秒），加载好了**用列表自己的导航** push 进去。
+    /// 2026-10-12 用户：「点推送通知依旧闪退」—— 以前是 MainTab 用最外层 fullScreenCover
+    /// 整页压聊天页，冷启动那几帧会打架被系统杀掉；改成走这一条
+    /// （和用户手点一个会话**完全同一条路**，那条路日志里一直正常）。
+    private func openPendingPushChat(_ id: String?) {
+        guard let id, !id.isEmpty else { return }
+        Task { @MainActor in
+            for _ in 0..<40 {
+                if app.chats.contains(where: { $0.id == id }) { break }
+                await app.loadChats()
+                try? await Task.sleep(nanoseconds: 200_000_000)
+            }
+            guard let c = app.chats.first(where: { $0.id == id }) else {
+                app.pendingPushChatId = nil
+                app.show(Tr("找不到这个会话"))
+                CrashCatcher.note("推送", "列表里没有这个会话 " + id)
+                return
+            }
+            app.pendingPushChatId = nil
+            CrashCatcher.note("推送", "交给会话列表打开 " + id)
+            /* 让列表先画出来那一帧，再把会话推进去（不然 push 和首次渲染撞一起） */
+            try? await Task.sleep(nanoseconds: 350_000_000)
+            path.append(c)
         }
     }
 }
