@@ -80,21 +80,37 @@ struct UserManageView: View {
     @State private var rpNew = false
     /* ---- 开关（写 ui.json 的键）---- */
     @State private var faceForRealName = UIConfig.num("realnameFace", 1) > 0
+    /// 「我」页排版：0 = 卡片版（头像压在卡片上沿那版）/ 1 = 微信版（一行放下头像/名字/星言号）
+    @State private var meLayout = Int(UIConfig.num("meLayout", 0))
 
     var body: some View {
         VStack(spacing: 0) {
             NavBar(title: Tr("管理"), back: { dismiss() })
             ScrollView(showsIndicators: false) {
                 VStack(spacing: 10) {
+                    /* ⚠ 2026-10-12 用户说「管理里面排版一下，太乱了」：
+                       原来十几张卡平铺下来，找东西得从上翻到底。现在按**用途**分五组，
+                       每组一行小灰标题，组内还是原来那些卡（功能一个没少），顺序按常用程度排。 */
+                    groupTitle(Tr("商城"))
+                    /* 拼多多商城的后台（上架商品 / 换轮播图 / 改商城名）—— MallManage.swift */
+                    MallAdminSection()
+                    shopSection
+
+                    groupTitle(Tr("卡券 / 红包"))
+                    cardsSection
+                    rpCoversSection
+
+                    groupTitle(Tr("内容"))
                     addSection
                     musicIcons
                     gameIcons
                     miniappsSection
+
+                    groupTitle(Tr("通知 / 官方号"))
                     sysNoticeSection
                     officialSection
-                    shopSection
-                    cardsSection
-                    rpCoversSection
+
+                    groupTitle(Tr("设置 / 排查"))
                     switchSection
                     logsSection
                     if !msg.isEmpty {
@@ -493,6 +509,43 @@ struct UserManageView: View {
                         }
                     }))
                     .labelsHidden().tint(C.green)
+            }
+            .padding(.horizontal, 16).frame(height: 62)
+
+            HairLine(inset: 16)
+
+            /* 用户要求：「整个『我』页面的排版可以切换给管理」—— 已经在包里的两版排版
+               在这儿切（写 ui.json 的 meLayout，改完重开 App 生效）：
+                 卡片版 = 头像压在卡片上沿 + 朋友/等级/活跃天 + 会员/状态胶囊
+                 微信版 = 照微信一行放下 头像 / 名字 / 星言号 / 二维码 / 箭头 */
+            HStack(spacing: 12) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(Tr("「我」页排版")).font(pf(16)).foregroundColor(C.label)
+                    Text(Tr("卡片版 = 头像压在卡片上沿 / 微信版 = 一行放下头像·名字·星言号"))
+                        .font(pf(12)).foregroundColor(C.subLabel)
+                        .lineLimit(2)
+                }
+                Spacer(minLength: 6)
+                Picker("", selection: Binding(
+                    get: { meLayout },
+                    set: { v in
+                        meLayout = v
+                        Task {
+                            let ok = await API.shared.opsSetUIKey("meLayout", Double(v))
+                            if ok {
+                                let cfg = await API.shared.uiConfig()
+                                UIConfig.apply(cfg.ui)
+                            }
+                            msg = ok ? (Tr("我页排版已切成") + (v == 1 ? Tr("微信版") : Tr("卡片版"))
+                                        + Tr("，重开 App 生效"))
+                                     : Tr("保存失败")
+                        }
+                    })) {
+                    Text(Tr("卡片版")).tag(0)
+                    Text(Tr("微信版")).tag(1)
+                }
+                .pickerStyle(.segmented)
+                .frame(width: 150)
             }
             .padding(.horizontal, 16).frame(height: 62)
         }
@@ -901,6 +954,16 @@ struct UserManageView: View {
                 .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
                 .padding(.horizontal, 12)
         }
+    }
+
+    /// 分组小标题（用户说「管理里面排版一下，太乱了」—— 十几张卡按用途分组，每组一行小灰字）
+    private func groupTitle(_ t: String) -> some View {
+        Text(t)
+            .font(pf(13, .medium))
+            .foregroundColor(C.subLabel)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 16)
+            .padding(.top, 8)
     }
 
     private func row(_ k: String, _ v: String, tap: @escaping () -> Void) -> some View {

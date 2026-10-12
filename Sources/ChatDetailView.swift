@@ -1941,6 +1941,8 @@ struct ChatDetailView: View {
 
     /// 输入框上面那一排快捷按钮：图片 / 拍摄 / 位置 / 文件 / 转账 / 红包 / 常用语
     /// （用的都是下面那套已经存在的动作，不新增逻辑）
+    /// ⚠ 2026-10-12 用户「群里不要可以转账」+「都对齐下微信」：
+    /// 微信**群聊里没有转账**（转账是点某个人的头像单独转），所以群里这一排不画「转账」。
     private var quickBar: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 8) {
@@ -1948,7 +1950,9 @@ struct ChatDetailView: View {
                 quickChip("camera", Tr("拍摄"))
                 quickChip("location", Tr("位置"))
                 quickChip("file", Tr("文件"))
-                quickChip("transfer", Tr("转账"))
+                if !isGroup {
+                    quickChip("transfer", Tr("转账"))
+                }
                 quickChip("redpacket", Tr("红包"))
                 quickChip("card", Tr("名片"))
             }
@@ -2148,9 +2152,27 @@ struct ChatDetailView: View {
                    靠「按了多久」区分。上一版只保留了切换，按住毫无反应，
                    用户就以为「浮层没了」（线上真被这么反馈过）。 */
                 Image(systemName: voiceMode ? "keyboard" : "mic")
-                    .font(.system(size: 21, weight: .regular))
-                    .foregroundColor(recorder.recording ? C.green : C.chatBarIcon)
+                    /* ⚠ 2026-10-12 用户「输入框那个喇叭做高级感、会亮的」：
+                       平时是一枚淡玻璃圆片（图标居中），一按住在录音就换成
+                       绿色渐变 + 白描边 + 外发光（就是"亮起来"）。 */
+                    .font(.system(size: 19, weight: .medium))
+                    .foregroundColor(recorder.recording ? .white : C.chatBarIcon)
                     .frame(width: L.composerIconBox, height: L.composerIconBox)
+                    .background(
+                        Circle().fill(recorder.recording
+                                      ? AnyShapeStyle(LinearGradient(
+                                            colors: [Color(hex: 0x3ED37F), Color(hex: 0x0F9D58)],
+                                            startPoint: .top, endPoint: .bottom))
+                                      : AnyShapeStyle(C.fieldBg.opacity(0.55)))
+                    )
+                    .overlay(
+                        Circle().strokeBorder(Color.white.opacity(recorder.recording ? 0.38 : 0.22),
+                                              lineWidth: 0.7)
+                    )
+                    .shadow(color: recorder.recording
+                            ? Color(hex: 0x18B767).opacity(0.55) : Color.black.opacity(0.05),
+                            radius: recorder.recording ? 12 : 3,
+                            y: recorder.recording ? 0 : 1)
                     .contentShape(Rectangle())
                     .simultaneousGesture(
                         DragGesture(minimumDistance: 0)
@@ -2290,9 +2312,24 @@ struct ChatDetailView: View {
                                     dictation.toggle { s in input = base.isEmpty ? s : (base + s) }
                                 } label: {
                                     Image(systemName: dictation.listening ? "mic.fill" : "mic")
-                                        .font(.system(size: 17))
-                                        .foregroundColor(dictation.listening ? C.green : C.chatBarIcon)
+                                        /* 同一个"会亮"的写法：听写中=绿色渐变 + 外发光 */
+                                        .font(.system(size: 16, weight: .medium))
+                                        .foregroundColor(dictation.listening ? .white : C.chatBarIcon)
                                         .frame(width: 30, height: 30)
+                                        .background(
+                                            Circle().fill(dictation.listening
+                                                          ? AnyShapeStyle(LinearGradient(
+                                                                colors: [Color(hex: 0x3ED37F), Color(hex: 0x0F9D58)],
+                                                                startPoint: .top, endPoint: .bottom))
+                                                          : AnyShapeStyle(C.fieldBg.opacity(0.55)))
+                                        )
+                                        .overlay(
+                                            Circle().strokeBorder(Color.white.opacity(dictation.listening ? 0.34 : 0.20),
+                                                                  lineWidth: 0.6)
+                                        )
+                                        .shadow(color: dictation.listening
+                                                ? Color(hex: 0x18B767).opacity(0.5) : Color.clear,
+                                                radius: 10)
                                 }
                                 .buttonStyle(.plain)
                             }
@@ -2438,7 +2475,9 @@ struct ChatDetailView: View {
                        onCaptureSticker: { panel = .none; showCaptureSticker = true },
                        mine: myStickers)
         case .plus:
-            PlusPanel(items: plusItems,
+            /* 群聊里不显示「转账」（微信群聊也没有转账，要转就点头像单聊转）——
+               2026-10-12 用户：「群里不要可以转账」「都对齐下微信」。 */
+            PlusPanel(items: isGroup ? plusItems.filter { $0.action != "transfer" } : plusItems,
                       onTap: { item in handlePlus(item) },
                       onLongPress: { item in handlePlusLong(item) })
         case .mention:
@@ -2831,14 +2870,37 @@ struct ChatDetailView: View {
             uploading = true
             Task {
                 do {
+                    /* ⚠ 2026-10-12 用户「图片发出速度快一点」：
+                       以前这几张是**一张一张排队传**的，4 张就要等 4 段往返。
+                       现在并行传（最多 4 张同时在传），整体时间基本等于最慢的那一张。
+                       结果按原顺序拼回来，九宫格的顺序不会乱。 */
+                    let t0 = Date()
+                    let ups = await withTaskGroup(of: (Int, String, Data, Int, Int).self) { group in
+                        for (i, img) in list.enumerated() {
+                            let px = img.sendPixelSize
+                            group.addTask {
+                                do {
+                                    let up = try await API.shared.uploadImageForSend(img, original: original)
+                                    return (i, up.url, up.data, px.w, px.h)
+                                } catch {
+                                    return (i, "", Data(), px.w, px.h)
+                                }
+                            }
+                        }
+                        var got: [(Int, String, Data, Int, Int)] = []
+                        for await r in group { got.append(r) }
+                        return got.sorted { $0.0 < $1.0 }
+                    }
                     var urls: [String] = []
                     var dims: [(w: Int, h: Int)] = []
-                    for img in list {
-                        let up = try await API.shared.uploadImageForSend(img, original: original)
-                        urls.append(up.url)
-                        dims.append(img.sendPixelSize)
-                        seedLocalImage(up.url, img, data: up.data)
+                    for (i, u, d, w, h) in ups {
+                        guard !u.isEmpty else { continue }
+                        urls.append(u)
+                        dims.append((w: w, h: h))
+                        if i < list.count { seedLocalImage(u, list[i], data: d) }
                     }
+                    CrashCatcher.note("发图", "并行传完 \(urls.count)/\(list.count) 张，用时 "
+                                      + String(Int(Date().timeIntervalSince(t0) * 1000)) + "ms")
                     if urls.count >= 4 {
                         CrashCatcher.note("发图", "合成一条九宫格（\(urls.count) 张）")
                         let body = "{\"paths\":" + Self.jsonStringArray(urls) + "}"
