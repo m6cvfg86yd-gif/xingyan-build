@@ -49,6 +49,8 @@ struct SwitchAccountView: View {
                        ① 标题下面有一行**居中**的小灰字「轻触头像以切换账号」；
                        ② 当前账号右边确实有「当前使用」四个字；
                        ③ 头像下面那行就是**光秃秃的微信号**，没有「星言号：」这种前缀。 */
+                    /* 照截图量：这行字是**居中**的（x 284~970，中心 627 ≈ 屏幕中心），
+                       原文是「轻触头像以切换**账号**」。 */
                     Text(Tr("轻触头像以切换账号"))
                         .font(pf(13))
                         .foregroundColor(C.subLabel)
@@ -101,9 +103,10 @@ struct SwitchAccountView: View {
         Button {
             tap(a, current: current)
         } label: {
-            HStack(spacing: 12) {
-                Avatar(path: a.avatar, size: 56, radius: 6, level: levelOf(a))
-                    .frame(width: 56, height: 56)
+            /* 截图量出来：名字左边那条线在 x≈103pt（卡片内缩 12 + 内边距 16 + 头像 60 + 缝 15） */
+            HStack(spacing: 15) {
+                Avatar(path: a.avatar, size: 60, radius: 6, level: levelOf(a))
+                    .frame(width: 60, height: 60)
 
                 VStack(alignment: .leading, spacing: 5) {
                     Text(a.nickname.isEmpty ? a.username : a.nickname)

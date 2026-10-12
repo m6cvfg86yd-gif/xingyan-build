@@ -179,10 +179,12 @@ struct MeView: View {
                     CardsView()
                 } else if key == "shop" {
                     /* 我 → 小店与卡包（后台 me-page.json 里那一行 action = shop）
-                       ⚠ 2026-10-12 用户要求：点这行**直接进商城**（拼多多风格那个 H5），
-                       不再先落在我们自己那个「零钱余额 + 商品列表」的中间页
-                       （原生小店页还在，ShopView.swift 没删，只是入口不再走它）。 */
-                    MallWebPage()
+                       ⚠ 2026-10-12 用户要求：① 点这行**直接进商城**（不再先落在我们自己
+                       那个「零钱余额 + 商品列表」的中间页）② 商城从 H5 改成**原生**
+                       —— 见 MallNative.swift（首页/推荐/消息/购物车/我的 + 详情 + 下单 +
+                       我的订单 + 收藏 + 搜索；数据存本机 dd_mall.json）。
+                       原生小店页 ShopView 和原来的 H5 页 MallWebPage 都还在，只是入口走原生。 */
+                    MallNativeView()
                 } else if key == "eyes" {
                     /* 设置 → 通用 → 更多 → 显示小星（三档开关：开 / 静态 / 关） */
                     EyesSettingsView()
