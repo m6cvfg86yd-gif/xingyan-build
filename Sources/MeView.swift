@@ -47,7 +47,8 @@ struct MeView: View {
                         /* 用户要求：我页的卡片底色**和会话页每行一致**（暗色 #141419）。
                            后台 ui.json 写 meGlass = 0 就是实色卡（吃 cardBg）；
                            留默认 1 还是原来那张透出封面的玻璃卡。 */
-                        GroupCard(glass: UIConfig.num("meGlass", 1) > 0, bg: C.meCardBg) {
+                        /* 对齐微信：卡片一律实色（原来那个透出封面的玻璃卡去掉了） */
+                        GroupCard(bg: C.meCardBg) {
                             ForEach(grouped[gi].indices, id: \.self) { ri in
                                 let item = grouped[gi][ri]
                                 if ri > 0 { rowLine }
@@ -361,45 +362,25 @@ struct MeView: View {
        现在：封面只占顶上一条，头像压在资料卡上沿，名字、星言号、朋友/等级/活跃天、
        会员 + 状态 全部收进**同一张玻璃卡**里 —— 层次从 4 层变成 2 层。 */
 
-    /// 封面高度（含系统状态栏那一条）
-    private var coverH: CGFloat { L.safeTop + UIConfig.num("meCoverH", 76) }
-    /// 资料卡顶部离屏幕顶的距离：卡片压在封面下沿上，上面露出一截蓝
-    private var cardTopY: CGFloat { coverH - UIConfig.num("meCardOverlap", 39) }
-    private var topAvatar: CGFloat { L.v(58, 15.6, 66) }
+    /* 2026-10-12 用户要求「对齐微信做」：
+       微信的「我」页**平时顶上什么封面都没有**，只有设了状态时顶上那一块才铺状态色。
+       所以封面高度改成：有状态 = 盖住「状态栏 + 资料行」那一整块；没状态 = 0（完全不占位）。 */
+    /// 顶部染色块的高度（含系统状态栏）。资料行 96 高，所以整块 = safeTop + 96 + 10（那 10 是下面那道灰缝）
+    private var coverH: CGFloat { moodOn ? L.safeTop + 106 : 0 }
+    /// 资料行顶部离屏幕顶的距离：就是状态栏那一条（没状态时也留，不然内容会顶到刘海）
+    private var cardTopY: CGFloat { L.safeTop + 10 }
+    /// 资料行里的头像：微信不管机型都是 64
+    private var topAvatar: CGFloat { 64 }
 
-    /// 方案 3 的封面：只占顶上一条，是一块**磨砂玻璃** ——
-    /// 浅色模式是白磨砂、深色模式是黑磨砂（Material 自己跟着主题走，不用写两套颜色）。
+    /// 顶部那一块：**只有设了状态才画**（铺状态自己的渐变色，和微信一样）。
+    /// 没设状态就是空的 —— 微信「我」页平时顶上什么都没有。
     @ViewBuilder private var meCover: some View {
         if moodOn {
-            /* 用户要求：「状态点了顶部卡片要发生相应的颜色变化」。
-               设了状态时，顶上这条封面就换成**这个状态自己的颜色**（从图标/分类来的
-               那对渐变色，moodC1 → moodC2）—— 状态名和文案也留在卡里。
-               以前这里永远是最上面那块磨砂玻璃：profileTopBg 写了但没人用，
-               所以设完状态顶上颜色一点变化都没有。 */
+            /* 用户要求：「状态点了顶部卡片要发生相应的颜色变化」——
+               设了状态就把顶上那一整块（状态栏 + 资料行 + 下沿那道缝）铺成这个状态的颜色。
+               没设状态什么都不画：微信平时就是干净的页面底。 */
             profileTopBg
                 .frame(maxWidth: .infinity)
-        } else {
-            ZStack(alignment: .top) {
-            if scheme == .dark {
-                /* ⚠ 深色下**不用 Material**：`.ultraThinMaterial` 在深色里会把底色抬亮一大截，
-                   实测顶那条封面是 #313133，而页面底是 #0B0B0D、卡片是 #1C1C1E ——
-                   三个档摆在一起就是"深色下底色不一致"（用户反馈）。
-                   深色直接给一层和卡片同一档的近黑，只留顶上那道很淡的光。 */
-                Color(hex: 0x131315)
-                LinearGradient(colors: [Color.white.opacity(0.05), Color.clear],
-                               startPoint: .top, endPoint: .bottom)
-                    .frame(height: L.safeTop + 64)
-            } else {
-                /* 底：浅色给白，磨砂层再压上去 */
-                Color(hex: 0xFFFFFF)
-                Rectangle().fill(.ultraThinMaterial)
-                /* 顶上一道光：玻璃放在死色上会像一块塑料，这一笔才有"磨砂/通透"的层次 */
-                LinearGradient(colors: [Color.white.opacity(0.60), Color.clear],
-                               startPoint: .top, endPoint: .bottom)
-                    .frame(height: L.safeTop + 64)
-            }
-        }
-        .frame(maxWidth: .infinity)
         }
     }
 
@@ -415,103 +396,78 @@ struct MeView: View {
         }
     }
 
-    /// 「我」页顶部那张资料卡：头像压在卡片上沿，其余全在卡里
+    /// 「我」页顶部那条资料行（对齐微信：一行里放下头像 / 名字 / 星言号 / 二维码 / 箭头）
     private var meProfileCard: some View {
-        VStack(spacing: 0) {
-            /* 名字 + 等级徽章 + 会员徽章（居中；左右各留 46pt，别顶到右上角二维码） */
-            HStack(spacing: 6) {
-                /* 未成年人模式开着：名字前面挂一把小雨伞（点一下进那一页，微信就是这样） */
-                if teenOn {
-                    Button { showTeenCard = true } label: {
-                        UmbrellaIcon(color: Color(hex: 0x3E9BF0), size: 16)
-                    }
-                    .buttonStyle(.plain)
-                }
-                Text(app.me?.name ?? "")
-                    .font(pf(L.v(17, 4.8, 19.5), .semibold))
-                    .foregroundColor(C.label)
-                    .lineLimit(1)
-                if growthShow {
-                    QQLevelBadge(level: growth.shownLevel,
-                                 size: L.v(15, 4.2, 17), maxIcons: 3)
-                        .fixedSize()
-                }
-                MemberBadge(tier: app.me?.memberTier,
-                            short: app.me?.memberShort,
-                            color: app.me?.memberColor,
-                            color2: app.me?.memberColor2,
-                            height: L.v(12.5, 3.5, 14))
-                    .fixedSize()
-            }
-            .padding(.top, topAvatar / 2 + 8)
-            .padding(.horizontal, 46)
-
-            Text(Tr("星言号") + "：" + (app.me?.username ?? "-"))
-                .font(pf(13))
-                .foregroundColor(C.subLabel)
-                .padding(.top, 5)
-
-            /* 数据条：朋友 / 等级 / 活跃天（后两格点进去都是「我的等级」） */
-            HStack(spacing: 0) {
-                statCell("\(friendCount)", Tr("朋友"), tap: false)
-                /* 成长系统关掉（growthShow=0）时，只留「朋友」一格 */
-                if growthShow {
-                    statLine
-                    statCell("Lv." + String(growth.shownLevel), Tr("等级"), tap: true)
-                    statLine
-                    statCell(daysText, Tr("活跃天"), tap: true)
-                }
-            }
-            .padding(.top, 14)
-            .padding(.horizontal, 10)
-
-            /* 会员 + 状态：两枚胶囊并排居中 */
-            HStack(spacing: 8) {
-                memberPill
-                statusChip
-                friendsStatusChip
-                /* 只有开了 ops 的账号看得到：App 里直接上新音乐、换音乐/游戏图标 */
-                if app.me?.ops == true { manageChip }
-            }
-            .padding(.top, 14)
-            .padding(.bottom, 16)
-        }
-        .frame(maxWidth: .infinity)
-        .background {
-            ZStack {
-                GlassBackground(shape: RoundedRectangle(cornerRadius: 20, style: .continuous),
-                                opacity: UIConfig.num("meGlassAlpha", 0.62),
-                                edgeAlpha: UIConfig.num("meGlassEdge", 0.55),
-                                shadow: true,
-                                seed: 0.42,
-                                native: true)
-                RoundedRectangle(cornerRadius: 20, style: .continuous)
-                    .fill(C.meCardBg.opacity(0.42))
-            }
-        }
-        .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
-        /* 头像：压在卡片上沿，点进个人信息 */
-        .overlay(alignment: .top) {
+        /* 对齐微信：资料区就是**一行** ——
+           头像（64、方角 6）在左；右边是名字 20 + 会员/等级小徽章 + 星言号；
+           设了状态时再多一行「状态 emoji + 文案」；最右边是二维码图标和箭头。
+           原来那套「头像压在卡片上沿 + 三条统计 + 两枚胶囊」是自定义设计，微信没有，收掉了。 */
+        HStack(spacing: 14) {
             Button { path.append("profile") } label: {
-                Avatar(path: app.me?.avatarPath ?? "", size: topAvatar,
-                       circle: true, level: growth.shownLevel)
-                    .frame(width: topAvatar, height: topAvatar)
-                    .contentShape(Circle())
+                HStack(spacing: 14) {
+                    Avatar(path: app.me?.avatarPath ?? "", size: topAvatar,
+                           radius: 6, level: growth.shownLevel)
+                        .frame(width: topAvatar, height: topAvatar)
+
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack(spacing: 6) {
+                            /* 未成年人模式开着：名字前面挂一把小雨伞（点一下进那一页，微信就是这样） */
+                            if teenOn {
+                                Button { showTeenCard = true } label: {
+                                    UmbrellaIcon(color: Color(hex: 0x3E9BF0), size: 15)
+                                }
+                                .buttonStyle(.plain)
+                            }
+                            Text(app.me?.name ?? "")
+                                .font(pf(20, .semibold))
+                                .foregroundColor(C.label)
+                                .lineLimit(1)
+                            if growthShow {
+                                QQLevelBadge(level: growth.shownLevel, size: 14, maxIcons: 3)
+                                    .fixedSize()
+                            }
+                            MemberBadge(tier: app.me?.memberTier,
+                                        short: app.me?.memberShort,
+                                        color: app.me?.memberColor,
+                                        color2: app.me?.memberColor2,
+                                        height: 13)
+                                .fixedSize()
+                        }
+                        Text(Tr("星言号") + "：" + (app.me?.username ?? "-"))
+                            .font(pf(13.5))
+                            .foregroundColor(C.subLabel)
+                            .lineLimit(1)
+                        /* 设了状态：状态 emoji + 文案跟在星言号下面（微信也是这一行） */
+                        if moodOn {
+                            Text((app.me?.moodIcon ?? "") + " " + (app.me?.moodText ?? ""))
+                                .font(pf(12.5))
+                                .foregroundColor(C.subLabel)
+                                .lineLimit(1)
+                        }
+                    }
+
+                    Spacer(minLength: 8)
+                }
+                .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .offset(y: -topAvatar / 2)
-        }
-        /* 二维码：卡片右上角，点开「我的二维码」 */
-        .overlay(alignment: .topTrailing) {
+
+            /* 二维码：整行最右边（点开「我的二维码」） */
             Button { showMyQR = true } label: {
-                SVGIcon(markup: I.qr, size: L.v(19, 5.4, 21), color: C.label)
-                    .frame(width: 40, height: 40)
+                SVGIcon(markup: I.qr, size: 20, color: C.label)
+                    .frame(width: 34, height: 34)
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .padding(.trailing, 6)
-            .padding(.top, topAvatar / 2 + 2)
+
+            Chevron(size: 10, line: 1.8)
         }
+        .padding(.horizontal, 16)
+        .frame(height: 96)
+        .frame(maxWidth: .infinity)
+        /* 实色卡片，跟下面那些行同一档（对齐微信：整页只有页面底 + 卡片两个色阶） */
+        .background(C.meCardBg)
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
     }
 
     /// 资料卡里的一格数据（大数字 + 小标题）

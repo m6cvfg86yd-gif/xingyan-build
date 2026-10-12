@@ -484,7 +484,10 @@ struct UserManageView: View {
                         Task {
                             let ok = await API.shared.opsSetUIKey("realnameFace", v ? 1 : 0)
                             /* 改完把 UI 配置重拉一次，本机立刻按新开关走 */
-                            if ok, let cfg = await API.shared.uiConfig() { UIConfig.apply(cfg.ui) }
+                            if ok {
+                                let cfg = await API.shared.uiConfig()
+                                UIConfig.apply(cfg.ui)
+                            }
                             msg = ok ? Tr("已") + (v ? Tr("开启") : Tr("关闭")) + Tr("实名前刷脸")
                                      : Tr("保存失败")
                         }
