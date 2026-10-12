@@ -736,6 +736,20 @@ struct AboutView: View {
                     .padding(.vertical, 28)
 
                     GroupCard {
+                        /* 2026-10-12 用户「关于我们的页面微信化一点」：
+                           照微信「关于微信」那一页 —— 图标/名字/版本居中在上，
+                           下面一组行：功能介绍 / 隐私保护指引 / 版本更新（+ 服务器、推送自检），
+                           最底下居中一行小灰字版权。 */
+                        Button { showFeature = true } label: {
+                            aboutRow(Tr("功能介绍"))
+                        }
+                        .buttonStyle(.plain)
+                        HairLine(inset: 16)
+                        Button { showPrivacy = true } label: {
+                            aboutRow(Tr("隐私保护指引"))
+                        }
+                        .buttonStyle(.plain)
+                        HairLine(inset: 16)
                         Button {
                             checkVersion()
                         } label: {
@@ -781,9 +795,16 @@ struct AboutView: View {
                     Text(Tr("自建即时通讯：账号、聊天记录、朋友圈都存在你自己的服务器上，不上传第三方。"))
                         .font(pf(12.5))
                         .foregroundColor(C.subLabel)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.horizontal, 18)
-                        .padding(.top, 12)
+                        .multilineTextAlignment(.center)
+                        .frame(maxWidth: .infinity, alignment: .center)
+                        .padding(.horizontal, 30)
+                        .padding(.top, 18)
+                    /* 微信那一页最下面就是一行居中的小灰字版权 */
+                    Text("© 2026 " + appName + Tr(" · 保留所有权利"))
+                        .font(pf(11.5))
+                        .foregroundColor(C.subLabel.opacity(0.75))
+                        .frame(maxWidth: .infinity, alignment: .center)
+                        .padding(.top, 8)
                     Spacer().frame(height: 30)
                 }
             }
@@ -797,6 +818,61 @@ struct AboutView: View {
             if let b = await API.shared.branding(), let n = b.appName, !n.isEmpty { appName = n }
             if let s = await API.shared.pushStatus() { pushServerReady = (s.configured == true && s.enabled == true) }
         }
+        .sheet(isPresented: $showFeature) { aboutText(Tr("功能介绍"), featureText) }
+        .sheet(isPresented: $showPrivacy) { aboutText(Tr("隐私保护指引"), privacyText) }
+    }
+
+    /* ---------------- 关于页的两行文字 + 两段正文（照微信那两页） ---------------- */
+
+    @State private var showFeature = false
+    @State private var showPrivacy = false
+
+    private var featureText: String {
+        Tr("星言是一款自建服务器的即时通讯：")
+            + Tr("\n· 聊天：单聊 / 群聊，文字、图片、语音、视频、文件、位置、名片、红包、转账")
+            + Tr("\n· 通话：一对一和群里的语音 / 视频通话")
+            + Tr("\n· 朋友圈：发动态、图片和视频，点赞评论，可设可见范围")
+            + Tr("\n· 视界：视频号、直播、听一听、小游戏、小程序")
+            + Tr("\n· 其他：收藏、笔记、卡包、小店与商城、成长等级、状态、人脸核身")
+            + Tr("\n\n数据都存你自己的服务器上，不经过第三方。")
+    }
+
+    private var privacyText: String {
+        Tr("我们只收集提供服务所必需的信息，并且都保存在你自己的服务器上：")
+            + Tr("\n· 账号：手机号 / 用户名，用来登录和找回")
+            + Tr("\n· 资料：昵称、头像、性别、地区（不填也能用）")
+            + Tr("\n· 内容：聊天记录、朋友圈、收藏 —— 只在你的服务器上，用于同步给你自己的设备")
+            + Tr("\n· 权限：相机 / 麦克风 / 相册 / 通讯录 / 定位，只在对应功能里用，可随时在系统设置里关掉")
+            + Tr("\n\n我们不会把这些信息卖给或提供给第三方；注销账号后服务器上的数据按你的选择删除。")
+    }
+
+    private func aboutRow(_ title: String) -> some View {
+        HStack {
+            Text(title).font(pf(16)).foregroundColor(C.label)
+            Spacer(minLength: 0)
+            Chevron(size: 9, line: 1.6).padding(.trailing, 3)
+        }
+        .padding(.horizontal, 16)
+        .frame(height: 52)
+        .contentShape(Rectangle())
+    }
+
+    private func aboutText(_ title: String, _ body: String) -> some View {
+        VStack(spacing: 0) {
+            NavBar(title: title, back: { showFeature = false; showPrivacy = false })
+            ScrollView(showsIndicators: false) {
+                Text(body)
+                    .font(pf(15))
+                    .foregroundColor(C.label)
+                    .lineSpacing(5)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 18)
+                    .padding(.vertical, 18)
+            }
+            .background(C.pageBg)
+        }
+        .background(C.pageBg.ignoresSafeArea())
+        .toolbar(.hidden, for: .navigationBar)
     }
 
     private func checkVersion() {

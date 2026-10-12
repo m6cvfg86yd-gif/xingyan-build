@@ -132,6 +132,8 @@ struct Chat: Decodable, Identifiable, Hashable {
     var updatedAt: String?
     /// 消息免打扰（群屏蔽）
     var muted: Bool?
+    /// 这个会话开着「阅后即焚」（服务端算好给客户端）：对方看过 8 秒后消息自动消失
+    var burn: Bool?
     /// 这个会话是「左滑 → 标为未读」点过的（微信里这种只点一个小红点，
     /// 不给数字；进会话就消掉）。服务端算好给客户端。
     var flagged: Bool?
@@ -2196,6 +2198,109 @@ final class API {
         return user
     }
 
+    /* ============================================================ 冻结 / 解冻（对齐微信「安全中心」）
+       2026-10-12 用户：「把微信的真实封号和解冻、可以自己冻结做出来对齐」。
+       服务器侧：GET /api/account/state（查状态）、POST /api/me/freeze（自己冻）、
+                POST /api/account/unfreeze（自助解冻，解完直接发登录态）、
+                POST /api/ops/account（管理侧冻结/解冻/封禁/解封）。 */
+
+    struct AccountStatePayload: Decodable {
+        var exists: Bool?
+        var banned: Bool?
+        var frozen: Bool?
+        var reason: String?
+    }
+    struct FrozenPayload: Decodable { var frozen: Bool?; var reason: String?; var unfrozen: Bool? }
+
+    /// 查某个账号的状态（登录页用它决定提示「被冻结」还是「被禁用」）
+    func accountState(_ username: String) async -> (exists: Bool, banned: Bool, frozen: Bool, reason: String) {
+        let q = username.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
+        guard let p: AccountStatePayload = try? await get("/api/account/state?u=" + q, as: AccountStatePayload.self)
+        else { return (false, false, false, "") }
+        return (p.exists ?? false, p.banned ?? false, p.frozen ?? false, p.reason ?? "")
+    }
+
+    /// 自己冻结账号（设过登录密码的要带上密码）；返回 nil = 成功，否则是错误文案
+    func freezeSelf(password: String) async -> String? {
+        do {
+            _ = try await post("/api/me/freeze", ["password": password], as: FrozenPayload.self)
+            return nil
+        } catch {
+            return (error as? APIError)?.errorDescription ?? "冻结失败"
+        }
+    }
+
+    /// 自助解冻（不需要登录态）：账号 + 密码 +（可选）实名身份证号；成功直接拿到登录态
+    @discardableResult
+    func unfreeze(username: String, password: String, idCard: String = "") async throws -> User {
+        var b: [String: Any] = ["username": username, "password": password]
+        if !idCard.isEmpty { b["idCard"] = idCard }
+        let payload: LoginPayload = try await post("/api/account/unfreeze", b, as: LoginPayload.self)
+        guard let user = payload.user else { throw APIError.message("解冻失败") }
+        return user
+    }
+
+    /// 管理侧：冻结 / 解冻 / 封禁 / 解封（action = freeze / unfreeze / ban / unban）
+    @discardableResult
+    func opsAccount(userId: String, action: String, reason: String = "") async -> Bool {
+        struct P: Decodable { var user: U?; struct U: Decodable { var id: String? } }
+        return (try? await post("/api/ops/account",
+                                ["userId": userId, "action": action, "reason": reason], as: P.self)) != nil
+    }
+
+    /* ============================================================ 漂流瓶（摇一摇改成漂流瓶）
+       POST /api/bottle/throw {text} / POST /api/bottle/pick / GET /api/bottle/count */
+
+    /// 一个瓶子
+    struct APIBottle: Decodable, Identifiable, Hashable {
+        var id: String
+        var text: String
+        var fromName: String?
+        var at: String?
+    }
+    private struct BottleCountPayload: Decodable { var total: Int? }
+    private struct BottlePickPayload: Decodable {
+        var bottle: APIBottle?
+        var empty: Bool?
+        var total: Int?
+    }
+
+    func bottleCount() async -> Int {
+        (try? await get("/api/bottle/count", as: BottleCountPayload.self))?.total ?? 0
+    }
+
+    @discardableResult
+    func throwBottle(text: String) async -> Bool {
+        (try? await post("/api/bottle/throw", ["text": text], as: BottleCountPayload.self)) != nil
+    }
+
+    func pickBottle() async -> (bottle: APIBottle?, total: Int) {
+        guard let p: BottlePickPayload = try? await post("/api/bottle/pick", [:], as: BottlePickPayload.self) else {
+            return (nil, 0)
+        }
+        return (p.bottle, p.total ?? 0)
+    }
+
+    /* ============================================================ 阅后即焚
+       POST /api/chats/<id>/burn {on}       → 开关
+       POST /api/chats/<id>/burn-sweep      → 读过的就销毁（返回这次真删掉的 id） */
+
+    private struct BurnPayload: Decodable { var burn: Bool? }
+    private struct BurnSweepPayload: Decodable { var ids: [String]? }
+
+    /// 开/关某个会话的阅后即焚；返回服务器确认后的状态
+    func setChatBurn(chatId: String, on: Bool) async -> Bool {
+        let p: BurnPayload? = try? await post("/api/chats/\(chatId)/burn", ["on": on], as: BurnPayload.self)
+        return p?.burn ?? on
+    }
+
+    /// 进聊天页 / 收到新消息时扫一遍：别人发给我、我看过满 8 秒的消息会被销毁
+    func burnSweep(chatId: String) async -> [String] {
+        let p: BurnSweepPayload? = try? await post("/api/chats/\(chatId)/burn-sweep", [:],
+                                                   as: BurnSweepPayload.self)
+        return p?.ids ?? []
+    }
+
     /// 本地没接短信通道，服务器会直接把验证码给回来
     func phoneCode(phone: String) async throws -> String? {
         let payload: PhoneCodePayload = try await post("/api/login/phone-code",
@@ -3497,6 +3602,34 @@ final class API {
         return try await post("/api/shop/order", b, as: ShopOrderPayload.self)
     }
 
+    /* ============================================================ 拼多多商城（原生版，2026-10-12）
+       GET  /api/mall     → { products, banners }（商城的商品和轮播图，服务器 data/mall.json 是真源）
+       POST /api/ops/mall → 管理侧（上架/下架/改价/删除/新增商品 + 换轮播图），只有 ops 账号能用。
+       页面见 MallNative.swift（商城）；管理侧见 MallManage.swift（管理页里的「拼多多商城」）。 */
+
+    struct MallPayload: Decodable {
+        var products: [DDProduct]?
+        var banners: [String]?
+        /// 商城名 / 标语（管理页里能改，用户要求「商城名」）
+        var name: String?
+        var slogan: String?
+    }
+
+    /// 商城数据：拿不到就返回空（App 会退回内置那 16 个商品，至少不是白屏）
+    func mallData() async -> (products: [DDProduct], banners: [String], name: String, slogan: String) {
+        guard let p: MallPayload = try? await get("/api/mall", as: MallPayload.self) else {
+            return ([], [], "", "")
+        }
+        return (p.products ?? [], p.banners ?? [], p.name ?? "", p.slogan ?? "")
+    }
+
+    /// 管理侧改商城：action = product（新增或改一件）/ remove（删一件）/
+    /// banners（整份换轮播图）/ settings（改商城名 + 标语）
+    @discardableResult
+    func opsMall(_ body: [String: Any]) async -> Bool {
+        (try? await post("/api/ops/mall", body, as: MallPayload.self)) != nil
+    }
+
     /* ============================================================ 小星（顶栏那颗眼睛）的三档
        GET/POST /api/me/eyes → { eyes: on|static|off, paid, price, balance }。
        on 是 ¥40 一次性买断（走零钱），static / off 免费。
@@ -4602,6 +4735,13 @@ final class API {
         guard let data = data else {
             throw APIError.message("图片处理失败")
         }
+        /* ⚠ 2026-10-12 用户「这个版本图片发出去有点慢，之前很快的」：
+           以前图片是**塞进 JSON 里 base64** 传的 —— base64 本身要多传 33%，
+           还要在手机上编码、在服务器上解码（两边都是白等的 CPU）。
+           现在和视频/文件一样走**二进制直传**（/api/upload/raw），
+           同样的图少传三分之一字节、少两次编解码，发图快一截。
+           失败再退回老路（老服务器没有 /api/upload/raw 时照样能发）。 */
+        if let url = try? await uploadRawJPEG(data) { return url }
         let b64 = data.base64EncodedString()
         let payload: UploadPayload = try await post("/api/upload",
                                                     ["dataUrl": "data:image/jpeg;base64," + b64,
@@ -4609,6 +4749,26 @@ final class API {
                                                     as: UploadPayload.self)
         guard let url = payload.url else { throw APIError.message("上传失败") }
         return url
+    }
+
+    /// 图片二进制直传：POST /api/upload/raw（Content-Type: image/jpeg），返回服务器路径
+    private func uploadRawJPEG(_ data: Data) async throws -> String {
+        guard let url = URL(string: base + "/api/upload/raw") else {
+            throw APIError.message("服务器地址不正确")
+        }
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.timeoutInterval = 120
+        req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        req.setValue("image/jpeg", forHTTPHeaderField: "Content-Type")
+        /* 告诉服务器「这张已经在手机上按规格压好了」—— 服务器就不会再 spawn 一次 ffmpeg
+           （它对 >300 万像素的图会自动缩一遍，那一下就是几百毫秒到 2 秒的卡顿） */
+        req.setValue("1", forHTTPHeaderField: "x-chris-compressed")
+        let (d, resp) = try await session.upload(for: req, from: data)
+        guard let http = resp as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
+            throw APIError.message("上传失败（HTTP \((resp as? HTTPURLResponse)?.statusCode ?? 0)）")
+        }
+        return try Self.rawUploadURL(from: d)
     }
 
     /// mentions：群里这条消息 @ 了谁（userId 列表）—— 服务端存下来，
@@ -4810,6 +4970,17 @@ extension UIImage {
         if long > maxSide {
             let k = maxSide / long
             target = CGSize(width: size.width * k, height: size.height * k)
+        }
+        /* ⚠ 2026-10-12 用户「图片发出去有点慢」——真凶在这儿：
+           服务器（checkImage）对**超过 300 万像素**的图会 spawnSync 跑一次 ffmpeg 再缩一遍，
+           而 1280×2736 正好是 350 万像素 → 每张图上传完之后服务器还要卡几百毫秒到 2 秒
+           （diag 实测：改二进制之前 200~500ms，之后 809ms / 2120ms，差别就是这次 ffmpeg）。
+           所以客户端先自己压到 240 万像素以内（画质肉眼看不出差别），服务器就不会再动手，
+           整个"发出去"的时间少掉那一大截。 */
+        let pixels = target.width * target.height
+        if pixels > 2_400_000 {
+            let k = (2_400_000 / pixels).squareRoot()
+            target = CGSize(width: (target.width * k).rounded(), height: (target.height * k).rounded())
         }
         let format = UIGraphicsImageRendererFormat.default()
         format.scale = 1

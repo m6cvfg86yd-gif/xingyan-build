@@ -86,8 +86,12 @@ struct DiscoverView: View {
                     MomentsView()
                 } else if key == "nearby" {
                     NearbyPageView()
-                } else if key == "shake" {
-                    ShakePageView()
+        } else if key == "shake" {
+            ShakePageView()
+        } else if key == "bottle" {
+            /* 2026-10-12 用户：「摇一摇改成漂流瓶」——服务端 discover.json 里 d05
+               已经改名「漂流瓶」、action = bottle，点进来就是这一页（老的 shake 也走这儿） */
+            BottlePageView()
                 } else if key == "live" {
                     LiveListView()
                 } else if key == "games" {
@@ -154,6 +158,7 @@ struct DiscoverView: View {
         case "news": path.append("news")
         case "nearby": path.append("nearby")
         case "shake": path.append("shake")
+        case "bottle": path.append("bottle")          // 漂流瓶（摇一摇改成漂流瓶）
         case "live": path.append("live")
         case "games": path.append("games")
     case "channels": path.append("channels")
@@ -190,8 +195,9 @@ extension DiscoverItem {
                          color: "#F4525B", action: "soon", group: 2, enabled: true),
             DiscoverItem(id: "d04", label: "扫一扫", icon: "i.scan", svg: I.scan,
                          color: "#3D83E7", action: "soon", group: 3, enabled: true),
-            DiscoverItem(id: "d05", label: "摇一摇", icon: "i.shake", svg: I.shake,
-                         color: "#4489EA", action: "soon", group: 3, enabled: true),
+            /* 2026-10-12 用户：「摇一摇改成漂流瓶」（服务端 discover.json 同步改过） */
+            DiscoverItem(id: "d05", label: "漂流瓶", icon: "i.shake", svg: I.shake,
+                         color: "#2E7BD6", action: "bottle", group: 3, enabled: true),
             DiscoverItem(id: "d06", label: "看一看", icon: "i.look", svg: I.look,
                          color: "#7275E9", action: "look", group: 4, enabled: true),
             DiscoverItem(id: "d07", label: "搜一搜", icon: "i.searchRow", svg: I.searchRow,
@@ -684,15 +690,18 @@ struct MomentsView: View {
             /* 顶上那一条遮罩（用户反馈「朋友圈顶上的遮罩没了」）：
                封面图顶到屏幕最上面时，返回箭头 / 相机 / 状态栏那几个白图标
                压在一张亮封面上根本看不见 —— 微信这里就压了一条由深到透的黑。
-               浓度和高度都能在后台改：momentTopMask（默认 0.36）/ momentTopMaskH（默认 150）。 */
-            LinearGradient(colors: [Color.black.opacity(max(0, UIConfig.num("momentTopMask", 0.36))),
+               ⚠ 2026-10-12 用户要求「遮罩要透一点」：默认浓度 0.36 → 0.20
+               （高度不变），封面本身能看清一些，白图标仍然够用。
+               浓度和高度都能在后台改：momentTopMask（默认 0.20）/ momentTopMaskH（默认 150）。 */
+            LinearGradient(colors: [Color.black.opacity(max(0, UIConfig.num("momentTopMask", 0.20))),
                                     Color.black.opacity(0)],
                            startPoint: .top, endPoint: .bottom)
                 .frame(height: max(L.safeTop + 56, UIConfig.num("momentTopMaskH", 150)))
                 .frame(maxHeight: .infinity, alignment: .top)
                 .allowsHitTesting(false)
 
-            LinearGradient(colors: [Color.black.opacity(0), Color.black.opacity(0.34), Color.black.opacity(0.52)],
+            /* 底下这条是给名字/签名当底衬的，同样按「透一点」调的（0.34/0.52 → 0.22/0.36） */
+            LinearGradient(colors: [Color.black.opacity(0), Color.black.opacity(0.22), Color.black.opacity(0.36)],
                            startPoint: .top, endPoint: .bottom)
                 .frame(height: L.coverH * 0.62)
                 .frame(maxHeight: .infinity, alignment: .bottom)

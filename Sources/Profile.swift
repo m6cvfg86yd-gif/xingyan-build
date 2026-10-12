@@ -526,7 +526,12 @@ struct NewFriendsView: View {
     }
 
     private func respond(_ user: User, _ accept: Bool) {
-        guard let id = user.requestId, !busy.contains(user.id) else { return }
+        /* ⚠ 2026-10-12 用户「新的朋友接受了不会在当页刷新」：
+           以前这里写的是 `guard let id = user.requestId, …` —— 只要服务器那条没带
+           requestId（老数据 / 字段缺失），这一下就**直接 return**：行不动、也没请求服务器，
+           看着就是"点了接受没反应"。现在两种都能走：有 requestId 用 requestId，
+           没有就用 userId（服务器的 /api/friends/respond 两个都收）。 */
+        guard !busy.contains(user.id) else { return }
         /* 微信的手感：手指一松这一行就动，不等服务器。
            以前是「等接口回来 → 再把整份通讯录重拉一遍」才动，
            手机上就是点了没反应（那个 558KB 的通讯录要下好一会儿）。 */
@@ -536,7 +541,9 @@ struct NewFriendsView: View {
         if accept { added.insert(user, at: 0) }
         app.friendRequests = incoming.count
         Task {
-            let res = await API.shared.respondFriend(requestId: id, accept: accept)
+            let res: (ok: Bool, pending: Int?) = (user.requestId ?? "").isEmpty
+                ? await API.shared.respondFriend(userId: user.id, accept: accept)
+                : await API.shared.respondFriend(requestId: user.requestId ?? "", accept: accept)
             busy.remove(user.id)
             guard res.ok else {
                 /* 没成功（断网 / 服务端不认这条申请）：把这一行放回去，再对一次账 */
@@ -551,6 +558,9 @@ struct NewFriendsView: View {
             /* 通讯录 / 会话在后台慢慢同步，不挡这一下点击 */
             await app.loadContacts()
             await app.loadChats()
+            /* 这一页自己也对一次账：服务器那边的「好友申请 / 已添加 / 我添加的」三份列表
+               才是真源，拉回来行状态就不会停在旧样子（拉失败也不影响刚才那一下乐观更新） */
+            await load()
         }
     }
 }
