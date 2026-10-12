@@ -36,6 +36,8 @@ struct PendingMsg: Identifiable, Hashable {
     var kind: String
     var content: String
     var mentions: [String] = []
+    /// 引用卡片（JSON 字符串，发给服务端的 quote 字段）；没引用就是 nil
+    var quoteJSON: String?
     var sending = false
     var failed = false
     var at = Date()
@@ -318,6 +320,12 @@ struct ChatDetailView: View {
     @State private var selectMode = false
     @State private var selected: Set<String> = []
     @State private var quote: Message?
+    /// 撤回自己的消息之后：底上挂一条「重新编辑」，点一下把刚撤回的内容填回输入框
+    /// （微信的规矩：撤回自己发的消息，5 分钟内可以重新编辑）
+    @State private var reEditDraft: String?
+    /// 阅后即焚：上次扫描时间（限流用，别每次刷新都扫）+ 已经烧过的消息 id（同一条不重复烧）
+    @State private var lastBurnSweep = Date.distantPast
+    @State private var burnedIds: Set<String> = []
     /// 每条消息在屏幕上的位置（长按弹的小方框要贴在它旁边）
     /* 每条消息在屏幕上的位置：长按弹菜单时要贴在那条旁边。
        ⚠ 这里故意用「普通类」而不是 @State —— 以前是用 preference 把整张位置表
@@ -355,6 +363,8 @@ struct ChatDetailView: View {
     @State private var showSearch = false
     @State private var showChatInfo = false
     @State private var showFile = false
+    /// 发文件：默认走**我们自己那一页**（我的文件），管理里打开 filePickerSystem 才回到苹果的文件 App
+    @State private var showMyFiles = false
     /// 表情商店（聊天面板里那个「＋」）
     @State private var showStickerStore = false
     /// 我在表情商店里加过的表情包 / 单个表情（表情面板「我的」那一屏用）
@@ -706,7 +716,20 @@ struct ChatDetailView: View {
         return app.contact(for: message.senderId ?? "")?.name ?? ""
     }
 
+    /// 这个会话**现在**是不是开着阅后即焚（以会话列表里那份为准，取不到才用快照）
+    private var burnOn: Bool { (app.chats.first { $0.id == chat.id }?.burn ?? chat.burn) ?? false }
+    /// 这一屏里有没有「带小火苗」的消息：有就说明这个会话在焚毁状态。
+    /// ⚠ 光看会话列表那个 burn 标记不够 —— 对方刚打开开关、我这边会话列表还没刷新时
+    /// 它是 false，于是**谁都不去扫**，到点的消息就一直挂在屏幕上
+    /// （用户反复报的「阅后即焚消息依旧在」就是这么来的）。
+    private var hasBurnMsg: Bool { messages.contains { $0.burn == true } }
+    private var needBurnSweep: Bool { burnOn || hasBurnMsg }
+
     private var backgroundPath: String {
+        /* ⚠ 阅后即焚要用**最新的**会话状态：`chat` 是进页面那一刻的快照，
+           用户在信息页把开关打开以后快照里的 burn 还是老的（false），
+           所以这里以「会话列表里那份」为准，取不到才退回快照 —— 这就是
+           用户报「阅后即焚没生效」的第一个原因。 */
         /* 这个会话单独设过背景（聊天页「⋯ → 选择背景图」，只存本机）就用它 —— 和微信一样 */
         let per = ChatBgStore.shared.get(chat.id)
         if !per.isEmpty { return per == "auto" ? "" : per }
@@ -1256,6 +1279,16 @@ struct ChatDetailView: View {
         .fileImporter(isPresented: $showFile, allowedContentTypes: [.item], allowsMultipleSelection: true) { result in
             if case .success(let urls) = result { sendFiles(urls) }
         }
+        /* 我们自己的文件选择页（管理里 filePickerSystem = 0 时走它；
+           里面底下那颗按钮随时能切回苹果的文件 App） */
+        .sheet(isPresented: $showMyFiles) {
+            MyFilesPickerView(onPick: { f in sendExistingFile(f) },
+                              onSystemPicker: {
+                                  /* 等这一页收完再弹苹果那个（两个一起弹 iOS 会打架） */
+                                  DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { showFile = true }
+                              })
+                .environmentObject(app)
+        }
         .task(id: chat.id) {
             HitchWatch.shared.start("聊天页")
             loadOutbox()                       // 上次没发出去的还挂着
@@ -1272,6 +1305,24 @@ struct ChatDetailView: View {
                 if Task.isCancelled { break }
                 await load(initial: false)
                 await flushOutbox()            // 离线期间攒下的，联网后自己补发
+                /* 阅后即焚：**停在会话里也要烧**（以前只在进页面/刷新时扫一次，
+                   用户停在聊天页等一分钟什么都不会发生）。每 15 秒顺手扫一遍。 */
+                if needBurnSweep {
+                    let gone = await API.shared.burnSweep(chatId: chat.id)
+                    if !gone.isEmpty { burnAway(gone) }
+                }
+            }
+        }
+        /* 阅后即焚的**快扫**：屏幕上还有小火苗的时候每 3 秒扫一次 ——
+           倒计时一归零，服务端那边其实已经删了，我们立刻把这条从列表收走
+           （不用等上面那个 15 秒的轮询，用户看到的就是「到点真的消失」）。 */
+        .task(id: chat.id) {
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 3_000_000_000)
+                if Task.isCancelled { break }
+                guard hasBurnMsg else { continue }
+                let gone = await API.shared.burnSweep(chatId: chat.id)
+                if !gone.isEmpty { burnAway(gone) }
             }
         }
         // 服务器一推消息，立刻拉一次（不用等轮询）
@@ -1301,6 +1352,11 @@ struct ChatDetailView: View {
             /* 有人拍一拍（我被拍的时候震得重一点）：比"等消息拉回来"更即时 */
             if ev.type == "pat", ev.chatId == chat.id {
                 UIImpactFeedbackGenerator(style: ev.patTo == myId ? .medium : .light).impactOccurred()
+            }
+            /* 阅后即焚：服务端到点销毁了那几条 → 这一页立刻带着动画把它们收走
+               （只加代码，不动视图层；首帧有 DeferredChatView 那层轻占位挡着） */
+            if ev.type == "burn", ev.chatId == chat.id, !ev.burnIds.isEmpty {
+                burnAway(ev.burnIds)
             }
             // 一下子来很多条时合并成一次刷新，别把手机刷爆
             pushTask?.cancel()
@@ -1605,8 +1661,12 @@ struct ChatDetailView: View {
 
     /// 队列存本机：退出 App 再进来，没发出去的那条还在（微信也是这样）
     private func saveOutbox() {
-        let arr = outbox.map { ["id": $0.id, "kind": $0.kind, "content": $0.content,
-                                "at": $0.at.timeIntervalSince1970] as [String: Any] }
+        let arr = outbox.map { p -> [String: Any] in
+            var d: [String: Any] = ["id": p.id, "kind": p.kind, "content": p.content,
+                                    "at": p.at.timeIntervalSince1970]
+            if let q = p.quoteJSON { d["quote"] = q }
+            return d
+        }
         UserDefaults.standard.set(arr, forKey: "chris.outbox." + chat.id)
     }
 
@@ -1616,8 +1676,16 @@ struct ChatDetailView: View {
             guard let id = d["id"] as? String,
                   let kind = d["kind"] as? String,
                   let content = d["content"] as? String else { return nil }
-            return PendingMsg(id: id, kind: kind, content: content)
+            return PendingMsg(id: id, kind: kind, content: content,
+                              quoteJSON: d["quote"] as? String)
         }
+    }
+
+    /// 存在队列里的引用（JSON 字符串）→ 发的时候解回字典
+    private static func quoteDict(_ json: String?) -> [String: Any]? {
+        guard let json = json, let d = json.data(using: .utf8),
+              let o = try? JSONSerialization.jsonObject(with: d) as? [String: Any] else { return nil }
+        return o
     }
 
     /// 以前转过文字的语音：进聊天时把结果贴回来（存在本机，和微信一样）
@@ -1677,6 +1745,31 @@ struct ChatDetailView: View {
                     .padding(.bottom, gapAfter(message))
             } else {
                 messageRow(message)
+                    /* 阅后即焚的小火苗（2026-10-13 用户要求「气泡旁要有个小火苗」）：
+                       自己发的贴左边、别人发的贴右边，一眼看出「这条会烧掉」。
+                       只对开了焚毁标记的消息加这一层。 */
+                    .overlay(alignment: (message.senderId == myId) ? .leading : .trailing) {
+                        if message.burn == true {
+                            /* 小火苗 + **焚毁倒计时**（用户要求）：服务端告诉我们这条什么时候烧，
+                               每秒刷新一次；还没人看过就先只显示火苗。 */
+                            TimelineView(.periodic(from: .now, by: 1)) { ctx in
+                                HStack(spacing: 3) {
+                                    Image(systemName: "flame.fill")
+                                        .font(.system(size: 11))
+                                    if let d = TimeFmt.date(message.burnAt) {
+                                        Text(burnCountText(d, now: ctx.date))
+                                            .font(.system(size: 10, weight: .medium))
+                                            .monospacedDigit()
+                                    }
+                                }
+                                .foregroundColor(Color(hex: 0xFF9A2E))
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .background(Capsule().fill(Color(hex: 0xFF9A2E).opacity(0.14)))
+                                .offset(x: (message.senderId == myId) ? -26 : 26)
+                            }
+                        }
+                    }
             }
         }
     }
@@ -1698,9 +1791,13 @@ struct ChatDetailView: View {
     /// 撤回的提示：微信里不是气泡，是居中一行灰字
     private func recallLine(_ message: Message) -> some View {
         Text(recallText(message))
-            .font(pf(12.5))
-            .foregroundColor(C.msgTime)
+            .font(pf(13))
+            /* 和群里那些系统提示一样：垫一层淡底 + 深一点的灰，压在花哨的聊天背景上也看得清 */
+            .foregroundColor(C.chatTimeInk)
             .multilineTextAlignment(.center)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 4)
+            .background(RoundedRectangle(cornerRadius: 4, style: .continuous).fill(C.chatTimeBg))
             .frame(maxWidth: .infinity)
             .padding(.horizontal, 40)
     }
@@ -1735,7 +1832,9 @@ struct ChatDetailView: View {
                    asrBusy: asrBusy.contains(message.id),
                    onOpenFile: { body in openFile(body) },
                    onOpenArticle: { id in oaArticleId = id; showOaArticle = true },
-                   onLayoutChanged: { repinIfAtBottom() })
+                   onLayoutChanged: { repinIfAtBottom() },
+                   /* 点引用条 → 跳到被引用的那条原消息（微信就是这么跳的） */
+                   onOpenQuote: { id in jumpToMessage(id) })
             .padding(.bottom, gapAfter(message))
             /* 长按一条消息：弹微信那套动作条（复制/转发/收藏/引用/撤回/删除/多选）。
                ⚠ 这里必须用 simultaneousGesture，不能用 onLongPressGesture：
@@ -1944,13 +2043,9 @@ struct ChatDetailView: View {
     private var quickBar: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 8) {
-                quickChip("photo", Tr("图片"))
-                quickChip("camera", Tr("拍摄"))
-                quickChip("location", Tr("位置"))
-                quickChip("file", Tr("文件"))
-                quickChip("transfer", Tr("转账"))
-                quickChip("redpacket", Tr("红包"))
-                quickChip("card", Tr("名片"))
+                /* 这一排现在是**管理里配的**（增删 / 排序 / 改名 / 开关）：
+                   拉不到后台配置就退回原来那七个（见 QuickChip.defaults） */
+                ForEach(quickChips) { c in quickChip(c) }
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 6)
@@ -1961,20 +2056,48 @@ struct ChatDetailView: View {
         .background(UIConfig.num("quickBarBg", 0) > 0 ? C.cardBg : Color.clear)
     }
 
-    private func quickChip(_ id: String, _ title: String) -> some View {
+    /// 这会儿该显示哪几个快捷按钮（后台配的去掉关掉的；一个都不剩就退回默认那排）
+    private var quickChips: [QuickChip] {
+        let list = app.quickChips.filter { $0.enabled }
+        return list.isEmpty ? QuickChip.defaults : list
+    }
+
+    /// 输入框右边那个「＋」：管理里能换**颜色 / 大小 / 图片**（都没配就跟主题走）
+    @ViewBuilder
+    private var plusIcon: some View {
+        let cfg = app.plusButton
+        let side = cfg.size > 0 ? CGFloat(cfg.size) : L.composerIcon
+        Group {
+            if !cfg.image.isEmpty {
+                RemoteImage(path: cfg.image, mode: .fit, maxSide: 200)
+                    .frame(width: side, height: side)
+            } else {
+                SVGIcon(markup: I.plusCircle, size: side,
+                        color: optionalHexColor(cfg.color) ?? C.chatBarIcon)
+            }
+        }
+        .frame(width: L.composerIconBox, height: L.composerIconBox)
+        .contentShape(Rectangle())
+    }
+
+    private func quickChip(_ c: QuickChip) -> some View {
         Button {
-            switch id {
+            switch c.action {
             case "photo": showPhoto = true
             case "camera": showCamera = true
             case "location": showSendLocation = true
-            case "file": showFile = true
+            case "file": openFilePicker()
             case "transfer": showTransfer = true
             case "redpacket": showSendRedPacket = true
             case "card": showPickCard = true
-            default: break
+            /* 其余动作（礼物 / 音乐 / 视频通话 / 语音输入 / 收藏）走「＋」面板那一套处理，
+               免得两处逻辑各写一遍、以后改一处忘一处 */
+            default:
+                handlePlus(PlusItem(id: c.id, label: c.label, icon: c.action,
+                                    action: c.action, enabled: true))
             }
         } label: {
-            Text(title)
+            Text(c.label)
                 .font(pf(13.5))
                 .foregroundColor(C.label)
                 .padding(.horizontal, 12)
@@ -2141,6 +2264,40 @@ struct ChatDetailView: View {
                 .padding(.horizontal, 12)
                 .padding(.top, 6)
                 .background(C.tabBg)
+            }
+            /* 撤回的是**自己**发的消息 → 微信会在输入框上沿挂一条「重新编辑」，
+               点一下就把刚撤回的内容填回输入框（5 分钟内有效，点 ✕ 或超时就没了）。 */
+            if let draft = reEditDraft {
+                HStack(spacing: 8) {
+                    Image(systemName: "arrow.uturn.backward")
+                        .font(.system(size: 13.5, weight: .medium))
+                        .foregroundColor(C.green)
+                    Text(Tr("重新编辑"))
+                        .font(pf(13.5))
+                        .foregroundColor(C.label)
+                    Spacer(minLength: 0)
+                    Button { reEditDraft = nil } label: {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundColor(C.subLabel)
+                            .frame(width: 24, height: 24)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                }
+                .padding(.leading, 12)
+                .padding(.trailing, 6)
+                .frame(height: 36)
+                .background(C.tabBg)
+                .overlay(alignment: .top) {
+                    Rectangle().fill(C.navLine).frame(height: 0.5)
+                }
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    input = draft
+                    reEditDraft = nil
+                    focused = true
+                }
             }
             HStack(spacing: 6) {
                 /* 这个键两种用法（微信也是这样，同时照顾老习惯）：
@@ -2348,9 +2505,7 @@ struct ChatDetailView: View {
                                 Task { plusItems = (try? await API.shared.plusPanel()) ?? [] }
                             }
                         } label: {
-                            SVGIcon(markup: I.plusCircle, size: L.composerIcon, color: C.chatBarIcon)
-                                .frame(width: L.composerIconBox, height: L.composerIconBox)
-                                .contentShape(Rectangle())
+                            plusIcon
                         }
                         .buttonStyle(.plain)
                     }
@@ -2480,7 +2635,7 @@ struct ChatDetailView: View {
             showTransfer = true
         case "file":
             panel = .none
-            showFile = true
+            openFilePicker()
         case "videocall":
             panel = .none
             if (chat.botRank ?? 9) < 9 {
@@ -2555,14 +2710,12 @@ struct ChatDetailView: View {
         /* 「星联世界」这一页默认是新闻排版：一旦开始跟它说话，就自动切回对话，
            不然它的回答被新闻流盖着，用户会以为「发出去没反应」 */
         if isStarWorld, newsMode { withAnimation(.easeInOut(duration: 0.18)) { newsMode = false } }
-        /* 引用：把被引的那条放在前面（像微信那样带一条引用） */
-        if let q = quote {
-            let who = q.senderId == myId ? Tr("我") : displayName(q)
-            let snip = q.kindName == "text" ? String(q.body.prefix(30)) : "[" + q.kindName + "]"
-            text = "「" + who + "：" + snip + "」\n" + text
-        }
+        /* 引用：**结构化**发给服务端（微信那种引用卡片：上面一条带缩略图的引用条，
+           点一下能跳到原消息）—— 不再把「「谁：摘要」」硬拼进正文里。 */
+        let quotePayload = quoteFields(quote)
         input = ""
         quote = nil
+        reEditDraft = nil
         /* 这条 @ 了谁：一起带给服务端（被 @ 的人那边出「有人@我」）。
            发送前再对一遍正文 —— 用户可能把选好的「@某某」删掉了，那就当他没 @ 过（微信也是这样）。 */
         let ids = mentionIds.filter { id in
@@ -2571,7 +2724,39 @@ struct ChatDetailView: View {
         }
         mentionIds = []
         /* 手打的 [微笑] 这类码，发出去之前换成表情（微信也是打字出表情） */
-        send(kind: "text", content: ClassicEmojiSet.expand(text), mentions: ids)
+        send(kind: "text", content: ClassicEmojiSet.expand(text), mentions: ids, quote: quotePayload)
+    }
+
+    /// 把要引用的那条消息收拾成服务端认识的一小包（id / 谁 / 类型 / 摘要 / 缩略图）
+    private func quoteFields(_ q: Message?) -> [String: Any]? {
+        guard let q = q, !q.id.isEmpty else { return nil }
+        let who = q.senderId == myId ? Tr("我") : displayName(q)
+        var d: [String: Any] = ["id": q.id, "who": who, "kind": q.kindName]
+        switch q.kindName {
+        case "text":
+            d["text"] = String(q.body.prefix(90))
+        case "image":
+            d["text"] = Tr("[图片]")
+            d["thumb"] = q.imagePath
+        case "images":
+            d["text"] = Tr("[图片]")
+            if let p = Self.firstImagePath(q.body) { d["thumb"] = p }
+        case "audio":
+            d["text"] = Tr("[语音]")
+        case "video", "livephoto":
+            d["text"] = Tr("[视频]")
+        default:
+            d["text"] = "[" + q.kindName + "]"
+        }
+        return d
+    }
+
+    /// 九宫格那条消息（{"paths":[...]}）里的第一张图：引用卡片拿它当缩略图
+    private static func firstImagePath(_ body: String) -> String? {
+        guard let d = body.data(using: .utf8),
+              let o = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
+              let paths = o["paths"] as? [String], let first = paths.first, !first.isEmpty else { return nil }
+        return first
     }
 
     /* ---------------------------------------------------------- 群里 @ 某人 */
@@ -2732,12 +2917,21 @@ struct ChatDetailView: View {
         }
     }
 
-    private func send(kind: String, content: String, mentions: [String] = []) {
+    private func send(kind: String, content: String, mentions: [String] = [],
+                      quote: [String: Any]? = nil) {
         /* 同上：星联世界那一页只要往外发东西，就切回对话，别让回答被新闻流盖住 */
         if isStarWorld, newsMode { withAnimation(.easeInOut(duration: 0.18)) { newsMode = false } }
         /* 微信那边：消息**先上屏**（发送中），发不出去就留在列表里打个红叹号，
            网络回来自动重发 —— 不弹「发送失败」把字塞回输入框。 */
-        outbox.append(PendingMsg(id: UUID().uuidString, kind: kind, content: content, mentions: mentions))
+        /* 引用那包是字典（[String: Any] 不能直接进 Hashable 的结构体），
+           落成 JSON 字符串存着，发的时候再解回来。 */
+        var qJSON: String?
+        if let q = quote, !q.isEmpty,
+           let d = try? JSONSerialization.data(withJSONObject: q) {
+            qJSON = String(data: d, encoding: .utf8)
+        }
+        outbox.append(PendingMsg(id: UUID().uuidString, kind: kind, content: content,
+                                 mentions: mentions, quoteJSON: qJSON))
         saveOutbox()
         pinToBottomSoon(force: true)
         Task { await flushOutbox() }
@@ -2756,7 +2950,8 @@ struct ChatDetailView: View {
             outbox[idx].failed = false
             do {
                 if let message = try await API.shared.send(chatId: chat.id, kind: p.kind, content: p.content,
-                                                           mentions: p.mentions, clientId: p.id) {
+                                                           mentions: p.mentions, clientId: p.id,
+                                                           quote: Self.quoteDict(p.quoteJSON)) {
                     messages.append(message)
                 }
                 outbox.removeAll { $0.id == p.id }
@@ -3130,6 +3325,27 @@ struct ChatDetailView: View {
         }
     }
 
+    /// 点「＋ → 文件」：默认开**我们自己的文件页**（我的文件）；
+    /// 管理里把 filePickerSystem 打开（= 1）才回到苹果那个文件 App 的选法。
+    private func openFilePicker() {
+        if UIConfig.num("filePickerSystem", 0) > 0 {
+            showFile = true
+        } else {
+            showMyFiles = true
+        }
+    }
+
+    /// 在自己的文件页点了一个文件：它已经在服务器上了，直接把这条 file 消息发出去
+    /// （不用再上传一遍，也就不用等进度条）
+    private func sendExistingFile(_ f: API.MyFileItem) {
+        let url = f.url ?? ""
+        guard !url.isEmpty else { app.show(Tr("这个文件找不到了")); return }
+        let name = f.fileName.replacingOccurrences(of: "\"", with: "")
+                      .replacingOccurrences(of: "\\", with: "")
+        let content = "{\"url\":\"\(url)\",\"name\":\"\(name)\",\"bytes\":\(f.bytes ?? 0)}"
+        send(kind: "file", content: content)
+    }
+
     private func uploadAndSendFile(_ url: URL) async {
         let name = url.lastPathComponent
         uploading = true
@@ -3201,9 +3417,39 @@ struct ChatDetailView: View {
     }
 
     private func recall(_ message: Message) {
+        /* 撤回自己刚发的文字 → 留着原件，底上出「重新编辑」（微信那套，5 分钟） */
+        let draft = message.kindName == "text" ? message.body : ""
         Task {
             await API.shared.recall(chatId: chat.id, messageId: message.id)
             await load(initial: true)
+            guard !draft.isEmpty else { return }
+            reEditDraft = draft
+            /* 5 分钟后自己收掉（微信也是过了时限就没了） */
+            try? await Task.sleep(nanoseconds: 300 * 1_000_000_000)
+            if reEditDraft == draft { reEditDraft = nil }
+        }
+    }
+
+    /// 点引用条：跳到被引用的那条原消息（微信就是这么跳的）。
+    /// 那条如果还在更早的历史里，就先把历史一页页拉下来再跳 —— 点了不能没反应。
+    private func jumpToMessage(_ id: String) {
+        guard !id.isEmpty else { return }
+        if messages.contains(where: { $0.id == id }) {
+            withAnimation(.easeInOut(duration: 0.25)) { scroller?.scrollTo(id, anchor: .center) }
+            return
+        }
+        Task { @MainActor in
+            var tries = 0
+            while hasOlder, tries < 12, !messages.contains(where: { $0.id == id }) {
+                await loadOlder()
+                tries += 1
+            }
+            guard messages.contains(where: { $0.id == id }) else {
+                app.show(Tr("那条消息在更早的记录里，往上翻就能看到"))
+                return
+            }
+            try? await Task.sleep(nanoseconds: 80_000_000)
+            withAnimation(.easeInOut(duration: 0.25)) { scroller?.scrollTo(id, anchor: .center) }
         }
     }
 
@@ -3316,6 +3562,41 @@ struct ChatDetailView: View {
         rebuildIndex()          // 消息列表变了：把「id → 下标」的表重建一次
         loading = false
         autoOpenShopCard()
+        /* 阅后即焚（2026-10-13 接回来）：这个会话开着就顺手扫一遍 ——
+           我这边看过的那些，服务端看过满 1 分钟会销毁，回来的 id 直接从列表里去掉。
+           ⚠ 只加代码、不动视图层；外面还有 DeferredChatView 那层轻占位挡着首帧。 */
+        if needBurnSweep {
+            /* 限流：每 5 秒最多扫一次（以前每次 load 都扫 —— 配合服务端那个缓存 bug
+               就变成「一秒扫两次、每次都说烧了 3 条」，客户端一直跳） */
+            if Date().timeIntervalSince(lastBurnSweep) > 5 {
+                lastBurnSweep = Date()
+                let gone = await API.shared.burnSweep(chatId: chat.id)
+                if !gone.isEmpty { burnAway(gone) }
+            }
+        }
+    }
+
+    /// 「焚毁」这一下：服务端到点销毁了那几条 → 轻震一下 + 弹一句提示 +
+    /// 0.5 秒淡出收缩地把这几行收走（SwiftUI 自己就把「行消失」画成淡出收缩）。
+    /// 小火苗上的倒计时文字：还剩几秒；归零写「焚毁…」（等服务器真删掉再收走这一行）
+    private func burnCountText(_ deadline: Date, now: Date) -> String {
+        let left = Int(deadline.timeIntervalSince(now).rounded(.up))
+        if left > 0 { return "\(left)s" }
+        return Tr("焚毁…")
+    }
+
+    private func burnAway(_ ids: [String]) {
+        /* 同一条只烧一次（服务端要是又回了同一批 id，不再重复播动画、也不重复删） */
+        let fresh = ids.filter { !burnedIds.contains($0) }
+        guard !fresh.isEmpty else { return }
+        burnedIds.formUnion(fresh)
+        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+        BurnFX.shared.fire()          // 焚烧动画（画在聊天页外面那层，见 BurnFX.swift）
+        app.show(Tr("🔥 消息已焚毁"))
+        withAnimation(.easeOut(duration: 0.5)) {
+            messages.removeAll { fresh.contains($0.id) }
+        }
+        rebuildIndex()
     }
 
     /* 往上看更早的记录：服务端支持 before 翻页（一次 40 条），加载完把更早的接在前面 */
@@ -3382,10 +3663,18 @@ struct SystemLine: View {
                          size: 13, color: ink)
             }
             Text(message.body)
-                .font(pf(12.5))
+                .font(pf(13))
                 .foregroundColor(ink)
                 .multilineTextAlignment(.center)
         }
+        /* 群里那些系统提示（「XXX 被移出了群聊」「XXX 加入了群聊」…）：
+           微信是在聊天里居中一条**带底色的灰字**。我们以前是纯灰字（#AEAEB2）
+           直接压在聊天背景上 —— 背景一花就看不清（用户反馈的「群里的字看不清」）。
+           现在给它垫一层淡淡的底 + 换成深一点的灰。 */
+        .padding(.horizontal, 10)
+        .padding(.vertical, 4)
+        .background(RoundedRectangle(cornerRadius: 4, style: .continuous)
+            .fill(C.chatTimeBg))
         .frame(maxWidth: .infinity)
         .padding(.horizontal, 40)
     }
@@ -3394,8 +3683,9 @@ struct SystemLine: View {
     /// 其余是灰字（不是黑字）—— 用 message.isBadCallRecord ，
     /// 正文和 call.state 一起看，新老记录都判得准。
     private var ink: Color {
-        guard message.isCallRecord else { return C.msgTime }
-        return message.isBadCallRecord ? Color(hex: 0xFA5151) : C.msgTime
+        /* 系统提示用深一点的灰（#8A8A8E），不再用那个几乎看不见的 #AEAEB2 */
+        guard message.isCallRecord else { return C.chatTimeInk }
+        return message.isBadCallRecord ? Color(hex: 0xFA5151) : C.chatTimeInk
     }
 }
 
@@ -3468,6 +3758,8 @@ struct MessageRow: View {
     var onOpenArticle: ((String) -> Void)? = nil
     /// 这一行的**高度变了**（图片解码完成等）→ 告诉聊天页，它要再贴一次底
     var onLayoutChanged: (() -> Void)? = nil
+    /// 点引用条 → 跳到被引用的那条原消息（微信就是这么跳的）
+    var onOpenQuote: ((String) -> Void)? = nil
 
     @EnvironmentObject var app: AppState
     /// 语音消息播放状态（哪条在播）
@@ -3737,6 +4029,12 @@ struct MessageRow: View {
                 onOpenAnnounce?(message.body)
             }
 
+        case "note":
+            /* 收藏里的笔记转发到聊天：收到的是一张**笔记卡片**（微信就是这样），
+               点开才看全文 —— 不是一大段带 [图]路径 的文字。 */
+            NoteCardBubble(text: message.body, mine: mine,
+                           showTail: showTail, seed: bubbleSeed(message.id))
+
         case "miniapp":
             /* 好友分享来的小游戏 / 小程序卡片：点一下直接用运行时打开 */
             if let m = MiniAppShare(json: message.body) {
@@ -3785,6 +4083,9 @@ struct MessageRow: View {
                     .padding(.horizontal, L.bubblePadHPill)
                     .padding(.vertical, L.bubblePadV)
                     .background(BubbleFill(mine: mine, tail: showTail, seed: bubbleSeed(message.id)))
+                } else if let q = message.quote {
+            /* 引用了某条消息：微信那样，气泡里先摆一条引用条（带缩略图），下面是正文 */
+            quotedTextBubble(q, raw: message.body)
                 } else {
             /* 正文：网址涂成能点开的蓝链接；群里 @某人 涂成链接色，
                **@我的那一段涂红**，一眼就能看到自己被 @ 了（微信也是这样） */
@@ -3804,11 +4105,56 @@ struct MessageRow: View {
         }
     }
 
+    /// 「引用 + 正文」那一种气泡（微信排版：圆角气泡里上面一条引用条，下面是正文）
+    private func quotedTextBubble(_ q: QuoteRef, raw: String) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 7) {
+                VStack(alignment: .leading, spacing: 2) {
+                    if !q.sender.isEmpty {
+                        Text(q.sender)
+                            .font(pf(12, .medium))
+                            .foregroundColor(C.subLabel)
+                            .lineLimit(1)
+                    }
+                    Text(q.summary.isEmpty ? Tr("[引用]") : q.summary)
+                        .font(pf(12.5))
+                        .foregroundColor(C.subLabel)
+                        .lineLimit(2)
+                        .multilineTextAlignment(.leading)
+                }
+                Spacer(minLength: 0)
+                /* 引用的是一条图片 → 右边挂一张小缩略图（微信就是这样） */
+                if q.thumbPath.isEmpty == false {
+                    RemoteImage(path: q.thumbPath, mode: .fill, maxSide: 200)
+                        .frame(width: 34, height: 34)
+                        .clipShape(RoundedRectangle(cornerRadius: 3, style: .continuous))
+                }
+            }
+            .padding(.horizontal, 7)
+            .padding(.vertical, 6)
+            .background(RoundedRectangle(cornerRadius: 4, style: .continuous)
+                .fill(Color.dyn(0xE9E9EB, 0x3A3A3C)))
+            .contentShape(Rectangle())
+            .onTapGesture {
+                if !q.refId.isEmpty { onOpenQuote?(q.refId) }
+            }
+            Text(richBody(raw))
+                .font(pf(L.chatFontSize))
+                .foregroundColor(mine && UIConfig.num("bubbleMineWhiteText", 1) > 0 ? .white : C.bubbleText)
+                .lineSpacing(L.msgLineSpacing)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(.horizontal, L.bubblePadHPill)
+        .padding(.vertical, L.bubblePadV)
+        .background(BubbleFill(mine: mine, tail: showTail))
+    }
+
     private func dict(_ json: String) -> [String: Any] {
         guard let data = json.data(using: .utf8),
               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return [:] }
         return obj
     }
+
 
     /// 把消息里的 http/https 链接挑出来，做成可以点开的链接（微信里就是蓝色的那种）
     private func linkText(_ s: String) -> AttributedString {

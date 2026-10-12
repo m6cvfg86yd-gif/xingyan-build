@@ -219,7 +219,10 @@ struct VoiceHUD: View {
                    （中间实、往外化开），着色器万一没跑起来也只是球外一圈柔和的暗晕，
                    不会出现任何硬边 —— 球外面永远不会有"方框/黑圈"。
                    它照样"不是全透明"，足够让着色器被调用（全透明视图渲染系统会跳过）。 */
-                Circle()
+                /* Siri 那颗球：**一团会呼吸的虹彩光雾**（没有轮廓、没有高光点）。
+                   同一个着色器画三遍 —— 两层大模糊当泛光、一层清晰当本体，
+                   叠起来才有 Siri 那种"从里往外透光"的质感（单画一层会显得干）。 */
+                let siri = Circle()
                     .fill(RadialGradient(colors: [Color.black,
                                                   Color.black.opacity(0.92),
                                                   Color.black.opacity(0.52),
@@ -238,17 +241,15 @@ struct VoiceHUD: View {
                         .color(c1), .color(c2), .color(c3), .color(c4),
                         .float(amp),
                         .float(glassAmt),
-                        .float(0.60)))          // 球半径（占半宽的 60%）
-                    /* ★★★ 这一行是「球外面那个方框」的最后一道根治 ★★★
-                       `colorEffect` 是**按像素把整块矩形范围都画一遍**的：它在球外面的像素
-                       也算了一遍（球下面的投影、外圈光晕），返回的 alpha 不是 0 而是 0.02~0.2 ——
-                       落在那块 258×258 的方形范围里，就是用户看到的那块**隐形的黑方框**
-                       （浅色聊天页上最明显，边缘还是直的，因为那就是着色器的矩形边界）。
-                       着色器只该管球，管不了"别画外面" —— 所以这里自己按圆形再裁一刀：
-                       方框外面一律不要。（裁边界上的 alpha 只有 4%，看不出来。） */
-                    .clipShape(Circle())
-                    .scaleEffect(scale)
-                    .offset(y: float)
+                        .float(0.42)))          // 光团半径（占半宽的 42%，留出外圈泛光的余地）
+                ZStack {
+                    siri.blur(radius: 52).opacity(0.70).blendMode(.plusLighter)
+                    siri.blur(radius: 22).opacity(0.86).blendMode(.plusLighter)
+                    siri
+                }
+                .clipShape(Circle())
+                .scaleEffect(scale)
+                .offset(y: float)
             } else {
                 /* iOS 16：SwiftUI 叠出来的近似版 */
                 Circle()
@@ -290,6 +291,10 @@ struct VoiceHUD: View {
                     .blendMode(.plusLighter)
             }
 
+            /* 下面这三层（玻璃壳 / 内暗环 / 球缘亮环）**只给 iOS 16 那套近似版用**。
+               iOS 17+ 走的是 Siri 光雾 —— 没有轮廓、没有高光点，
+               再叠这三层会把光雾"框"成一颗玻璃球，又回到旧质感了。 */
+            if #unavailable(iOS 17.0) {
             /* 液态玻璃球壳：苹果原生 Liquid Glass（真折射 + 镜面回光），
                着色器管球里的光和色散，这一层管"玻璃本身"。
                强度后台可调：voiceOrbGlass（默认 0.65；写 0 就没有壳）。 */
@@ -330,6 +335,7 @@ struct VoiceHUD: View {
                 .blur(radius: 1.2)
                 .scaleEffect(scale)
                 .offset(y: float)
+            }
 
             /* 60 秒进度：一圈很淡的光慢慢走满 */
             Circle()
