@@ -7,7 +7,9 @@ import SwiftUI
      · 去掉原来那张金边深色卡、绿色「切换」胶囊、圆角卡片边框和阴影；
      · 就是微信那种**一条一条的分组列表**：头像 56 方角 6 + 名字 17 + 星言号 13 灰，
        整行 84 高、左右 16、行与行之间一条细线（从文字左边开始）；
-     · 行里**没有任何标记**（微信不标"当前"）；不搞胶囊、不搞金圈、不加说明文字；
+     · 标题下面一行居中灰字「轻触头像以切换账号」（微信截图里就有）；
+     · 当前账号右边是「当前使用」四个字；头像下面那行就是光秃秃的星言号，没有前缀；
+     · 不搞胶囊、不搞金圈、不搞圆角卡边框；
      · 点另一个账号直接切（不用重新输密码），右上「管理」切进移除模式；
      · 最下面「添加账号」和上面同一种行：一个灰底方角块里一个加号 + 「添加账号」。
 
@@ -42,8 +44,17 @@ struct SwitchAccountView: View {
 
             ScrollView(showsIndicators: false) {
                 VStack(spacing: 0) {
-                    /* 用户要求「跟微信一模一样」：说明那行小灰字、底下的安全提示、当前账号的
-                       「使用中」标记全部去掉 —— 微信这一页就**只有**账号行 + 细线 + 添加账号行。 */
+                    /* 用户发来了微信真机截图，照它对齐：
+                       ① 标题下面有一行**居中**的小灰字「轻触头像以切换账号」；
+                       ② 当前账号右边确实有「当前使用」四个字；
+                       ③ 头像下面那行就是**光秃秃的微信号**，没有「星言号：」这种前缀。 */
+                    Text(Tr("轻触头像以切换账号"))
+                        .font(pf(13))
+                        .foregroundColor(C.subLabel)
+                        .frame(maxWidth: .infinity, alignment: .center)
+                        .padding(.top, 12)
+                        .padding(.bottom, 10)
+
                     /* 一整块分组列表：账号们 + 最后一行「添加账号」，中间全是细线 */
                     GroupCard(bg: C.cardBg) {
                         ForEach(app.accounts) { acct in
@@ -52,7 +63,6 @@ struct SwitchAccountView: View {
                         }
                         addRow
                     }
-                    .padding(.top, 8)
 
                     if !note.isEmpty {
                         Text(note)
@@ -81,7 +91,7 @@ struct SwitchAccountView: View {
     /* ---------------------------------------------------------- 一行账号 */
 
     /// 微信那一行：头像 56（方角 6）+ 名字 17 + 星言号 13 灰，整行 84。
-    /// 右边平时什么都不放（微信不标"当前"）；只有管理模式下别的账号才写红色「移除」。
+    /// 右边：当前账号写「当前使用」，管理模式下别的账号写红色「移除」，其余什么都不放。
     @ViewBuilder
     private func accountRow(_ a: SavedAccount) -> some View {
         let current = (a.username == me)
@@ -97,7 +107,7 @@ struct SwitchAccountView: View {
                         .font(pf(17))
                         .foregroundColor(C.label)
                         .lineLimit(1)
-                    Text(Tr("星言号") + "：" + a.username)
+                    Text(a.username)
                         .font(pf(13))
                         .foregroundColor(C.subLabel)
                         .lineLimit(1)
@@ -111,6 +121,10 @@ struct SwitchAccountView: View {
                     Text(Tr("移除"))
                         .font(pf(15))
                         .foregroundColor(C.red)
+                } else if current {
+                    Text(Tr("当前使用"))
+                        .font(pf(13))
+                        .foregroundColor(C.subLabel)
                 }
             }
             .padding(.horizontal, 16)

@@ -75,7 +75,8 @@ struct ShopView: View {
                     }
                     .buttonStyle(.plain)
 
-                    balanceCard
+                    /* ⚠ 2026-10-12 用户要求「不要余额」：小店这一页不再显示零钱余额那张卡。
+                       （下单还是照旧走零钱扣款，服务端那套没动，只是页面上不再摆余额。） */
 
                     if loading && items.isEmpty {
                         ProgressView().padding(.top, 40)
@@ -96,7 +97,7 @@ struct ShopView: View {
                         }
                         .padding(.horizontal, 12)
 
-                        Text(Tr("下单后可以在右上角「我的订单」里看进度；扣的是零钱（我 → 服务 → 零钱）。"))
+                        Text(Tr("下单后可以在右上角「我的订单」里看进度。"))
                             .font(pf(12)).foregroundColor(C.subLabel)
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .padding(.horizontal, 18).padding(.top, 4)

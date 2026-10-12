@@ -178,8 +178,11 @@ struct MeView: View {
                     /* 我 → 卡包（照微信：优惠券 / 会员卡 / 礼品卡 / 票） */
                     CardsView()
                 } else if key == "shop" {
-                    /* 我 → 小店与卡包（后台 me-page.json 里那一行 action = shop） */
-                    ShopView()
+                    /* 我 → 小店与卡包（后台 me-page.json 里那一行 action = shop）
+                       ⚠ 2026-10-12 用户要求：点这行**直接进商城**（拼多多风格那个 H5），
+                       不再先落在我们自己那个「零钱余额 + 商品列表」的中间页
+                       （原生小店页还在，ShopView.swift 没删，只是入口不再走它）。 */
+                    MallWebPage()
                 } else if key == "eyes" {
                     /* 设置 → 通用 → 更多 → 显示小星（三档开关：开 / 静态 / 关） */
                     EyesSettingsView()

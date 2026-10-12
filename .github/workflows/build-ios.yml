@@ -116,7 +116,9 @@ jobs:
           set -e
           # 把这次的构建号和打包时间写进 Info.plist：
           # 手机上「我 → 设置 → 关于」和崩溃上报里都能对上到底是哪一版
-          BUILDDATE="$(date -u '+%m-%d %H:%M')"
+          # ⚠ 以前是 date -u（UTC）：手机上「关于」页显示的构建时间比北京时间少 8 小时
+          # （用户看到的「时间还是 xxx 分的那个」就是这个坑）。改成北京时间。
+          BUILDDATE="$(TZ=Asia/Shanghai date '+%m-%d %H:%M')"
           /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${{ github.run_number }}" Info.plist || true
           /usr/libexec/PlistBuddy -c "Add :BuildDate string $BUILDDATE" Info.plist \
             || /usr/libexec/PlistBuddy -c "Set :BuildDate $BUILDDATE" Info.plist || true
