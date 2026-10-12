@@ -104,6 +104,8 @@ struct MyQRViewOld: View {
         .toolbar(.hidden, for: .navigationBar)
         .swipeBack { dismiss() }
         .hidesTabBar()
+        /* 微信那一下「突然调亮」：进这一页把屏幕亮度拉到 100%，退出还原 —— 对方/扫码枪才扫得出来 */
+        .modifier(BrightenScreen())
         .fullScreenCover(isPresented: $showScan) {
             ScannerView { text in handleScanned(text, app: app) }
         }
