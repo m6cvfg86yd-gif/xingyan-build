@@ -100,6 +100,8 @@ struct PayCodePage: View {
         }
         .background(C.pageBg.ignoresSafeArea(edges: .top))
         .toolbar(.hidden, for: .navigationBar)
+        /* 付款码是给收银台扫的：进来渐亮、退出还原 */
+        .modifier(BrightenScreen())
         .sheet(isPresented: $showReceive) { ReceiveCodePage().environmentObject(app) }
         .task { await load(force: false) }
         .onReceive(ticker) { _ in
@@ -283,6 +285,8 @@ struct ReceiveCodePage: View {
         .background(C.pageBg.ignoresSafeArea(edges: .top))
         .toolbar(.hidden, for: .navigationBar)
         .swipeBack { dismiss() }
+        /* 收款码也是给人扫的：进来渐亮、退出还原（和「我的二维码」一样） */
+        .modifier(BrightenScreen())
         .task { await load(amount: 0) }
         .alert(Tr("设置金额"), isPresented: $showSetAmount) {
             TextField(Tr("金额"), text: $amountText).keyboardType(.decimalPad)

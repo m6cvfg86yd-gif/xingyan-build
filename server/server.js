@@ -462,16 +462,44 @@ function hlsPathFor(video) {
   return '';
 }
 
+/** 条目上**已经写着**分片地址时，再确认一次文件真的在：
+    目录被清掉过 / 老条目指向的重建目录没了 → 返回空串（不下发 hls，客户端走整包 MP4）。 */
+function hlsFileExists(hls) {
+  const s = String(hls || '').trim();
+  if (!s) return '';
+  /* 有的条目直接存了完整地址（媒体机 / 签名链接）：那就原样用，别当本地路径去校验 */
+  if (/^https?:\/\//i.test(s)) return s;
+  const rel = s.replace(/^\/+/, '');
+  if (!rel || rel.indexOf('hls/') !== 0) return '';
+  try {
+    if (fs.existsSync(path.join(DATA_DIR, rel))) return '/' + rel;
+  } catch (e) { }
+  /* 分片目录重建过（<id>-t<时间戳>）的话，按 id 找最新那个 */
+  const parts = rel.split('/');
+  const id = parts[1] || '';
+  if (id) {
+    const alt = findRebuiltHlsDir(id);
+    if (alt) {
+      const tail = parts.slice(2).join('/');
+      if (tail && fs.existsSync(path.join(HLS_DIR, alt, tail))) return '/hls/' + alt + '/' + tail;
+    }
+  }
+  return '';
+}
+
 /** 一条视频 → 客户端要的结构（推荐流和「选集」列表共用同一套字段） */
 function feedItemOut(it, user) {
   const a = it.authorId ? findUser(it.authorId) : null;
   const likedBy = Array.isArray(it.likedBy) ? it.likedBy : [];
   const iFollow = (it.authorId && myFeedFollows(user.id).includes(it.authorId)) || false;
-  return {
+  /* 分片地址：**真的有分片才下发 hls 字段**。
+     以前是 `it.hls || hlsPathFor(it.video)` —— 条目上写着 hls、实际目录早没了的话，
+     客户端会拿着一个 404 的 m3u8 去播（表现就是一直转圈，等兜底才出画面）。
+     现在：有就校验一下文件在不在，没有就干脆不下发这个字段。 */
+  const hlsPath = hlsFileExists(it.hls) || hlsPathFor(it.video);
+  const out = {
     id: it.id,
     video: it.video || '',
-    /* 分片地址（有的话客户端优先用它）：先出画面，后面边看边下 */
-    hls: it.hls || hlsPathFor(it.video),
     cover: it.cover || '',
     desc: it.desc || '',
     music: it.music || '',
@@ -497,6 +525,9 @@ function feedItemOut(it, user) {
     comments: (it.comments || []).length + (Number(it.baseComments) || 0),
     shares: Number(it.baseShares) || 0
   };
+  /* 有分片才带上 hls（客户端优先用它边下边播；没有这个字段就直接走整包 MP4） */
+  if (hlsPath) out.hls = hlsPath;
+  return out;
 }
 
 function rankFeedFor(user, items, myFriends) {
@@ -876,6 +907,85 @@ function safeImageRef(v) {
   return null;
 }
 
+/* ------------------------------------------------------------------
+   图片宽高（骨架落位用）
+   聊天里的图片气泡一开始不知道图多大，只能先画个方块，等图下完才知道
+   真实比例 —— 这一下"内容变高"就会把列表顶一下（用户反馈的"聊天页自己
+   上下移"）。发送端现在会把宽高随消息带上；老消息这里从文件头读一次补齐，
+   结果按路径缓存，之后每个请求都是查表。
+   只认 JPEG / PNG / GIF / WebP 的文件头，读前 256KB 就够，不解码整张图。
+   ------------------------------------------------------------------ */
+const IMG_DIM_CACHE = new Map();
+
+/** 从图片字节的前一段里读出宽高（不解码整图） */
+function readImageSize(buf) {
+  try {
+    if (!buf || buf.length < 16) return null;
+    /* PNG：89 50 4E 47，IHDR 里是宽高（大端 32 位） */
+    if (buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) {
+      return { w: buf.readUInt32BE(16), h: buf.readUInt32BE(20) };
+    }
+    /* GIF：GIF87a / GIF89a，逻辑屏幕宽高（小端 16 位） */
+    if (buf[0] === 0x47 && buf[1] === 0x49 && buf[2] === 0x46) {
+      return { w: buf.readUInt16LE(6), h: buf.readUInt16LE(8) };
+    }
+    /* JPEG：FF D8 开头，扫段找 SOF（C0~CF，排除 C4/C8/CC） */
+    if (buf[0] === 0xff && buf[1] === 0xd8) {
+      let i = 2;
+      while (i + 9 < buf.length) {
+        if (buf[i] !== 0xff) { i += 1; continue; }
+        const marker = buf[i + 1];
+        if (marker === 0xff) { i += 1; continue; }
+        if (marker === 0xd8 || marker === 0x01 || (marker >= 0xd0 && marker <= 0xd7)) { i += 2; continue; }
+        const len = buf.readUInt16BE(i + 2);
+        if (len < 2) break;
+        if (marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc) {
+          return { w: buf.readUInt16BE(i + 7), h: buf.readUInt16BE(i + 5) };
+        }
+        i += 2 + len;
+      }
+    }
+    /* WebP：RIFF....WEBP，三种子格式 */
+    if (buf.length > 30 && buf.toString('ascii', 0, 4) === 'RIFF' && buf.toString('ascii', 8, 12) === 'WEBP') {
+      const fmt = buf.toString('ascii', 12, 16);
+      if (fmt === 'VP8 ') return { w: buf.readUInt16LE(26) & 0x3fff, h: buf.readUInt16LE(28) & 0x3fff };
+      if (fmt === 'VP8L') { const b = buf.readUInt32LE(21); return { w: (b & 0x3fff) + 1, h: ((b >> 14) & 0x3fff) + 1 }; }
+      if (fmt === 'VP8X') return { w: buf.readUIntLE(24, 3) + 1, h: buf.readUIntLE(27, 3) + 1 };
+    }
+  } catch (err) { /* 头不完整就当作读不出 */ }
+  return null;
+}
+
+/** 一个图片引用（/uploads/xxx）的像素宽高；读不出返回 null（结果按路径缓存） */
+function imageDimsOf(ref) {
+  const s = String(ref == null ? '' : ref).trim();
+  if (!s) return null;
+  const hit = IMG_DIM_CACHE.get(s);
+  if (hit !== undefined) return hit;
+  let out = null;
+  const m = /^\/uploads\/([A-Za-z0-9._-]+)$/.exec(s);
+  if (m) {
+    const name = m[1];
+    try {
+      /* 上传文件是加密落盘的（LUC1）。CTR 流加密可以只解前一段，
+         所以这里只读文件头那 256KB，不把整张图读进内存。 */
+      const fd = fs.openSync(path.join(UPLOAD_DIR, name), 'r');
+      let head;
+      try {
+        const size = fs.fstatSync(fd).size;
+        head = Buffer.alloc(Math.max(20, Math.min(20 + 262144, size)));
+        const n = fs.readSync(fd, head, 0, head.length, 0);
+        head = head.subarray(0, n);
+      } finally { try { fs.closeSync(fd); } catch (err) { } }
+      out = readImageSize(openUploadBuffer(name, head));
+      if (out && (!(out.w > 1) || !(out.h > 1) || out.w > 30000 || out.h > 30000)) out = null;
+    } catch (err) { out = null; }
+  }
+  if (IMG_DIM_CACHE.size > 30000) IMG_DIM_CACHE.clear();
+  IMG_DIM_CACHE.set(s, out);
+  return out;
+}
+
 /** 银行卡对外只回后四位，完整卡号不出服务器 */
 function maskBankCard(c) {
   const n = String((c && c.number) || '');
@@ -913,6 +1023,8 @@ function publicUser(u) {
     realName: realNameOf(u),
     avatar: u.avatar || '',
     bio: u.bio || '',
+    /* 拍一拍后缀：自己资料页要回显（微信：我 → 个人资料 → 拍一拍） */
+    patText: u.patText || '',
     moodText: moodAlive(u) ? (u.moodText || '') : '',
     moodIcon: moodAlive(u) ? (u.moodIcon || '') : '',
     moodColor: moodAlive(u) ? (u.moodColor || '') : '',
@@ -932,6 +1044,11 @@ function publicUser(u) {
     alipayQr: u.alipayQr || '',          // 支付宝收款码图片（谁都能看，方便付款）
     bot: !!u.bot,
     botName: u.bot ? u.nickname : '',
+    /* 这个人的 App 里要不要多出「管理」入口（App 内部管理音乐/图标用） */
+    ops: !!u.ops,
+    /* 状态收到的赞（谁赞的 + 赞了几个）——「朋友的状态」那一页要显示 */
+    moodLikes: Array.isArray(u.moodLikes) ? u.moodLikes.slice(-80) : [],
+    moodLikeCount: Array.isArray(u.moodLikes) ? u.moodLikes.length : 0,
     ...memberFields(u.id)                 // 会员徽章 / 会员配色
   };
 }
@@ -995,7 +1112,12 @@ function friendSetCached(viewerId) {
 function memberProfile(u, viewerId) {
   if (!u) return null;
   if (viewerId && u.id === viewerId) return publicUser(u);
-  return friendSetCached(viewerId).has(u.id) ? publicUser(u) : publicUserBrief(u, viewerId);
+  if (friendSetCached(viewerId).has(u.id)) {
+    /* 好友的名片要带「Ta 的朋友圈可见范围」（3d / 6m / all）：名片上那行
+       「朋友仅展示最近三天的朋友圈」和朋友圈列表页底部那句用的是同一个值。 */
+    return Object.assign(publicUser(u), { momentsRange: String(userPrivacy(u).momentsRange || 'all') });
+  }
+  return publicUserBrief(u, viewerId);
 }
 
 /* ------------------------------------------------------- 性别（名片图标用）
@@ -1154,6 +1276,10 @@ function ensureGenders() {
 const db = {
   users: [], friendships: [], chats: [], reads: {},
   moments: [], momentViews: {}, announcements: [], secret: '',
+  /* 朋友圈「消息列表」：谁赞了/评论了我（微信朋友圈右上角那个小信封） */
+  momentNotices: [], momentNoticeSeen: {},
+  /* 聊天输入栏：快捷按钮 + 「＋」按钮的外观（跟 plusPanel 存同一个文件） */
+  quickBar: [], plusButton: {},
   branding: null, faceRooms: [],
   transfers: [],
   security: { logins: [], events: [] }
@@ -1187,14 +1313,69 @@ const PLUS_ICONS = ['photo', 'camera', 'video', 'location', 'redpacket', 'gift',
 const PLUS_ACTIONS = ['photo', 'camera', 'videocall', 'location', 'redpacket', 'gift', 'transfer', 'voice',
   'favorite', 'card', 'file', 'music', 'coupon', 'none'];
 
+/* ---------------- 聊天输入栏那排「快捷按钮」+ 那个「＋」按钮的外观 ----------------
+   用户要求：快捷按钮要能**管理**（增删、排序、改名、开关），
+   输入框右边那个「＋」还能换**颜色 / 大小 / 图片**。
+   都存在同一个 pluspanel.json 里（items = ＋面板，quick = 快捷按钮，plus = ＋按钮外观）。 */
+const DEFAULT_QUICK_ITEMS = [
+  { id: 'q01', label: '图片', action: 'photo', enabled: true },
+  { id: 'q02', label: '拍摄', action: 'camera', enabled: true },
+  { id: 'q03', label: '位置', action: 'location', enabled: true },
+  { id: 'q04', label: '文件', action: 'file', enabled: true },
+  { id: 'q05', label: '转账', action: 'transfer', enabled: true },
+  { id: 'q06', label: '红包', action: 'redpacket', enabled: true },
+  { id: 'q07', label: '名片', action: 'card', enabled: true }
+];
+const QUICK_ACTIONS = ['photo', 'camera', 'location', 'file', 'transfer', 'redpacket', 'card',
+  'gift', 'music', 'videocall', 'voice', 'favorite'];
+const DEFAULT_PLUS_BUTTON = { color: '', size: 0, image: '' };
+
 /* ------------------------------------------------- 发现页（后台可以自由增删） ----------------
    group 相同的一串排在一张卡片里，group 变了就换一张卡（和微信发现页一样有分块）。
 action 决定点了去哪：moments=朋友圈 / news=星联世界 / soon=占位页（显示「还没做」）。 */
 const DISCOVER_FILE = 'discover.json';
-const DISCOVER_ACTIONS = ['moments', 'news', 'nearby', 'shake', 'live', 'games', 'channels', 'soon'];
+const DISCOVER_ACTIONS = ['moments', 'news', 'nearby', 'shake', 'live', 'games', 'channels', 'miniapps', 'music', 'soon'];
 /* ---------------------------------------------- 我页（后台也能自由增删） */
 const ME_PAGE_FILE = 'me-page.json';
-const ME_ACTIONS = ['service', 'favorites', 'moments', 'works', 'stickers', 'settings', 'soon'];
+const ME_ACTIONS = ['service', 'favorites', 'moments', 'works', 'stickers', 'settings', 'cards', 'channels', 'shop', 'plugins', 'soon'];
+
+/* ---------------------------------------------- 聊天壁纸（后台「聊天壁纸」页） */
+/* App 里「聊天背景」那一页的内容全在这儿配：
+     · presets：那 6 个格子，每项 { path, name }。path 可以是后台上传得到的
+       /uploads/xxx.jpg，也可以直接填外链 —— 换图不用出新包。
+     · default：**默认壁纸**。没自己设过背景的人统一用它（空 = 用系统底色）。
+     · version：每保存一次 +1，App 拿它做缓存失效，换了图不用清缓存。
+   老版本 App 不认这个接口，还是用它自己内置的 6 张，不受任何影响。 */
+const CHAT_BG_FILE = 'chat-bg.json';
+const CHAT_BG_PRESETS_MAX = 12;
+const DEFAULT_CHAT_BG = {
+  version: 1,
+  default: '',
+  presets: [
+    { path: '/bg/bw1.jpg', name: '浅灰渐变' },
+    { path: '/bg/bw2.jpg', name: '深灰渐变' },
+    { path: '/bg/bw3.jpg', name: '细斜纹' },
+    { path: '/bg/bw4.jpg', name: '细网格' },
+    { path: '/bg/bw5.jpg', name: '磨砂噪点' },
+    { path: '/bg/bw6.jpg', name: '同心圆' }
+  ]
+};
+function normalizeChatBg(o) {
+  const src = (o && typeof o === 'object') ? o : {};
+  const list = Array.isArray(src.presets) ? src.presets : DEFAULT_CHAT_BG.presets;
+  const presets = list.slice(0, CHAT_BG_PRESETS_MAX).map((it, i) => {
+    if (typeof it === 'string') return { path: it, name: '壁纸 ' + (i + 1) };
+    const p = String((it && it.path) || '').slice(0, 500);
+    let nm = String((it && it.name) || '').slice(0, 24);
+    if (!nm) nm = '壁纸 ' + (i + 1);
+    return { path: p, name: nm };
+  }).filter((it) => it.path);
+  return {
+    version: Math.max(1, Number(src.version) || DEFAULT_CHAT_BG.version),
+    default: String(src.default || '').slice(0, 500),
+    presets: presets.length ? presets : DEFAULT_CHAT_BG.presets
+  };
+}
 const DEFAULT_ME_PAGE = [
   { id: 'm01', label: '服务', icon: 'i.wallet', color: '#59C47E', action: 'service', group: 1, enabled: true },
   { id: 'm02', label: '收藏', icon: 'i.star', color: '#4489EA', action: 'favorites', group: 2, enabled: true },
@@ -2098,6 +2279,34 @@ function normalizePlusItems(list) {
     };
   });
 }
+
+/* 快捷按钮（输入框上面那一排）的规范化 */
+function normalizeQuickItems(list) {
+  const src = Array.isArray(list) && list.length ? list : DEFAULT_QUICK_ITEMS;
+  return src.slice(0, 12).map((it, i) => {
+    const item = it && typeof it === 'object' ? it : {};
+    const label = String(item.label == null ? '' : item.label).trim().slice(0, 8) || ('按钮' + (i + 1));
+    const action = QUICK_ACTIONS.indexOf(item.action) >= 0 ? item.action : 'none';
+    return {
+      id: String(item.id || '').slice(0, 24) || ('q' + (i + 1)),
+      label: label,
+      action: action,
+      enabled: item.enabled === undefined ? true : !!item.enabled
+    };
+  });
+}
+
+/* 「＋」按钮的外观：颜色（#RRGGBB，空 = 跟主题）/ 大小（0 = 默认）/ 图片（自己上传的一张图） */
+function normalizePlusButton(cfg) {
+  const c = cfg && typeof cfg === 'object' ? cfg : {};
+  const raw = String(c.color || '').trim();
+  const img = String(c.image || '').trim().slice(0, 500);
+  return {
+    color: /^#?[0-9a-fA-F]{6}$/.test(raw) ? (raw[0] === '#' ? raw : ('#' + raw)) : '',
+    size: Math.max(0, Math.min(44, Number(c.size) || 0)),
+    image: (/^https?:\/\//i.test(img) || /^\/uploads\/[A-Za-z0-9._-]+$/.test(img)) ? img : ''
+  };
+}
 const DEFAULT_BRANDING = {
   appName: 'CHRIS Chat',
   logo: '',
@@ -2165,6 +2374,7 @@ function loadStore() {
   const delivered = readJson(path.join(DATA_DIR, 'delivered.json'), { delivered: {} });
   const moments = readJson(path.join(DATA_DIR, 'moments.json'), { moments: [] });
   const momentViews = readJson(path.join(DATA_DIR, 'moment-views.json'), { views: {} });
+  const momentNotices = readJson(path.join(DATA_DIR, 'moment-notices.json'), { items: [], seen: {} });
   const announcements = readJson(path.join(DATA_DIR, 'announcements.json'), { announcements: [] });
   const branding = readJson(path.join(DATA_DIR, BRANDING_FILE), { branding: null });
   const plusPanel = readJson(path.join(DATA_DIR, PLUSPANEL_FILE), { items: null });
@@ -2196,6 +2406,8 @@ function loadStore() {
   db.cleared = reads.cleared && typeof reads.cleared === 'object' ? reads.cleared : {};
   db.moments = Array.isArray(moments.moments) ? moments.moments : [];
   db.momentViews = momentViews.views && typeof momentViews.views === 'object' ? momentViews.views : {};
+  db.momentNotices = Array.isArray(momentNotices.items) ? momentNotices.items : [];
+  db.momentNoticeSeen = momentNotices.seen && typeof momentNotices.seen === 'object' ? momentNotices.seen : {};
   db.announcements = Array.isArray(announcements.announcements) ? announcements.announcements : [];
   db.faceRooms = (Array.isArray(faceRooms.rooms) ? faceRooms.rooms : []).filter((r) => r && r.code && r.chatId);
   db.transfers = Array.isArray(transfers.transfers) ? transfers.transfers : [];
@@ -2217,11 +2429,14 @@ function loadStore() {
     chats: 'auto', contacts: 'auto', discover: 'auto', me: 'off', newFriends: 'auto', momentsRow: 'auto'
   }, (badgeCfg && badgeCfg.badges) || {});
   db.plusPanel = normalizePlusItems(plusPanel.items);
+  db.quickBar = normalizeQuickItems(plusPanel.quick);
+  db.plusButton = normalizePlusButton(plusPanel.plus);
   db.gifts = normalizeGifts(gifts.gifts);
   db.stickers = normalizeStickers(stickers.stickers);
   db.statuses = normalizeStatus(statuses.categories);
   db.discover = normalizeDiscover(discover.items);
   db.mePage = normalizeMePage(mePage.items);
+  db.chatBg = normalizeChatBg(readJson(path.join(DATA_DIR, CHAT_BG_FILE), null));
   db.service = normalizeService(service.service);
   db.wallet = normalizeWallet(wallet.wallet);
   db.balancePage = normalizeBalancePage(balancePage.page);
@@ -2286,8 +2501,53 @@ setInterval(() => {
     if (deliveredDirty) { deliveredDirty = false; saveDelivered(); }
   } catch (err) { /* 忽略 */ }
 }, 1500).unref();
+
+/* CHRIS_BURN_TIMER_V1 阅后即焚：**服务端自己**每 15 秒扫一遍
+   光靠客户端来扫是不够的 —— 两边都退到后台、或者把聊天页关掉，就谁都不扫了，
+   到点的消息会一直挂在屏幕上（用户反复报的「阅后即焚消息依旧在」就是这个）。
+   这里自己扫：谁的已读游标过了那条就算「已看过」，看过满 1 分钟销毁；
+   兜底是消息本身超过 5 分钟也销毁。销毁后推给双方，界面立刻收走。 */
+function burnSweepAll() {
+  const nowTs = Date.now();
+  const HOLD = 60000;                                   // 看过 1 分钟后焚毁
+  (db.chats || []).forEach((chat) => {
+    if (!chat || !chat.burn) return;
+    const list = loadMessages(chat.id);
+    if (!list || !list.length) return;
+    const gone = [];
+    list.forEach((m) => {
+      if (!m || !m.burn) return;
+      /* 「有人看过了」：客户端上报的 seenAt，或者谁的已读游标已经过了这一条 */
+      if (!m.seenAt) {
+        const read = (chat.memberIds || []).some((id) => id !== m.senderId
+          && ((db.reads[id] && db.reads[id][chat.id]) || 0) >= (m.seq || 0));
+        if (read) m.seenAt = nowTs;
+      }
+      const born = Date.parse(m.createdAt) || 0;
+      if ((m.seenAt && nowTs - m.seenAt >= HOLD) || (born && nowTs - born > 5 * 60 * 1000)) {
+        gone.push(m.id);
+      }
+    });
+    if (!gone.length) return;
+    const goneSet = {};
+    gone.forEach((id) => { goneSet[id] = 1; });
+    /* ⚠ 必须**原地删**（loadMessages 返回的就是缓存里那个数组）：
+       filter 出新数组写文件的话缓存里还在，每 15 秒又会「销毁」同一批 —— 界面就一直跳。 */
+    for (let i = list.length - 1; i >= 0; i--) {
+      if (goneSet[list[i].id]) list.splice(i, 1);
+    }
+    saveMessagesFile(chat.id, list);
+    (chat.memberIds || []).forEach((id) => sendTo(id, { type: 'burn', chatId: chat.id, ids: gone }));
+    try { callTrace('burn-timer ' + chat.id + ' 销毁=' + gone.length); } catch (e) { }
+  });
+}
+setInterval(() => {
+  try { burnSweepAll(); } catch (err) { /* 绝不因为这一下把服务弄挂 */ }
+}, 15000).unref();
 const saveMoments = () => writeJson(path.join(DATA_DIR, 'moments.json'), { moments: db.moments });
 const saveMomentViews = () => writeJson(path.join(DATA_DIR, 'moment-views.json'), { views: db.momentViews });
+const saveMomentNotices = () => writeJson(path.join(DATA_DIR, 'moment-notices.json'),
+  { items: db.momentNotices.slice(-2000), seen: db.momentNoticeSeen });
 const saveAnnouncements = () => writeJson(path.join(DATA_DIR, 'announcements.json'), { announcements: db.announcements });
 const saveBranding = () => writeJson(path.join(DATA_DIR, BRANDING_FILE), { branding: db.branding });
 const saveBadges = () => writeJson(path.join(DATA_DIR, 'badges.json'), { badges: db.badges });
@@ -2297,7 +2557,7 @@ const saveBadges = () => writeJson(path.join(DATA_DIR, 'badges.json'), { badges:
    只写「域名:端口」或「域名」；空行 / 写错的格式自动丢掉。
    顺序 = 优先级：第一行是主入口，后面是备用。 */
 const ENDPOINTS_FILE = path.join(DATA_DIR, 'endpoints.json');
-const DEFAULT_ENDPOINTS = ['aa.x8iu.com:443', 'aa.x8iu.com:5443', '206.187.208.79:5443'];
+const DEFAULT_ENDPOINTS = ['43.242.194.89:5443', '43.242.194.89', 'aa.x8iu.com:5443'];
 function normalizeEndpoint(v) {
   let s = String(v == null ? '' : v).trim();
   if (!s) return '';
@@ -2312,12 +2572,30 @@ function serverEndpoints() {
   const list = raw.map(normalizeEndpoint).filter(Boolean);
   return list.length ? list.slice(0, 6) : DEFAULT_ENDPOINTS.slice();
 }
-const savePlusPanel = () => writeJson(path.join(DATA_DIR, PLUSPANEL_FILE), { items: db.plusPanel });
+const savePlusPanel = () => writeJson(path.join(DATA_DIR, PLUSPANEL_FILE),
+  { items: db.plusPanel, quick: db.quickBar, plus: db.plusButton });
 const saveGifts = () => writeJson(path.join(DATA_DIR, GIFTS_FILE), { gifts: db.gifts });
 const saveStickers = () => writeJson(path.join(DATA_DIR, STICKER_FILE), { stickers: db.stickers });
 const saveStatuses = () => writeJson(path.join(DATA_DIR, STATUS_FILE), { categories: db.statuses });
+/** 后台发公告时顺手用系统通知号发一条（开关在「系统通知」里：notice） */
+function noticeAll(text, title) {
+  try {
+    const cfg = readSysNoticeCfg();
+    if (!cfg.enabled || cfg.types.notice === 0) return 0;
+    let n = 0;
+    db.users.forEach((u) => {
+      if (!u || u.bot) return;
+      sysNotice(u.id, text, title || '公告', 'notice');
+      n++;
+    });
+    callTrace('公告已用系统号发给 ' + n + ' 人');
+    return n;
+  } catch (e) { return 0; }
+}
+
 const saveDiscover = () => writeJson(path.join(DATA_DIR, DISCOVER_FILE), { items: db.discover });
 const saveMePage = () => writeJson(path.join(DATA_DIR, ME_PAGE_FILE), { items: db.mePage });
+const saveChatBg = () => writeJson(path.join(DATA_DIR, CHAT_BG_FILE), db.chatBg);
 const saveService = () => writeJson(path.join(DATA_DIR, SERVICE_FILE), { service: db.service });
 const saveWallet = () => writeJson(path.join(DATA_DIR, WALLET_FILE), { wallet: db.wallet });
 const saveBalancePage = () => writeJson(path.join(DATA_DIR, BALANCE_FILE), { page: db.balancePage });
@@ -2658,32 +2936,131 @@ const TEEN_PATHS = [
   { p: 'feed', k: 'feed', name: '视频号' },
   { p: 'live', k: 'live', name: '直播' },
   { p: 'games', k: 'games', name: '游戏' },
-  { p: 'nearby', k: 'nearby', name: '附近的人' },
+  { p: 'nearby', k: 'nearby', name: '附近' },
   { p: 'shake', k: 'shake', name: '摇一摇' },
+  { p: 'bottle', k: 'bottle', name: '漂流瓶' },
   { p: 'search', k: 'search', name: '搜一搜' },
+  /* 2026-10-13 扩成微信那一整套：能单独开关的项目多了这些 */
+  { p: 'music', k: 'music', name: '听一听' },
+  { p: 'miniapps', k: 'miniapps', name: '小程序' },
+  { p: 'shop', k: 'shop', name: '小店与卡包' },
+  { p: 'mall', k: 'shop', name: '商城' },
+  { p: 'moments', k: 'moments', name: '朋友圈' },
+  { p: 'oa', k: 'oa', name: '公众号' },
+  { p: 'scan', k: 'scan', name: '扫一扫' },
   { p: 'pay', k: 'pay', name: '支付' },
-  { p: 'transfer', k: 'pay', name: '转账' },
+  { p: 'transfers', k: 'pay', name: '转账' },
+  { p: 'redpacket', k: 'pay', name: '红包' },
+  { p: 'redpackets', k: 'pay', name: '红包' },
+  { p: 'gifts', k: 'pay', name: '礼物' },
   { p: 'bills', k: 'pay', name: '零钱账单' },
   { p: 'wallet', k: 'pay', name: '钱包' }
 ];
-const DEFAULT_TEEN_SCOPES = { feed: 0, live: 0, games: 0, nearby: 0, shake: 0, search: 0, pay: 0 };
+/* 默认就是微信那套「仅聊天」：视频号/直播/游戏/附近/摇一摇/漂流瓶/搜一搜/听一听/
+   小程序/购物/朋友圈 全关；公众号和扫一扫留着（加好友、看通知要用）；支付默认关。 */
+const DEFAULT_TEEN_SCOPES = {
+  feed: 0, live: 0, games: 0, nearby: 0, shake: 0, bottle: 0, search: 0,
+  music: 0, miniapps: 0, shop: 0, moments: 0,
+  oa: 1, scan: 1, pay: 0
+};
+/* 使用时长 / 宵禁 / 单日支付上限（微信青少年模式的「时间管理」+ 支付限额） */
+const DEFAULT_TEEN_LIMITS = {
+  dailyMinutes: 40,        // 每天能用多少分钟；0 = 不限
+  /* 宵禁默认**关**：老版本 App 还没有这一页的设置入口，默认开着会在晚上
+     把已经开了未成年人模式的账号突然锁住（界面又找不到开关）。
+     新版本装上去之后，家长在页面里打开就行。 */
+  curfewOn: 0,
+  curfewStart: '22:00',
+  curfewEnd: '06:00',
+  payLimit: 0              // 单日能花多少钱（元）；0 = 一分都不能花；-1 = 不限
+};
+
+/** 今天的日期串（按北京时间），用来做「每天重算」的键 */
+function todayKey() {
+  const d = new Date(Date.now() + 8 * 3600 * 1000);
+  return d.toISOString().slice(0, 10);
+}
+
+/** 取（必要时重置）今天的用量：minutes = 已用分钟，pay = 已花金额 */
+function teenUsageOf(user) {
+  const t = (user && user.teen) || {};
+  const key = todayKey();
+  const u = t.usage && t.usage.date === key ? t.usage : { date: key, minutes: 0, pay: 0 };
+  return { minutes: Math.max(0, Number(u.minutes) || 0), pay: Math.max(0, Number(u.pay) || 0), date: key };
+}
+
+/** 把「现在到点的分钟数」写成 HH:mm → 分钟；写错就返回 null */
+function hhmm(v) {
+  const m = /^(\d{1,2}):(\d{2})$/.exec(String(v || '').trim());
+  if (!m) return null;
+  const h = Number(m[1]), mi = Number(m[2]);
+  if (h > 23 || mi > 59) return null;
+  return h * 60 + mi;
+}
+
+/** 现在是不是在宵禁时段里（跨零点的那段也认） */
+function inCurfew(limits) {
+  if (!limits || !limits.curfewOn) return false;
+  const a = hhmm(limits.curfewStart), b = hhmm(limits.curfewEnd);
+  if (a === null || b === null || a === b) return false;
+  const d = new Date(Date.now() + 8 * 3600 * 1000);
+  const nowM = d.getUTCHours() * 60 + d.getUTCMinutes();
+  return a < b ? (nowM >= a && nowM < b) : (nowM >= a || nowM < b);   // a>b = 跨零点
+}
 
 function teenCfg(user) {
   const t = (user && user.teen) || {};
+  const limits = Object.assign({}, DEFAULT_TEEN_LIMITS, t.limits || {});
+  const usage = teenUsageOf(user);
+  const unlockedUntil = Number(t.unlockUntil) || 0;
+  const unlocked = unlockedUntil > Date.now();
+  /* 锁住的两种原因：今天时间用完 / 正在宵禁。临时解锁（监护人输密码）期间不算锁。 */
+  let locked = false, lockReason = '';
+  if (t.enabled && !unlocked) {
+    if (limits.dailyMinutes > 0 && usage.minutes >= limits.dailyMinutes) {
+      locked = true; lockReason = '今天的 ' + limits.dailyMinutes + ' 分钟已经用完了';
+    } else if (inCurfew(limits)) {
+      locked = true; lockReason = '现在是宵禁时间（' + limits.curfewStart + ' - ' + limits.curfewEnd + '）';
+    }
+  }
   return {
     enabled: !!t.enabled,
     hasPin: !!(t.salt && t.hash),
     scopes: Object.assign({}, DEFAULT_TEEN_SCOPES, t.scopes || {}),
     guardianPhone: t.guardianPhoneMask || '',
-    setAt: t.setAt || ''
+    setAt: t.setAt || '',
+    limits: limits,
+    usage: usage,
+    left: limits.dailyMinutes > 0 ? Math.max(0, limits.dailyMinutes - usage.minutes) : -1,
+    locked: locked,
+    lockReason: lockReason,
+    unlockUntil: unlocked ? unlockedUntil : 0
   };
 }
-/** 青少年模式下这个接口能不能用（不能用就返回一句人话） */
-function teenBlocked(user, parts) {
+/** 未成年人模式下这个接口能不能用（不能用就返回一句人话） */
+function teenBlocked(user, parts, method) {
   const cfg = teenCfg(user);
   if (!cfg.enabled) return '';
+  /* 时间用完 / 宵禁：发消息和花钱这两类直接挡住（界面那边也会整页锁住）。
+     只挡这两类，不然连会话列表都刷不出来，会显得像"App 坏了"。 */
+  if (cfg.locked) {
+    const isSend = (parts[0] === 'chats' && parts[2] === 'messages' && method === 'POST');
+    const isPay = ['transfers', 'redpacket', 'redpackets', 'pay', 'gifts'].indexOf(parts[0]) >= 0;
+    if (isSend || isPay) {
+      return '未成年人模式：' + cfg.lockReason + '，需要监护人输入独立密码解锁';
+    }
+  }
+  /* 单日支付额度：到顶了就不让花钱了（-1 = 不限） */
+  if (cfg.limits.payLimit >= 0 && cfg.usage.pay >= cfg.limits.payLimit) {
+    const isPay2 = ['transfers', 'redpacket', 'redpackets', 'pay', 'gifts'].indexOf(parts[0]) >= 0;
+    if (isPay2) {
+      return cfg.limits.payLimit > 0
+        ? ('未成年人模式：今天的支付额度（' + cfg.limits.payLimit + ' 元）已经用完')
+        : '未成年人模式：支付已被家长关闭';
+    }
+  }
   const hit = TEEN_PATHS.find((x) => x.p === parts[0] && !cfg.scopes[x.k]);
-  return hit ? ('青少年模式下「' + hit.name + '」被限制了，需要家长用密码关闭青少年模式') : '';
+  return hit ? ('未成年人模式下「' + hit.name + '」已按家长设置限制，需要独立密码才能使用') : '';
 }
 
 /* --------------------------------------------------- 关键词自动回复（微信后台那套「自动回复」）
@@ -3252,6 +3629,13 @@ function expireRedPackets() {
 function describeDevice(ua) {
   const s = String(ua || '');
   if (!s) return '未知设备';
+  /* 自家 App 的 UA：别把它说成「浏览器 · 未知系统」（型号客户端会单独用请求头报） */
+  if (/CHRISChat|XingYan|Luchat|xingyan/i.test(s)) {
+    const osx = /iPhone|iPad|iPod/.test(s) ? 'iOS'
+      : (/HarmonyOS|OpenHarmony/.test(s) ? 'HarmonyOS'
+      : (/Android/.test(s) ? 'Android' : ''));
+    return '星言 App' + (osx ? ' · ' + osx : '');
+  }
   let os = '未知系统';
   if (/iPhone|iPad|iPod/.test(s)) os = 'iOS';
   else if (/Android/.test(s)) os = 'Android';
@@ -3266,6 +3650,35 @@ function describeDevice(ua) {
   else if (/Firefox\//.test(s)) br = 'Firefox';
   else if (/Safari\//.test(s)) br = 'Safari';
   return br + ' · ' + os;
+}
+
+/* 时间戳统一成「毫秒数字」：以前直接把 ISO 字符串发给客户端，客户端按数字解，
+   整个 /api/devices 响应就解不出来了（用户看到的就是「还没有设备记录」）。 */
+function msOf(v) {
+  if (typeof v === 'number' && isFinite(v)) return v;
+  const t = Date.parse(String(v || ''));
+  return isFinite(t) ? t : 0;
+}
+
+/* 机器号 → 机型名（iPhone17,1 → iPhone 16 Pro）：老记录里存的是机器号，
+   登录设备管理那一页要显示的是机型名。 */
+const DEVICE_MODEL_NAMES = {
+  'iPhone14,6': 'iPhone SE3', 'iPhone14,7': 'iPhone 14', 'iPhone14,8': 'iPhone 14 Plus',
+  'iPhone15,2': 'iPhone 14 Pro', 'iPhone15,3': 'iPhone 14 Pro Max',
+  'iPhone15,4': 'iPhone 15', 'iPhone15,5': 'iPhone 15 Plus',
+  'iPhone16,1': 'iPhone 15 Pro', 'iPhone16,2': 'iPhone 15 Pro Max',
+  'iPhone17,1': 'iPhone 16 Pro', 'iPhone17,2': 'iPhone 16 Pro Max',
+  'iPhone17,3': 'iPhone 16', 'iPhone17,4': 'iPhone 16 Plus', 'iPhone17,5': 'iPhone 16e',
+  'iPhone18,1': 'iPhone 17 Pro', 'iPhone18,2': 'iPhone 17 Pro Max',
+  'iPhone18,3': 'iPhone 17', 'iPhone18,4': 'iPhone Air',
+  'iPad14,8': 'iPad Air 11', 'iPad14,9': 'iPad Air 13', 'iPad16,5': 'iPad Pro 13'
+};
+function friendlyModelName(m) {
+  const x = String(m == null ? '' : m).trim();
+  if (!x) return '';
+  if (DEVICE_MODEL_NAMES[x]) return DEVICE_MODEL_NAMES[x];
+  if (/^(iPhone|iPad)\d+,\d+$/.test(x)) return x.toLowerCase().indexOf('ipad') === 0 ? 'iPad' : 'iPhone';
+  return x;
 }
 
 function clientInfo(req) {
@@ -3284,7 +3697,13 @@ function clientInfo(req) {
      UA 是几百万台 iPhone 共用的，同 UA 不算同一台设备。 */
   const deviceId = String((req && req.headers && req.headers['x-device-id']) || '')
     .replace(/[^0-9A-Za-z\-]/g, '').slice(0, 64);
-  return { ip, device: describeDevice(ua), deviceId };
+  /* App 顺带把设备名 / 型号 / 系统报上来（「登录设备管理」那一页要显示
+     「张三的 iPhone · iOS 19.1」这种）。老客户端不带这几个头，就退回按 UA 猜。 */
+  const headOf = (k) => String((req && req.headers && req.headers[k]) || '').slice(0, 60);
+  const model = headOf('x-device-model');
+  const osName = headOf('x-device-os');
+  const devName = headOf('x-device-name');
+  return { ip, device: describeDevice(ua), deviceId, model, os: osName, name: devName };
 }
 
 /** 记一条登录 / 安全事件 */
@@ -4089,7 +4508,10 @@ const DEFAULT_PRIVACY = {
   addByWx: true,           // 可以通过微信号找到我
   addByPhone: true,        // 可以通过手机号找到我
   addByGroup: true,        // 可以通过群聊加我
-  addByQR: true            // 可以通过二维码加我
+  addByQR: true,           // 可以通过二维码加我
+  /* 朋友圈可见范围（微信「隐私 → 朋友圈可见范围」那一行）：
+     '3d' 最近三天 / '6m' 最近半年 / 'all' 全部。只对**别人**生效 —— 自己永远看得见自己的全部。 */
+  momentsRange: 'all'
 };
 const DEFAULT_NOTIFY = {
   on: true,                // 新消息通知
@@ -4652,10 +5074,57 @@ function payPasswordGate(req, res, user, body, scene) {
   return false;
 }
 
-function signToken(userId) {
+/* 端类型：手机 / 平板 / 电脑（客户端带 X-Device-Kind 头）。
+   老客户端不带这个头 —— 一律当成手机，这样它照样会被新手机的登录顶下线。 */
+function deviceKindOf(req) {
+  const k = String((req && req.headers && req.headers['x-device-kind']) || '').toLowerCase();
+  return (k === 'tablet' || k === 'desktop') ? k : 'phone';
+}
+
+/* 手机单点登录（A 方案：手机单点，平板 / 电脑可并存）：
+   同一个账号在新手机上登录 →
+     · phoneSession +1：旧手机令牌里的 ps 就对不上，之后每个请求都是 401 other_login
+     · 给还连着长连接的旧手机推一张 kick 卡片（App 弹「你的账号在另一台设备上登录」）
+   平板 / 电脑（kind = tablet / desktop）不参与，互不影响。 */
+/* CHRIS_MULTIDEV_V1 多设备同时在线（用户要求「消息同步多端」）：
+   开关放在 data/ui.json 的 multiDevice（管理页「开关」里能直接点，1 = 允许多台手机同时在线）。
+   · 关（默认）：还是老规矩 —— 新手机一登，旧手机被顶下线（phoneSession +1，旧 token 立即失效）
+   · 开：不顶、也不动 phoneSession，几台手机各自保持登录，消息/已读都通过同一条实时通道同步 */
+function multiDeviceOn() {
+  try {
+    const ui = readJson(path.join(DATA_DIR, 'ui.json'), {});
+    return Number(ui.multiDevice || 0) > 0;
+  } catch (e) { return false; }
+}
+function kickOtherPhones(user, req) {
+  if (!user) return 0;
+  if (multiDeviceOn()) return 0;
+  if (deviceKindOf(req) !== 'phone') return 0;
+  const deviceId = String((req.headers && req.headers['x-device-id']) || '');
+  user.phoneSession = (Number(user.phoneSession) || 0) + 1;
+  const device = String((req.headers && req.headers['x-device-model']) || '').slice(0, 40) || '另一台手机';
+  const set = connections.get(user.id);
+  if (!set) return 0;
+  let sent = 0;
+  set.forEach((socket) => {
+    if (String(socket.__kind || 'phone') !== 'phone') return;
+    if (deviceId && String(socket.__deviceId || '') === deviceId) return;
+    try {
+      if (ws.sendText(socket, JSON.stringify({ type: 'kick', reason: 'otherLogin', device: device, at: Date.now() }))) sent += 1;
+    } catch (e) { }
+  });
+  return sent;
+}
+
+function signToken(userId, req) {
   // v = 会话版本：改密码 / 退出其他设备时 +1，旧会话立刻失效
   const u = db.users.find((x) => x.id === userId);
-  const payload = Buffer.from(JSON.stringify({ sub: userId, v: (u && u.tokenVersion) || 0, exp: Date.now() + userSessionTtlMs() })).toString('base64url');
+  /* k = 端类型；手机令牌另有 ps（账号当前的手机会话号）。
+     改这里的结构要连带看 currentUser 里的 ps 校验。 */
+  const kind = deviceKindOf(req);
+  const body = { sub: userId, v: (u && u.tokenVersion) || 0, exp: Date.now() + userSessionTtlMs(), k: kind };
+  if (kind === 'phone') body.ps = Number((u && u.phoneSession) || 0);
+  const payload = Buffer.from(JSON.stringify(body)).toString('base64url');
   const sig = crypto.createHmac('sha256', db.secret).update(payload).digest('base64url');
   return payload + '.' + sig;
 }
@@ -4742,6 +5211,70 @@ function parseCookies(req) {
   return out;
 }
 
+/** ==================== 群语音通话房间（2026-10-12） ====================
+    一个群聊一个房间：roomId = 'gr_' + chatId 的哈希后缀（稳定、重启后按需重建）
+    members: Map<userId, { at, name, avatar, muted }>
+    frames : Map<userId, { seq, buf }>   —— 这一轮各人最新的一帧（40ms 一次混音） */
+const callRooms = new Map();
+function groupRoomId(chatId) {
+  const h = crypto.createHash('sha1').update(String(chatId || '')).digest('hex').slice(0, 12);
+  return 'gr_' + h;
+}
+function findRoomOf(userId) {
+  for (const room of callRooms.values()) {
+    if (room.members.has(userId)) return room;
+  }
+  return null;
+}
+/** 给房间里的成员发一条（exceptUserId 用来"别发回给发起人"） */
+function roomSend(room, payload, exceptUserId) {
+  room.members.forEach((_, uid) => {
+    if (exceptUserId && uid === exceptUserId) return;
+    callSend(findUser(uid), payload);
+  });
+}
+/** 房间成员清单（发给客户端画头像墙） */
+function roomRoster(room) {
+  return Array.from(room.members.entries()).map(([uid, m]) => ({
+    userId: uid, name: m.name || "", avatar: m.avatar || "", muted: !!m.muted
+  }));
+}
+/** 房间混音：把这一轮每个人最新的那一帧按样本相加（16bit 单声道），再发给所有人 */
+function roomMixTick(room) {
+  try {
+    const bufs = [];
+    room.frames.forEach((f) => { if (f && f.buf && f.buf.length) bufs.push(f.buf); });
+    room.frames.clear();
+    if (!bufs.length) return;
+    /* CHRIS_MIX_STRIP_SEQ_V1：客户端新发的帧前面带 2 字节序号（1282 = 1280 + 2），
+       混音前先剥掉 —— 不然那两个字节会被当成音频样本混进去，混完的输出整段错位。
+       剥完再混，混出来的还是干净的 1280（接收端按老格式播，群里不需要逐帧 PLC）。 */
+    for (let k = 0; k < bufs.length; k++) {
+      const b = bufs[k];
+      if (b && b.length === 1282) bufs[k] = b.subarray(2);
+    }
+    const n = bufs[0].length;
+    const out = Buffer.alloc(n);
+    for (let i = 0; i + 1 < n; i += 2) {
+      let sum = 0;
+      for (let k = 0; k < bufs.length; k++) {
+        const b = bufs[k];
+        if (i + 1 < b.length) sum += b.readInt16LE(i);
+      }
+      if (sum > 32767) sum = 32767;
+      if (sum < -32768) sum = -32768;
+      out.writeInt16LE(sum, i);
+    }
+    const b64 = out.toString('base64');
+    roomSend(room, { type: 'call', action: 'group-audio', roomId: room.id, data: b64 });
+  } catch (e) { /* 混音失败就跳过这一轮，别把整个房间搞崩 */ }
+}
+function roomClose(room) {
+  if (room.timer) { clearInterval(room.timer); room.timer = null; }
+  room.frames.clear();
+  callRooms.delete(room.id);
+}
+
 function currentUser(req) {
   /* 令牌来源：优先 Authorization: Bearer（打包进 App 的版本用这个，跨域带不了 Cookie），
      其次才是网页版的会话 Cookie */
@@ -4755,6 +5288,14 @@ function currentUser(req) {
   if (!user) return null;
   // 会话版本对不上说明密码改过 / 在其他设备点了「退出其他设备」
   if ((data.v || 0) !== (user.tokenVersion || 0)) return null;
+  /* 手机单点登录：手机令牌里的 ps 必须等于账号当前的手机会话号。
+     对不上 = 这个账号已经在另一台手机上登录了 → 标个记号，
+     请求层回 401 other_login，客户端弹「已在别处登录」卡片。 */
+  if ((data.k || 'phone') === 'phone'
+      && (Number(data.ps) || 0) !== (Number(user.phoneSession) || 0)) {
+    req.__otherLogin = true;
+    return null;
+  }
   return user;
 }
 
@@ -4812,6 +5353,119 @@ function createDirectChat(aId, bId) {
   return chat;
 }
 
+/* ============================================================
+   系统通知号（照微信的「微信团队」）
+   · 账号叫「星言团队」，固定 id u_faf7c87fbaf3af67（原来那个空壳号，改名复用）
+   · sysNotice(用户id, 文本, 标题?) → 在它俩的会话里落一条消息
+   ============================================================ */
+const SYS_ACCOUNT_ID = 'u_faf7c87fbaf3af67';
+/* ---------- 官方号（星言团队 / 星联世界 …）的名字和头像 ----------
+   data/official.json：{ "team": {"name":"星言团队","avatar":"/uploads/xxx.png"} }
+   key：team = 系统通知号；其余就是机器人的 username（qqnews / ai / housekeeper / kefu） */
+const OFFICIAL_FILE = 'official.json';
+const OFFICIAL_KEYS = ['team', 'qqnews', 'ai', 'housekeeper', 'kefu'];
+function readOfficial() {
+  const j = readJson(path.join(DATA_DIR, OFFICIAL_FILE), null);
+  return (j && typeof j === 'object') ? j : {};
+}
+function saveOfficial(j) { writeJson(path.join(DATA_DIR, OFFICIAL_FILE), j || {}); }
+function officialOf(key) {
+  const o = readOfficial();
+  const v = o[String(key || '')];
+  return (v && typeof v === 'object') ? v : {};
+}
+/** 管理页要展示的官方号清单（名字 / 头像 / 说明） */
+function officialList() {
+  const out = [];
+  const sys = findUser(SYS_ACCOUNT_ID) || sysAccount();
+  if (sys) {
+    out.push({ key: 'team', name: sys.nickname || '星言团队', avatar: sys.avatar || '',
+      desc: '系统通知（登录 / 安全 / 支付 / 公告）', sys: true });
+  }
+  ['qqnews', 'ai', 'housekeeper', 'kefu'].forEach((un) => {
+    const b = findBot(un);
+    if (!b) return;
+    out.push({ key: un, name: b.nickname || un, avatar: b.avatar || '', desc: b.bio || '', sys: false });
+  });
+  return out;
+}
+/** 把覆盖值套到真账号上（会话列表 / 名片立刻变） */
+function applyOfficial(key) {
+  const ov = officialOf(key);
+  if (key === 'team') { const u = sysAccount(); return u; }
+  const b = findBot(key);
+  if (!b) return null;
+  let ch = false;
+  if (ov.name && b.nickname !== ov.name) { b.nickname = ov.name; ch = true; }
+  if (ov.avatar !== undefined && b.avatar !== (ov.avatar || '')) { b.avatar = ov.avatar || ''; ch = true; }
+  if (ch) saveUsers();
+  return b;
+}
+
+function sysAccount() {
+  const u = findUser(SYS_ACCOUNT_ID);
+  if (!u) return null;
+  const ov = officialOf('team');
+  const wantName = (ov.name && String(ov.name).trim()) || '星言团队';
+  const wantAvatar = (ov.avatar !== undefined) ? String(ov.avatar || '') : null;
+  let ch = false;
+  if (u.nickname !== wantName) { u.nickname = wantName; ch = true; }
+  if (wantAvatar !== null && u.avatar !== wantAvatar) { u.avatar = wantAvatar; ch = true; }
+  if (!u.bio) { u.bio = '账号安全 / 支付 / 公告通知'; ch = true; }
+  if (ch) saveUsers();
+  return u;
+}
+/** 给某个用户发一条系统通知（失败不影响主流程） */
+/* ---------- 通知开关（后台/管理页能管控） ----------
+   data/sysnotice.json：
+   { "enabled": 1, "types": { "login":1, "security":1, "pay":1, "notice":1 },
+     "texts": { "login": "…", "security": "…", "pay": "…", "notice": "…" } }
+   关掉某一类，那类就不发了；文案里可以用 {user} {time} {device} {amount} 占位。 */
+const SYS_NOTICE_FILE = 'sysnotice.json';
+const SYS_NOTICE_DEFAULT = {
+  enabled: 1,
+  types: { login: 1, security: 1, pay: 1, notice: 1 },
+  texts: {}
+};
+function readSysNoticeCfg() {
+  const j = readJson(path.join(DATA_DIR, SYS_NOTICE_FILE), null);
+  if (!j || typeof j !== 'object') return JSON.parse(JSON.stringify(SYS_NOTICE_DEFAULT));
+  const out = JSON.parse(JSON.stringify(SYS_NOTICE_DEFAULT));
+  out.enabled = j.enabled === 0 ? 0 : 1;
+  if (j.types && typeof j.types === 'object') {
+    Object.keys(out.types).forEach((k) => { out.types[k] = (j.types[k] === 0) ? 0 : 1; });
+  }
+  if (j.texts && typeof j.texts === 'object') {
+    Object.keys(j.texts).forEach((k) => { if (j.texts[k]) out.texts[k] = String(j.texts[k]).slice(0, 500); });
+  }
+  return out;
+}
+function saveSysNoticeCfg(j) { writeJson(path.join(DATA_DIR, SYS_NOTICE_FILE), j); }
+
+/** 给某个用户发一条系统通知（失败不影响主流程）
+    type: login / security / pay / notice —— 对应后台那几个开关 */
+function sysNotice(userId, text, title, type) {
+  try {
+    const cfg = readSysNoticeCfg();
+    if (!cfg.enabled) return;
+    const kind = String(type || 'notice');
+    if (cfg.types[kind] === 0) return;
+    const sys = sysAccount();
+    if (!sys || !userId || userId === sys.id) return;
+    if (!findUser(userId)) return;
+    const chat = directChatBetween(sys.id, userId);
+    if (!chat) return;
+    const t = String(title || '').trim();
+    const body = String(text || '');
+    if (!t && !body) return;
+    deliverMessage(sys, chat.id, 'sysnotice',
+      JSON.stringify({ title: t || '通知', text: body, at: Date.now() }), '');
+    callTrace('系统通知 → ' + userId + '：' + body.slice(0, 40));
+  } catch (e) {
+    callTrace('系统通知失败：' + (e && e.message ? e.message : e));
+  }
+}
+
 function directChatBetween(a, b) {
   // 自己和自己（名片里的「发消息」）：必须两边都是自己，否则会误匹配到别人的单聊
   if (a === b) {
@@ -4863,11 +5517,27 @@ function unreadCount(userId, chat) {
    用户要求：转账不显示在会话列表（每个人名字下面），那里只显示真正的会话消息，
    所以最后一条是转账时，往前找最近一条非转账消息来显示。 */
 function previewTextOf(m) {
+  /* 系统通知（星言团队）那种卡片：会话列表那行显示「标题 正文」，别把 JSON 漏出去 */
+  if (m && m.kind === 'sysnotice') {
+    try {
+      const o = JSON.parse(m.content || '{}');
+      const t = String(o.title || '').trim();
+      const b = String(o.text || '').trim();
+      return (t ? t + ' ' : '') + b;
+    } catch (e) { return '通知'; }
+  }
   if (!m) return '';
   if (m.recalled) return '[消息已撤回]';
   /* 会话列表里非文字消息统一显示成 [xx]（和微信一致） */
   switch (m.kind) {
-    case 'text': return String(m.content).slice(0, 40);
+    /* 引用别人的消息：微信的会话列表写着「[引用] 正文」 */
+    case 'text': return (m.quote ? '[引用] ' : '') + String(m.content).slice(0, 40);
+    /* 笔记卡片：会话列表里写「[笔记] 标题」（微信也是这样） */
+    case 'note': {
+      const first = String(m.content || '').split('\n')[0] || '';
+      const t = first.indexOf('[图]') === 0 ? '图片' : first;
+      return '[笔记] ' + t.slice(0, 30);
+    }
     case 'image': return '[图片]';
     /* 一次发多张（九宫格）：微信列表里也是「[图片]」 */
     case 'images': return '[图片]';
@@ -4900,6 +5570,10 @@ function previewTextOf(m) {
     case 'transfer': return '[转账]';
     case 'gift': return '[礼物]' + (giftNameOf(m.content) ? ' ' + giftNameOf(m.content) : '');
     case 'location': return '[位置]';
+    /* 名片：会话列表里显示「[名片] 名字」（微信就是这样） */
+    case 'card': {
+      try { const o = JSON.parse(String(m.content || '{}')); return '[名片] ' + String(o.name || ''); } catch (err) { return '[名片]'; }
+    }
     default: return '[' + m.kind + ']';
   }
 }
@@ -4964,6 +5638,11 @@ function chatSummary(chat, forUserId, lastHint) {
   /* 这条会话对面是不是公众号（客户端据此决定：点进去是「公众号页面」而不是聊天页） */
   let oaId = '';
   let oaDigest = false;
+  /* 是不是「星言团队」那条系统通知会话（客户端拿它做微信团队那套菜单） */
+  const sysTeam = (chat.type === 'direct') ? (() => {
+    const o = findUser(chat.memberIds.find((id) => id !== forUserId) || '');
+    return !!(o && o.id === SYS_ACCOUNT_ID);
+  })() : false;
   if (chat.type === 'direct') {
     const other = findUser(chat.memberIds.find((id) => id !== forUserId) || '');
     /* 「在线客服」虽然是机器人账号，但会话按时间排，不跟着上面三个机器人置顶 */
@@ -5028,7 +5707,8 @@ function chatSummary(chat, forUserId, lastHint) {
        普通会话给 null —— 老版本 App 是拿「botRank == nil」判断「这是不是机器人」的，
        以前这里一律给 9，导致点好友头像弹出「官方账号」名片（机器人才该弹这个）。 */
     botRank: botRank < 9 ? botRank : null,
-    bot: botName,
+    bot: sysTeam ? 'team' : botName,
+    sysTeam: sysTeam,
     oaId: oaId,
     oaDigest: oaDigest,
     qqLevel,
@@ -5049,6 +5729,9 @@ function chatSummary(chat, forUserId, lastHint) {
     pinned: (chat.pinnedFor || []).includes(forUserId),
     /* 消息免打扰（群屏蔽）：列表里显示小铃铛划掉，红点不弹 */
     muted: (chat.mutedFor || []).includes(forUserId),
+    burn: !!chat.burn,                                    // CHRIS_BURN_V1 阅后即焚开关
+    /* 左滑标为未读：微信里这种只点一个小红点、不给数字（进会话就消掉） */
+    flagged: (chat.flaggedUnread || []).includes(forUserId),
     ownerId: chat.ownerId || '',
     announce: chat.type === 'group' ? (chat.announce || '') : '',
     /* 群禁言：全员禁言 / 我有没有被单独禁言 */
@@ -5064,13 +5747,93 @@ function momentAudience(authorId) {
   return Array.from(new Set([authorId].concat(friendIds(authorId))));
 }
 
+/** 朋友圈图片尺寸（内存缓存，key = 图片路径，value = [w, h]）
+    —— 请求里只查这里，绝不在请求里读盘：以前在 visibleMoment 里同步读文件，
+       把事件循环卡住过（朋友圈发不出去/不显示就是这么来的）。 */
+const __momentSizeCache = new Map();
+let __momentSizeWarming = false;
+
+/** 同步读一张图的宽高（只在后台预热时用，复用上传校验那套 imageSizeOf） */
+function readImageSizeOnce(imgRef) {
+  try {
+    const rel = String(imgRef || '').replace(/^https?:\/\/[^/]+/, '');
+    const name = rel.indexOf('/uploads/') === 0 ? rel.slice(1) : rel;
+    const uploadsDir = path.join(DATA_DIR, 'uploads');
+    const file = path.join(DATA_DIR, name);
+    if (file.indexOf(uploadsDir) !== 0) return null;
+    const lower = name.toLowerCase();
+    const mime = lower.endsWith('.png') ? 'image/png'
+      : lower.endsWith('.gif') ? 'image/gif'
+      : lower.endsWith('.webp') ? 'image/webp'
+      : lower.endsWith('.bmp') ? 'image/bmp'
+      : 'image/jpeg';
+    const fd = fs.openSync(file, 'r');
+    const buf = Buffer.alloc(32768);
+    const n = fs.readSync(fd, buf, 0, buf.length, 0);
+    fs.closeSync(fd);
+    const sz = imageSizeOf(buf.slice(0, n), mime);
+    return (sz && sz.w > 0 && sz.h > 0) ? [sz.w, sz.h] : null;
+  } catch (err) { return null; }
+}
+
+/** 后台预热：把已发表动态里的图片尺寸算好放缓存。**分批 + setImmediate**，
+    每批最多 10 张，中间让出事件循环 —— 不影响正在处理的请求。 */
+function warmMomentSizes() {
+  if (__momentSizeWarming) return;
+  __momentSizeWarming = true;
+  let list = [];
+  try {
+    const raw = fs.readFileSync(path.join(DATA_DIR, 'moments.json'), 'utf8');
+    const parsed = JSON.parse(raw);
+    list = Array.isArray(parsed) ? parsed : (parsed.moments || []);
+  } catch (err) { list = []; }
+  const refs = [];
+  list.forEach((m) => {
+    (m.images || []).forEach((one) => {
+      const key = String(one || '');
+      if (key && !__momentSizeCache.has(key) && refs.indexOf(key) < 0) refs.push(key);
+    });
+  });
+  let i = 0;
+  const step = () => {
+    const end = Math.min(refs.length, i + 10);
+    for (; i < end; i += 1) {
+      const one = refs[i];
+      __momentSizeCache.set(one, readImageSizeOnce(one));
+    }
+    if (i < refs.length) { setImmediate(step); return; }
+    __momentSizeWarming = false;
+    console.log('[朋友圈] 图片尺寸预热完成，共', __momentSizeCache.size, '张');
+  };
+  setImmediate(step);
+}
 function visibleMoment(m, viewerId) {
+  /* ⚠ 2026-10-11 晚（照微信朋友圈的逻辑补齐）：**点赞和评论只对"共同好友"可见**。
+     除了作者本人和我自己，别人的赞/评论只有在"我和作者互为好友、而且这个人和作者也是好友"
+     （＝共同好友）时才给我看。以前是原样全给 —— 不是共同好友的人也能看到别人在这条下面的
+     赞和评论，和微信不一致。 */
+  const __mineFriends = new Set(friendIds(viewerId));
+  const __authorFriends = new Set(friendIds(m.authorId));
+  const __canSeeInteract = (uid) => uid === viewerId || uid === m.authorId
+    || (__mineFriends.has(uid) && __authorFriends.has(uid));
   return {
     id: m.id,
     authorId: m.authorId,
     author: memberProfile(findUser(m.authorId), viewerId),
     content: m.content,
     images: m.images || [],
+    /* 每张图的宽高：客户端据此一上来就按真实比例画框（没有这一项就会「跳一下」）。
+       发表时带的尺寸覆盖新图；老图靠启动后台预热带进来的缓存 —— 这里只查内存，不读盘。 */
+    imageSizes: (function () {
+      const out = Object.assign({}, m.imageSizes || {});
+      (m.images || []).forEach((one) => {
+        if (!out[one]) {
+          const sz = __momentSizeCache.get(String(one));
+          if (sz) out[one] = sz;
+        }
+      });
+      return out;
+    })(),
     /* 朋友圈视频：一条动态要么九张图、要么一条视频（和微信一样） */
     video: m.video || '',
     videoCover: m.videoCover || '',
@@ -5080,13 +5843,13 @@ function visibleMoment(m, viewerId) {
     location: m.location || '',
     pinned: m.pinned === true,
     createdAt: m.createdAt,
-    likes: (m.likes || []).map((l) => ({
+    likes: (m.likes || []).filter((l) => __canSeeInteract(l.userId)).map((l) => ({
       userId: l.userId,
       nickname: displayNameFor(viewerId, findUser(l.userId)),
       at: l.at
     })),
     likedByMe: (m.likes || []).some((l) => l.userId === viewerId),
-    comments: (m.comments || []).map((c) => ({
+    comments: (m.comments || []).filter((c) => __canSeeInteract(c.userId)).map((c) => ({
       id: c.id,
       userId: c.userId,
       nickname: displayNameFor(viewerId, findUser(c.userId)),
@@ -5133,6 +5896,70 @@ function broadcastMoment(authorId, payload) {
   });
 }
 
+/* ---------------------------------------------- 朋友圈「消息列表」（微信那个小信封）
+   微信：朋友圈右上角一个信封图标，点开是「谁赞了我、谁评论了我」一条条列着，
+   有未读时图标上带红点。这里就是那套后端 —— 别人动我的动态时记一条，
+   自己动自己的动态不记（微信也不给自己发通知）。 */
+
+function momentNoticeUnread(userId) {
+  const last = db.momentNoticeSeen[userId] || '';
+  let n = 0;
+  for (let i = db.momentNotices.length - 1; i >= 0; i -= 1) {
+    const r = db.momentNotices[i];
+    if (r.toUserId !== userId) continue;
+    if (String(r.at) > String(last)) n += 1;
+  }
+  return n;
+}
+
+/* 一条通知长什么样：发给谁看的决定名字/头像（备注优先），动态只带一句摘要 + 第一张缩略图 */
+function publicMomentNotice(row, viewerId) {
+  const from = findUser(row.fromUserId);
+  const u = publicUser(from) || {};
+  const m = db.moments.find((x) => x.id === row.momentId);
+  let thumb = '';
+  if (m && Array.isArray(m.images) && m.images.length) thumb = String(m.images[0] || '');
+  const preview = m ? String(m.content || '').slice(0, 60) : '';
+  return {
+    id: row.id,
+    kind: row.kind,                       // like / comment / reply
+    at: row.at,
+    momentId: row.momentId,
+    commentId: row.commentId || '',
+    text: row.text || '',
+    preview,
+    thumb,
+    userId: row.fromUserId,
+    name: row.fromUserId === viewerId ? '我' : displayNameFor(viewerId, from),
+    avatar: u.avatarPath || u.avatar || '',
+    deleted: !m
+  };
+}
+
+function pushMomentNotice(toUserId, fromUserId, kind, momentId, text, extra) {
+  if (!toUserId || !fromUserId || toUserId === fromUserId) return;
+  const row = {
+    id: uid('mn'),
+    toUserId,
+    fromUserId,
+    kind,
+    momentId,
+    commentId: (extra && extra.commentId) || '',
+    text: String(text || '').slice(0, 120),
+    at: now()
+  };
+  db.momentNotices.push(row);
+  /* 只留最近 2000 条（和落盘保持一致，别让内存里越攒越多） */
+  if (db.momentNotices.length > 2000) db.momentNotices.splice(0, db.momentNotices.length - 2000);
+  saveMomentNotices();
+  /* 对方在线就立刻推一条（连未读数一起带上），离线就等他下次进来拉 */
+  sendTo(toUserId, {
+    type: 'moment-notice',
+    notice: publicMomentNotice(row, toUserId),
+    unread: momentNoticeUnread(toUserId)
+  });
+}
+
 /* --------------------------------------------------------------- 实时连接 */
 
 const connections = new Map();
@@ -5140,12 +5967,45 @@ const connections = new Map();
    同一个网络就直连（快、不占服务器带宽），不同网络才强制走中继。 */
 const userIps = new Map();
 
+/* 名片这种"卡片消息"是后加的：老版本客户端不认识，会把整段 JSON 当正文显示
+   （用户看到的一串乱码就是这么来的）。所以按这条连接自己的版本降级：
+   版本号低于 CARD_MIN_BUILD 的连接，直接收到一句纯文本。 */
+const CARD_MIN_BUILD = 0;   // 临时：先把名片降级成文字，验证是不是名片渲染崩的   /* 包号从 B1 重排过：原来写 767，结果所有新版全被判成"老版本"，名片一律被降级成「[名片] 名字」—— 用户报的「名片推出去还是名字」就是这个 */   /* 名片渲染是 B767 那版上的（原来写 778，白让 767~777 那几个版本看不到名片） */
+function cardFallbackName(content) {
+  try { return String(JSON.parse(String(content || '{}')).name || ''); } catch (err) { return ''; }
+}
+function degradedForBuild(payload, build) {
+  if (build >= CARD_MIN_BUILD) return payload;
+  if (!payload || payload.type !== 'message' || !payload.message) return payload;
+  const m = payload.message;
+  if (m.kind !== 'card') return payload;
+  const name = cardFallbackName(m.content);
+  const msg = Object.assign({}, m, {
+    kind: 'text',
+    content: name ? ('[名片] ' + name) : '[名片]'
+  });
+  return Object.assign({}, payload, { message: msg });
+}
+function buildOfSocket(socket) {
+  const raw = String((socket && socket.__appBuild) || '');
+  const m = raw.match(/B(\d+)/);
+  return m ? Number(m[1]) : 0;
+}
 function sendTo(userId, payload) {
   const set = connections.get(userId);
   if (!set) return 0;
-  const text = applyMediaBase(signUploadsInText(JSON.stringify(payload)));
   let sent = 0;
-  set.forEach((socket) => { if (ws.sendText(socket, text)) sent += 1; });
+  const cache = new Map();
+  set.forEach((socket) => {
+    const build = buildOfSocket(socket);
+    const key = String(build);
+    let text = cache.get(key);
+    if (text === undefined) {
+      text = applyMediaBase(signUploadsInText(JSON.stringify(degradedForBuild(payload, build))));
+      cache.set(key, text);
+    }
+    if (ws.sendText(socket, text)) sent += 1;
+  });
   return sent;
 }
 
@@ -5375,6 +6235,14 @@ function pushPreview(kind, content) {
   if (kind === 'file') return '[文件]';
   if (kind === 'location') return '[位置]';
   if (kind === 'transfer') return '[转账]';
+  if (kind === 'announce') {
+    try { return '[群公告] ' + String(content || '').replace(/\s+/g, ' ').slice(0, 30); }
+    catch (e) { return '[群公告]'; }
+  }
+  if (kind === 'music') {
+    try { return '[音乐] ' + String((JSON.parse(String(content || '{}')) || {}).title || '').slice(0, 30); }
+    catch (e) { return '[音乐]'; }
+  }
   if (kind === 'redpacket') return '[红包]';
   if (kind === 'gift') return '[礼物]';
   if (kind === 'link') {
@@ -5394,6 +6262,7 @@ async function pushToUser(userId, opts) {
   if (opts.kind === 'message' && c.onMessage === false) return { sent: 0, reason: 'off' };
   if (opts.kind === 'friend' && c.onFriend === false) return { sent: 0, reason: 'off' };
   if (opts.kind === 'call' && c.onCall === false) return { sent: 0, reason: 'off' };
+  if (opts.kind === 'pair' && c.onPair === false) return { sent: 0, reason: 'off' };
   if (!pushReady()) {
     pushLog({ userId, kind: opts.kind, title: opts.title, skipped: 'not-configured' });
     return { sent: 0, reason: 'not-configured' };
@@ -5416,7 +6285,9 @@ async function pushToUser(userId, opts) {
       'apns-collapse-id': opts.collapse ? String(opts.collapse).slice(0, 64) : undefined,
       chatId: opts.chatId || '',
       fromId: opts.fromId || '',
-      kind: opts.kind || ''
+      kind: opts.kind || '',
+      /* 「登录确认」那条通知要带上 6 位码：点通知直接进确认卡片，不用手输 */
+      code: opts.pairCode || opts.code || ''
     };
     const r = await apnsSend(d.token, d.env ? d.env === 'sandbox' : !!c.sandbox, payload);
     if (r.ok) sent += 1;
@@ -5428,6 +6299,40 @@ async function pushToUser(userId, opts) {
     if (!r.ok && bad) pushRemoveToken(userId, d.token);
   }
   return { sent, reason: 'ok' };
+}
+
+/* ---------------- 设备确认登录：给已登录的设备发「登录确认」 ----------------
+   有人在新设备上点「微信登录」（或者拿已登录的手机扫了那个码），
+   这个账号**其它已登录的设备**要收到一条「登录确认」：
+     · 连着实时通道的：直接推一条 pair 事件（手机收到弹本地通知，点一下进确认卡片）
+     · 没连的：交给苹果推送（后台配了推送密钥才真的发得出去）
+   正在扫码确认的那台设备不推（它自己就开着确认卡片，推了是骚扰）。 */
+const pairNotifyAt = new Map();
+function notifyPairRequest(userId, code, device, exceptDeviceId) {
+  try {
+    if (!userId || !code) return 0;
+    const key = userId + '|' + String(code);
+    const t = Date.now();
+    if ((pairNotifyAt.get(key) || 0) > t - 2000) return 0;   // 同一台新设备 2 秒内只提醒一次
+    pairNotifyAt.set(key, t);
+    if (pairNotifyAt.size > 2000) pairNotifyAt.clear();
+    const dev = String(device || '新设备').slice(0, 40);
+    const payload = { type: 'pair', pairCode: String(code).slice(0, 10), pairDevice: dev,
+                      at: new Date().toISOString() };
+    const set = connections.get(userId);
+    let sent = 0;
+    if (set) {
+      set.forEach((socket) => {
+        if (exceptDeviceId && socket.__deviceId && socket.__deviceId === exceptDeviceId) return;
+        if (ws.sendText(socket, JSON.stringify(payload))) sent += 1;
+      });
+    }
+    /* 一台都没在线就交给苹果推送（没配密钥时 pushToUser 会直接返回 not-configured） */
+    pushToUser(userId, { kind: 'pair', title: '登录确认',
+                         body: '「' + dev + '」请求登录你的星言账号，点这里确认',
+                         pairCode: String(code).slice(0, 10), sound: true }).catch(() => { });
+    return sent;
+  } catch (e) { return 0; }
 }
 
 /** 一条消息落库以后：没连着实时通道的人给他推系统通知 */
@@ -5924,7 +6829,10 @@ function handleClientMessage(user, socket, raw) {
       content: JSON.stringify({
         from: user.id, to: target.id,
         fn: displayNameFor(user.id, user) || user.nickname || user.username,
-        tn: displayNameFor(user.id, target) || target.nickname || target.username
+        tn: displayNameFor(user.id, target) || target.nickname || target.username,
+        /* 被拍的人设的「拍一拍」后缀（微信：我 → 个人资料 → 拍一拍 → 朋友拍了拍我的＿＿）。
+           客户端按"我是谁"选说法；老客户端不认这个字段，会自然退回「X 拍了拍 Y」。 */
+        tt: str(target.patText, 12)
       }),
       createdAt: now(), recalled: false
     };
@@ -5950,7 +6858,8 @@ function handleClientMessage(user, socket, raw) {
   }
 
   if (msg.type === 'send') {
-    const result = deliverMessage(user, msg.chatId, msg.kind, msg.content, msg.clientId, msg.mentions);
+    const result = deliverMessage(user, msg.chatId, msg.kind, msg.content, msg.clientId, msg.mentions,
+      { imgW: msg.imgW, imgH: msg.imgH, quote: msg.quote });
     if (result.error) {
       ws.sendText(socket, JSON.stringify({ type: 'error', clientId: msg.clientId, error: result.error }));
     }
@@ -6044,6 +6953,21 @@ function handleClientMessage(user, socket, raw) {
       const busy = Array.from(calls.values()).find((c) => c.state !== 'ended' && (c.from === target.id || c.to === target.id));
       if (busy) {
         callLog(user.id, target.id, '对方忙线中', { media: msg.media === 'video' ? 'video' : 'audio', state: 'busy' });
+        /* CHRIS_BUSY_AUTOREPLY_V1 忙线自动回复（用户要求「忙线自动回复」对齐微信）：
+           对方正在通话中时，给他发一条自动回复，主叫这边会直接看到这句话。 */
+        try {
+          const chat = openChatForFriendship(user.id, target.id);   // CHRIS_BUSY_AUTOREPLY_V1
+          if (chat) {
+            chat.seq = (chat.seq || 0) + 1;
+            const auto = {
+              id: uid('m'), chatId: chat.id, seq: chat.seq, senderId: target.id, kind: 'text',
+              content: '[自动回复] 我正在通话中，稍后联系你', createdAt: now(), recalled: false
+            };
+            appendMessage(chat.id, auto);
+            saveChats();
+            chat.memberIds.forEach((id) => sendTo(id, { type: 'message', message: auto, chat: chatSummary(chat, id), clientId: null }));
+          }
+        } catch (e) { }
         return ws.sendText(socket, JSON.stringify({ type: 'call-error', callId, error: target.nickname + ' 正在通话中' }));
       }
       const media = msg.media === 'video' ? 'video' : 'audio';
@@ -6092,6 +7016,149 @@ function handleClientMessage(user, socket, raw) {
     }
     const peer = call.from === user.id ? call.to : call.from;
 
+    /* 通话状态同步（客户端 2026-10-12 新加）：
+       state  = 我静音了 / 关了摄像头 → 转给对方，他那边画「对方已静音 / 已关闭摄像头」
+       switch = 我在通话中切成语音或视频 → 转给对方并更新 call.media */
+    if (action === 'state' || action === 'switch') {
+      const peer = call.from === user.id ? findUser(call.to) : findUser(call.from);
+      if (!peer) return;
+      const payload = { type: 'call', action: action, callId, peerId: user.id };
+      if (action === 'state') {
+        payload.muted = !!msg.muted;
+        payload.camOff = !!msg.camOff;
+      } else {
+        payload.video = !!msg.video;
+        call.media = msg.video ? 'video' : 'audio';
+      }
+      callSend(peer, payload);
+      return;
+    }
+
+    /* ==================== 群语音通话（多人） ==================== */
+    if (action === 'group-start' || action === 'group-join') {
+      const chatIdIn = str(msg.chatId, 60);
+      const isStart = (action === 'group-start');
+      let room = null;
+      if (isStart) {
+        if (!chatIdIn) return;
+        const ch = db.chats.find((c) => c.id === chatIdIn && c.type === 'group');
+        if (!ch || !ch.memberIds.includes(user.id)) return;
+        const rid = groupRoomId(chatIdIn);
+        room = callRooms.get(rid) || null;
+        if (!room) {
+          room = { id: rid, chatId: chatIdIn, hostId: user.id,
+                   media: (String(msg.media || '') === 'video' ? 'video' : 'audio'),
+                   members: new Map(), frames: new Map(), startedAt: Date.now(), timer: null };
+          callRooms.set(rid, room);
+          room.timer = setInterval(() => roomMixTick(room), 40);   // 40ms 混一次
+        }
+      } else {
+        const rid = str(msg.roomId, 40);
+        room = callRooms.get(rid) || null;
+        if (!room) return;
+        const ch = db.chats.find((c) => c.id === room.chatId);
+        if (!ch || !ch.memberIds.includes(user.id)) return;
+      }
+      if (findRoomOf(user.id)) return;                 // 我已经在一个房里了
+      /* 微信的规矩：一个通话最多 9 方（第 10 个人进不来）。
+         这里挡住并回一句人话，客户端会把这句显示在通话页上。 */
+      if (room.members.size >= 9) {
+        callSend(user, { type: 'call-error', callId: callId, error: '通话人数已满（最多 9 人）' });
+        return;
+      }
+      room.members.set(user.id, { at: Date.now(), name: user.nickname || '', avatar: user.avatar || '', muted: false });
+      callTrace('群通话 ' + (isStart ? '发起' : '加入') + ' room=' + room.id + ' by ' + (user.username || user.id));
+      const ch2 = db.chats.find((c) => c.id === room.chatId);
+      const others = ch2 ? ch2.memberIds.filter((id) => id !== user.id && !findUser(id).bot) : [];
+      if (isStart) {
+        /* 发起：把群里其它人叫起来（他们那边弹群通话来电页） */
+        others.forEach((uid) => {
+          const u2 = findUser(uid);
+          if (!u2) return;
+          callSend(u2, { type: 'call', action: 'group-incoming', roomId: room.id,
+                         chatId: room.chatId, media: room.media,
+                         video: room.media === 'video',
+                         peerId: user.id, peerName: user.nickname || '',
+                         peerAvatar: user.avatar || '', roster: roomRoster(room) });
+        });
+      }
+      /* 通知房里其它人"谁进来了" */
+      roomSend(room, { type: 'call', action: 'group-joined', roomId: room.id,
+                       peerId: user.id, peerName: user.nickname || '',
+                       peerAvatar: user.avatar || '', roster: roomRoster(room) }, user.id);
+      /* 回给本人：房间信息 + 现在房里都有谁 */
+      callSend(user, { type: 'call', action: 'group-ready', roomId: room.id,
+                       chatId: room.chatId, media: room.media,
+                       video: room.media === 'video', hostId: room.hostId,
+                       roster: roomRoster(room) });
+      return;
+    }
+
+    /* CHRIS_CALL_LEVEL_V1 「谁在说话」：客户端每 ~300ms 报一次自己的音量，
+       服务端收下并（最多 4 次/秒）把整屋音量广播出去 —— 界面据此给正在说话的人画光圈。 */
+    if (action === 'level') {
+      const room = findRoomOf(user.id);
+      if (!room) return;
+      const seat = room.members.get(user.id);
+      if (seat) seat.level = Math.max(0, Math.min(1, Number(msg.level) || 0));
+      const nowL = Date.now();
+      if (!room.lastLevelAt || nowL - room.lastLevelAt > 250) {
+        room.lastLevelAt = nowL;
+        const levels = {};
+        room.members.forEach((m, id) => { levels[id] = Math.round((m.level || 0) * 100) / 100; });
+        roomSend(room, { type: 'call', action: 'levels', roomId: room.id, levels });
+      }
+      return;
+    }
+
+    /* CHRIS_GROUP_INVITE_V1 通话中拉人进**同一个**通话（对齐微信「邀请成员」）：
+       把群成员叫进当前房间（复用 group-incoming，对方点接听就走 group-join 进同一个房）。 */
+    if (action === 'group-invite') {
+      const room = callRooms.get(str(msg.roomId, 40));
+      if (!room) return;
+      const ch = db.chats.find((c) => c.id === room.chatId);
+      if (!ch || !ch.memberIds.includes(user.id)) return;
+      const target = findUser(str(msg.toUserId, 40));
+      if (!target || !ch.memberIds.includes(target.id)) return;
+      const delivered = callSend(target, {
+        type: 'call', action: 'group-incoming', roomId: room.id, chatId: room.chatId,
+        media: room.media, video: room.media === 'video',
+        peerId: user.id, peerName: user.nickname || '', peerAvatar: user.avatar || '',
+        roster: roomRoster(room)
+      });
+      callTrace('群通话邀请 ' + user.id + ' → ' + target.id + ' room=' + room.id + ' 送达=' + delivered);
+      if (!delivered) {
+        pushToUser(target.id, {
+          kind: 'call',
+          title: room.media === 'video' ? '群视频通话' : '群语音通话',
+          body: (user.nickname || user.username || '有人') + ' 邀请你加入通话'
+        }).catch(() => { });
+      }
+      return;
+    }
+
+    if (action === 'group-leave') {
+      const rid = str(msg.roomId, 40);
+      const room = callRooms.get(rid);
+      if (!room) return;
+      room.members.delete(user.id);
+      room.frames.delete(user.id);
+      roomSend(room, { type: 'call', action: 'group-left', roomId: room.id,
+                       peerId: user.id, roster: roomRoster(room) });
+      if (room.members.size === 0) roomClose(room);
+      return;
+    }
+
+    if (action === 'group-audio') {
+      const rid = str(msg.roomId, 40);
+      const room = callRooms.get(rid);
+      if (!room || !room.members.has(user.id)) return;
+      const data = typeof msg.data === 'string' ? msg.data : '';
+      if (!data || data.length > 24000) return;
+      try { room.frames.set(user.id, { at: Date.now(), buf: Buffer.from(data, 'base64') }); } catch (e) {}
+      return;
+    }
+
     if (action === 'accept') {
       if (call.to !== user.id) return;
       callTrace('accept ' + user.id + ' callId=' + callId);
@@ -6103,7 +7170,30 @@ function handleClientMessage(user, socket, raw) {
       return;
     }
 
-    if (action === 'reject') { if (call.to !== user.id) return; callTrace('reject ' + user.id + ' callId=' + callId); callEnd(call, 'rejected'); return; }
+    if (action === 'reject') {
+      if (call.to !== user.id) return;
+      callTrace('reject ' + user.id + ' callId=' + callId + (msg.text ? ' 带回复' : ''));
+      /* CHRIS_REJECT_REPLY_V1 拒接并回复（对齐微信「拒绝并回复」）：
+         把这句话插进两人的单聊里，然后照常结束通话。 */
+      try {
+        const say = str(msg.text, 120).trim();
+        if (say) {
+          const chat = openChatForFriendship(call.from, call.to);
+          if (chat) {
+            chat.seq = (chat.seq || 0) + 1;
+            const one = {
+              id: uid('m'), chatId: chat.id, seq: chat.seq, senderId: user.id, kind: 'text',
+              content: say, createdAt: now(), recalled: false
+            };
+            appendMessage(chat.id, one);
+            saveChats();
+            chat.memberIds.forEach((id) => sendTo(id, { type: 'message', message: one, chat: chatSummary(chat, id), clientId: null }));
+          }
+        }
+      } catch (e) { }
+      callEnd(call, 'rejected');
+      return;
+    }
     /* 客户端「响了很久没人接」自己挂断时会带 reason:'timeout'，
        这样记的是「对方无应答」而不是「已取消」（用户明确要分开） */
     if (action === 'cancel') {
@@ -6332,7 +7422,7 @@ function handleSocket(user, socket) {
 
 /* ------------------------------------------------------------------ 消息 */
 
-function deliverMessage(user, chatId, kind, content, clientId, mentionHint) {
+function deliverMessage(user, chatId, kind, content, clientId, mentionHint, mediaExtra) {
   if (user.banned) return { error: '账号已被管理员禁用，无法发送消息' };
   const chat = db.chats.find((c) => c.id === chatId);
   if (!chat) return { error: '会话不存在' };
@@ -6362,7 +7452,18 @@ function deliverMessage(user, chatId, kind, content, clientId, mentionHint) {
      balance / company（转账卡、经营账户）。system / call 这类只由服务端自己写，不放开。 */
   /* images = 一次发多张（4 张以上合成一条九宫格消息，body 是 {"paths":[...]}） */
   const allowed = ['text', 'image', 'images', 'file', 'audio', 'gift', 'transfer', 'location', 'redpacket', 'link',
-    'video', 'livephoto', 'dice', 'wheel', 'fortune', 'rps', 'balance', 'company'];
+    'video', 'livephoto', 'dice', 'wheel', 'fortune', 'rps', 'balance', 'company',
+    /* 2026-10-10 补：音乐卡片 / 群公告 / 名片 —— 以前不在名单里会被降级成 text，
+       收端就只看到一段 JSON 或一个名字（名片那个「发出去只有一行字」也是它）。 */
+    'music', 'announce', 'card', 'sticker',
+    /* 2026-10-10 补：小游戏 / 小程序分享卡片（好友分享给好友那张卡） */
+    'miniapp',
+    /* 系统通知号（星言团队）那种卡片 */
+    'sysnotice',
+    /* 2026-10-13 补：收藏里的**笔记**转发到聊天（kind=note，正文就是笔记原文，
+       里面 [图]路径 那几行客户端会画成图片）。以前不在名单里 → 被降级成 text，
+       对面收到一大段带 [图]路径 的"代码"，用户反馈的「笔记转发过去是个代码」就是它。 */
+    'note'];
   const type = allowed.includes(kind) ? kind : 'text';
   /* IM 模块的开关：管理员关了哪一类就发不出去 */
   const imBlock = imKindBlocked(type);
@@ -6472,10 +7573,53 @@ function deliverMessage(user, chatId, kind, content, clientId, mentionHint) {
     createdAt: now(),
     recalled: false
   };
+  /* CHRIS_BURN_V1 阅后即焚：这个会话开着就标上，读一次之后服务端会把它清掉 */
+  if (chat.burn) {
+    message.burn = true;
+    /* CHRIS_BURN_LOG_V1：便于排查「阅后即焚没生效」 */
+    try { callTrace('burn 发出 ' + chat.id + ' kind=' + type + ' by ' + (user.nickname || user.username)); } catch (e) { }
+  }
   /* 这条消息 @ 了谁：存下来，收消息的人靠它显示「有人@我」，也是老客户端的高亮依据 */
   if (mentionIds.length) message.mentions = mentionIds;
   /* 客户端给的这条本地 id：离线重发时靠它去重（同一 clientId 只落一条） */
   if (clientId) message.clientId = String(clientId).slice(0, 60);
+  /* 图片宽高（骨架落位）：发送端带上来的优先；没带（老客户端 / 服务端自己发的图）
+     就从文件头读一次补上。收/发双方第一帧就按真实比例把气泡画好，行高不再变。 */
+  if (type === 'image') {
+    let w = Math.round(Number(mediaExtra && mediaExtra.imgW) || 0);
+    let h = Math.round(Number(mediaExtra && mediaExtra.imgH) || 0);
+    if (!(w > 1 && h > 1)) {
+      const d = imageDimsOf(message.content);
+      if (d) { w = d.w; h = d.h; }
+    }
+    if (w > 1 && h > 1 && w <= 30000 && h <= 30000) { message.imgW = w; message.imgH = h; }
+  }
+  /* 引用卡片（微信那种结构化引用）：正文里不再拼「「谁：摘要」」，
+     改成一整包挂在消息上 —— 客户端才能画成带缩略图、点一下跳原消息的引用条。
+     只收 {id, who, kind, text, thumb}，长度全卡死；缩略图只认本站 /uploads 或 http(s)。 */
+  try {
+    const qh = mediaExtra && mediaExtra.quote;
+    if (qh && typeof qh === 'object') {
+      const qid = str(qh.id, 40);
+      /* 引用的那条必须真在这个会话里 —— 不然就是编出来的引用，直接不收 */
+      const src = qid ? loadMessages(chat.id).find((m) => m.id === qid) : null;
+      if (src) {
+        const thumbRaw = String(qh.thumb || '').slice(0, 500);
+        const quote = {
+          id: qid,
+          who: str(qh.who, 40),
+          kind: str(qh.kind, 12) || 'text',
+          text: str(qh.text, 200),
+          thumb: /^https?:\/\//i.test(thumbRaw) ? thumbRaw
+            : (/^\/uploads\/[A-Za-z0-9._-]+$/.test(thumbRaw) ? thumbRaw : '')
+        };
+        /* 引用的是一条图片：客户端没带缩略图就用原图地址顶上 */
+        if (src.kind === 'image' && !quote.thumb) quote.thumb = String(src.content || '');
+        if (!quote.text && src.kind !== 'image') quote.text = '[' + String(src.kind || 'text') + ']';
+        message.quote = quote;
+      }
+    }
+  } catch (e) { /* 引用这一包有问题就当没引用，绝不能把消息本身发不出去 */ }
   appendMessage(chat.id, message);
   noteMessage();
   /* 落盘改成「攒一下再写」：以前每发一条消息都要重写整个 chats.json（1.5MB），
@@ -7028,6 +8172,12 @@ function ensureBots() {
         console.log('[bots] rename ' + cfg.username + ' -> ' + cfg.nickname);
       }
     }
+    /* 后台 / App 管理页改过的名字、头像优先（data/official.json） */
+    {
+      const ov = officialOf(cfg.username);
+      if (ov.name && bot.nickname !== ov.name) { bot.nickname = ov.name; changed = true; }
+      if (ov.avatar !== undefined && bot.avatar !== (ov.avatar || '')) { bot.avatar = ov.avatar || ''; changed = true; }
+    }
     db.users.forEach((u) => {
       if (u.id === bot.id || u.bot) return;
       const fk = BOT_PAIR_KEY(u.id, bot.id);
@@ -7043,6 +8193,8 @@ function ensureBots() {
       }
     });
   });
+  /* 「星言团队」那个官方号也跟着 official.json（名字 / 头像） */
+  try { sysAccount(); } catch (e) {}
   if (changed) { saveUsers(); saveFriendships(); }
   /* 每个账号和机器人的会话都固定置顶（取消不了） */
   let chatChanged = false;
@@ -7053,9 +8205,10 @@ function ensureBots() {
       if (!chat) return;
       const set = new Set(chat.pinnedFor || []);
       if (!set.has(u.id)) { set.add(u.id); chat.pinnedFor = Array.from(set); chatChanged = true; }
-      // 之前被「不显示」藏起来的，开服自动放回来
-      const hidden = (chat.hiddenFor || []).filter((id) => id !== u.id);
-      if (hidden.length !== (chat.hiddenFor || []).length) { chat.hiddenFor = hidden; chatChanged = true; }
+      /* ⚠ 以前这里会把用户从 hiddenFor 里删掉（「开服自动放回来」）——
+         结果用户删掉的机器人会话，服务器一重启就又冒出来（用户报的
+         「有些东西删除了会自己回来」）。现在**不再动 hiddenFor**：
+         删了就一直是删的，等真有新消息时由发消息那条路放回来（微信也是这个规矩）。 */
     });
   });
   if (chatChanged) saveChats();
@@ -7969,7 +9122,43 @@ function attachBotsFor(user) {
       } catch (e) { console.log('[bots] 异常：' + e.message); }
     }
   });
+  try { ensureSysChat(user); } catch (e) {}
   if (changed) saveFriendships();
+}
+
+/* 「星言团队」那个官方号：给每个用户都开一条会话（微信里「微信团队」一直躺在列表里）。
+   第一次建这条会话时发一张欢迎卡片，让人知道这个号是干嘛的。 */
+/** 把「星言团队」和所有人之间的好友关系删掉（只在开服时跑一遍） */
+function dropSysFriendships() {
+  try {
+    const before = db.friendships.length;
+    db.friendships = db.friendships.filter((f) => f.fromId !== SYS_ACCOUNT_ID && f.toId !== SYS_ACCOUNT_ID);
+    const gone = before - db.friendships.length;
+    if (gone > 0) { saveFriendships(); console.log("[官方号] 清掉星言团队的好友关系 " + gone + " 条"); }
+    return gone;
+  } catch (e) { return 0; }
+}
+
+function ensureSysChat(user) {
+  try {
+    if (!user || user.bot) return null;
+    const sys = sysAccount();
+    if (!sys || sys.id === user.id) return null;
+    /* **不加好友**（用户要求「把团队的朋友啥的去掉」）：只留一条会话，
+       通讯录 / 名片里都不出现它 —— 它是个系统通知号，不是好友。 */
+    let chat = directChatBetween(user.id, sys.id);
+    if (!chat) {
+      chat = createDirectChat(user.id, sys.id);
+      try {
+        const cfg = readSysNoticeCfg();
+        if (cfg.enabled && cfg.types.notice !== 0) {
+          deliverMessage(sys, chat.id, 'sysnotice',
+            JSON.stringify({ title: '欢迎使用星言', text: '这里是星言团队。账号安全、支付、公告这些事都由我来通知你：换了新设备登录、改了密码、改了手机号、收到转账，我都会在这儿给你留一条。', at: Date.now() }), '');
+        }
+      } catch (e) {}
+    }
+    return chat;
+  } catch (e) { return null; }
 }
 
 function welcomeBots() {
@@ -8131,6 +9320,165 @@ function sendJson(res, status, payload, headers) {
 const ok = (res, data, headers) => sendJson(res, 200, { ok: true, data }, headers);
 const fail = (res, status, error, details) => sendJson(res, status, { ok: false, error, details: details || null });
 
+/* ---------------------------------------------------------- 音频转码
+   把上传上来的音频（可能是 flac / ape / wma / 甚至是后缀认不出来的）转成 128k 的 mp3：
+   iOS 只认 mp3 / m4a / wav / aac，转完就一定能放。失败返回空串（调用方给用户一句人话）。 */
+function transcodeAudioToMp3(oldName) {
+  const src = path.join(UPLOAD_DIR, oldName);
+  let plain = null;
+  try { plain = readUploadPlain(src); } catch (e) { plain = null; }
+  if (!plain || !plain.length) return '';
+  const stamp = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+  const tmpIn = '/tmp/chris-audio-in-' + stamp;
+  const tmpOut = '/tmp/chris-audio-out-' + stamp + '.mp3';
+  try { fs.writeFileSync(tmpIn, plain); } catch (e) { return ''; }
+  let ok = true;
+  try {
+    const { execFileSync } = require('child_process');
+    execFileSync('ffmpeg', ['-y', '-loglevel', 'error', '-i', tmpIn,
+      '-vn', '-b:a', '128k', '-ar', '44100', '-ac', '2', tmpOut], { timeout: 180000 });
+  } catch (e) {
+    ok = false;
+  }
+  try { fs.unlinkSync(tmpIn); } catch (e) {}
+  if (!ok) { try { fs.unlinkSync(tmpOut); } catch (e) {} return ''; }
+  let buf = null;
+  try { buf = fs.readFileSync(tmpOut); } catch (e) { buf = null; }
+  try { fs.unlinkSync(tmpOut); } catch (e) {}
+  if (!buf || !buf.length) return '';
+  const name = 'file_' + crypto.randomBytes(8).toString('hex') + '.mp3';
+  try { fs.writeFileSync(path.join(UPLOAD_DIR, name), sealUploadBuffer(name, buf)); } catch (e) { return ''; }
+  return '/uploads/' + name;
+}
+
+/* ---------------------------------------------------------- 音乐曲库
+   App「听一听」那一页 + 聊天里的音乐卡片都用这份数据（data/music.json）。
+   歌是后台自己上传的（自己录的 / 免版权的），不接任何第三方曲库，免得侵权。 */
+function readMusicDb() {
+  try {
+    const m = readJson(path.join(DATA_DIR, 'music.json'), { tracks: [] });
+    if (!m || typeof m !== 'object') return { tracks: [] };
+    if (!Array.isArray(m.tracks)) m.tracks = [];
+    return m;
+  } catch (e) { return { tracks: [] }; }
+}
+function saveMusicDb(m) {
+  const tracks = (Array.isArray(m && m.tracks) ? m.tracks : []).slice(0, 500);
+  writeJson(path.join(DATA_DIR, 'music.json'), { tracks });
+}
+/* 给 App 的列表（字段都保证有值，缺的补空串） */
+function musicTracks() {
+  return readMusicDb().tracks.map((t) => ({
+    id: t.id || '',
+    title: t.title || '',
+    artist: t.artist || '',
+    cover: t.cover || '',
+    url: t.url || '',
+    lyrics: String(t.lyrics || ''),          // 歌词（LRC 或一行一句；没有就是空串）
+    likes: Array.isArray(t.likes) ? t.likes.slice(-200) : [],   // 谁赞过（App 判断我赞过没）
+    likeCount: Array.isArray(t.likes) ? t.likes.length : 0,
+    shareCount: Number(t.shares) || 0,
+    at: Number(t.at) || 0
+  })).filter((t) => t.title && t.url);
+}
+
+/* ---------------------------------------------------------- 小程序 / 小游戏
+   后台「小程序」页加的每一条 = App「发现 → 小程序」里的一张卡；
+   App 那一页是个**运行时**（内置浏览器 + wx.* JS 桥），所以后台加新的不用重新出包。
+   kind: game = 小游戏（也进「游戏」页），mini = 普通小程序。 */
+const DEFAULT_MINIAPPS = [
+  { id: 'm01', name: '跳一跳', desc: '按住蓄力，松开起跳', icon: '🕹️', kind: 'game', url: '/games/01-jump-jump/index.html', enabled: true },
+  { id: 'm02', name: '2048', desc: '滑动合并相同数字', icon: '🔢', kind: 'game', url: '/games/02-2048/index.html', enabled: true },
+  { id: 'm03', name: '飞机大战', desc: '拖动战机，自动开火', icon: '✈️', kind: 'game', url: '/games/03-plane-war/index.html', enabled: true },
+  { id: 'm04', name: '贪吃蛇', desc: '滑动操控，越吃越长', icon: '🐍', kind: 'game', url: '/games/04-snake/index.html', enabled: true }
+];
+function readMiniApps() {
+  const cfg = readJson(path.join(DATA_DIR, 'miniapps.json'), null);
+  if (!cfg || !Array.isArray(cfg.items)) return { items: DEFAULT_MINIAPPS.slice() };
+  return cfg;
+}
+function saveMiniApps(cfg) {
+  writeJson(path.join(DATA_DIR, 'miniapps.json'), { items: (cfg.items || []).slice(0, 200) });
+}
+/** 给 App 的列表：字段都补全，url 必须是 /… 或 http(s) */
+function miniAppList(onlyKind) {
+  return (readMiniApps().items || []).filter((x) => x && x.enabled !== false)
+    .filter((x) => !onlyKind || String(x.kind || 'mini') === onlyKind)
+    .map((x) => ({
+      id: String(x.id || ''),
+      name: String(x.name || '小程序').slice(0, 20),
+      desc: String(x.desc || '').slice(0, 40),
+      icon: String(x.icon || '🧩').slice(0, 8),
+      kind: String(x.kind || 'mini'),
+      url: String(x.url || ''),
+      color: String(x.color || ''),
+      cover: String(x.cover || ''),
+      group: String(x.group || '').slice(0, 16),
+      action: String(x.action || '立即玩').slice(0, 6)
+    })).filter((x) => x.url);
+}
+
+/* ---------------------------------------------------------- 小游戏分数（好友排名用）
+   每个游戏给每个人记一条**最高分**（只涨不跌）；排行榜就是「我 + 我的好友」按分排。 */
+/* 「我正在听」：谁在听哪首歌（好友的「朋友推荐」用） */
+/* 「棋牌大厅」的桌子：一桌 4 个位（四国军棋：东南西北各一家） */
+const TABLES_FILE = 'game-tables.json';
+function readTables() {
+  const j = readJson(path.join(DATA_DIR, TABLES_FILE), { tables: [] });
+  if (!j || typeof j !== 'object') return { tables: [] };
+  if (!Array.isArray(j.tables)) j.tables = [];
+  /* 超过 2 小时没动静的清掉，别让大厅越攒越多 */
+  const now = Date.now();
+  j.tables = j.tables.filter((t) => t && (now - Number(t.at || 0)) < 2 * 3600 * 1000);
+  return j;
+}
+function saveTables(j) { writeJson(path.join(DATA_DIR, TABLES_FILE), { tables: (j.tables || []).slice(0, 200) }); }
+function newTableCode() {
+  for (let i = 0; i < 50; i++) {
+    const c = String(Math.floor(1000 + Math.random() * 9000));
+    const j = readTables();
+    if (!j.tables.some((t) => t.code === c)) return c;
+  }
+  return String(Date.now()).slice(-4);
+}
+function tablePublic(t, meId) {
+  return {
+    code: t.code,
+    game: t.game || 'g09',
+    host: t.host || '',
+    started: !!t.started,
+    seats: (t.seats || []).map((x) => x ? {
+      id: x.id, name: x.name || '玩家', avatar: x.avatar || '', mine: x.id === meId
+    } : null),
+    seated: (t.seats || []).filter(Boolean).length
+  };
+}
+
+function readMusicNow() {
+  const j = readJson(path.join(DATA_DIR, 'music-now.json'), { users: {} });
+  if (!j || typeof j !== 'object') return { users: {} };
+  if (!j.users || typeof j.users !== 'object') j.users = {};
+  return j;
+}
+function saveMusicNow(j) {
+  const users = j.users || {};
+  const ids = Object.keys(users);
+  /* 只留最近 500 条，别让这个文件无限长大 */
+  if (ids.length > 500) {
+    ids.sort((a, b) => (Number(users[b].at) || 0) - (Number(users[a].at) || 0))
+      .slice(500).forEach((k) => { delete users[k]; });
+  }
+  writeJson(path.join(DATA_DIR, 'music-now.json'), { users: users });
+}
+
+function readGameScores() {
+  const j = readJson(path.join(DATA_DIR, 'game-scores.json'), { scores: {} });
+  if (!j || typeof j !== 'object') return { scores: {} };
+  if (!j.scores || typeof j.scores !== 'object') j.scores = {};
+  return j;
+}
+function saveGameScores(j) { writeJson(path.join(DATA_DIR, 'game-scores.json'), { scores: j.scores || {} }); }
+
 function readBody(req) {
   /* 同一个请求可能被两个分支先后读（比如 /me/status 既是「结束我的状态」又是「改在线状态」），
      缓存一下，第二次读直接拿同一份，不会因为流已经读完而拿到空对象。 */
@@ -8213,6 +9561,13 @@ function setUserBanned(u, banned, reason, by) {
 function banMsg(u) {
   const why = u && u.banReason ? '（' + u.banReason + '）' : '';
   return '该账号已被管理员禁用' + why + '，可在登录页点「自助解封」用身份证解封';
+}
+
+/* CHRIS_FREEZE_V1 「自己冻结账号」的提示（和封禁区分开：冻结是本人/管理员临时锁，
+   登录页点「解冻账号」用账号密码（+ 实名身份证号）就能自己解开） */
+function frozenMsg(u) {
+  const why = u && u.frozenReason ? '（' + u.frozenReason + '）' : '';
+  return '该账号已被冻结' + why + '，可在登录页点「解冻账号」自助解冻';
 }
 
 /* ================================================================
@@ -8341,6 +9696,16 @@ function realNameRateAllow(key) {
   r.n += 1;
   if (realNameHits.size > 5000) realNameHits.clear();
   return r.n <= 10;
+}
+
+const bottleHits = new Map();
+function bottleRateAllow(key) {          // CHRIS_BOTTLE_V1：同一账号 10 分钟最多扔/捞 30 次
+  const t = Date.now();
+  const r = bottleHits.get(key);
+  if (!r || t - r.t > 10 * 60 * 1000) { bottleHits.set(key, { t, n: 1 }); return true; }
+  r.n += 1;
+  if (bottleHits.size > 5000) bottleHits.clear();
+  return r.n <= 30;
 }
 
 function adminStats() {
@@ -8866,6 +10231,12 @@ function saveUploadedFile(body) {
   let ext = extMap[realMime] || (isImage ? '.png' : '.bin');
   /* 唯一例外：浏览器读字体有时给 octet-stream，这时按文件名的字体后缀走（字体后缀本身在白名单里） */
   if (ext === '.bin' && /^\.(ttf|otf|woff2?|eot)$/i.test(nameExt)) ext = nameExt.toLowerCase();
+  /* 音频同理：用户从别处下载的歌后缀五花八门（flac / ape / wma / opus …），
+     浏览器给的 mime 常常是 octet-stream。后缀按**固定白名单**采信一次，
+     随后 /api/manage/music 那边会用 ffmpeg 转成 mp3（见 transcodeAudioToMp3）。 */
+  if (ext === '.bin' && /^\.(mp3|m4a|flac|wav|aac|ogg|oga|opus|ape|wma|aiff|aif|amr|mka)$/i.test(nameExt)) {
+    ext = nameExt.toLowerCase();
+  }
   ext = ext.toLowerCase();
   if (!/^\.(png|jpe?g|webp|gif|heic|heif|avif|bmp|tiff|pdf|txt|zip|json|mp4|mp3|m4a|webm|ogg|wav|ttf|otf|woff2?|eot|bin)$/.test(ext)) ext = isImage ? '.png' : '.bin';
   const buffer = buffer0;
@@ -8949,7 +10320,15 @@ async function handleAdmin(req, res, parts, query) {
     const body = await readBody(req);
     /* 安全：后台密码绝不允许走明文 http —— 同网段抓包就能拿到密码，拿到密码等于整个后台被拖走。
        本机（127.0.0.1）除外，方便本地脚本；其它来源一律要求 https。 */
-    if (!req.socket.encrypted && !/^(127\.0\.0\.1|::1)$/.test(peerIp(req))) {
+    /* ⚠ 经过 TLS 前端回源的请求：socket.encrypted 是 false，但 X-Forwarded-Proto=https、
+       而且 TCP 对端是本机 127.0.0.1 —— 客户端那一段本来就是加密的。
+       以前只看 socket.encrypted，结果**所有从公网来的后台登录都被当成明文拒掉**
+       （用户反馈的「后台进不去」：页面能打开，一登录就提示「必须走加密通道」）。 */
+    const _rawPeerLogin = String((req.socket && req.socket.remoteAddress) || '').replace('::ffff:', '');
+    const _viaTlsFrontLogin = /^(127\.0\.0\.1|::1)$/.test(_rawPeerLogin)
+      && String(req.headers['x-forwarded-proto'] || '').toLowerCase() === 'https';
+    if (!req.socket.encrypted && !_viaTlsFrontLogin
+        && !/^(127\.0\.0\.1|::1)$/.test(peerIp(req))) {
       return fail(res, 403, httpsHint(req));
     }
     /* 账号：后台自己设的（data/admin.json 的 username）和默认的 admin 都收，
@@ -9082,20 +10461,33 @@ async function handleAdmin(req, res, parts, query) {
 
   /* ---------- ＋ 面板（控制台可改名称 / 图标 / 动作 / 开关 / 顺序） ---------- */
   if (sub === 'plus-panel' && method === 'GET') {
-    ok(res, { items: db.plusPanel, icons: PLUS_ICONS, actions: PLUS_ACTIONS, defaults: DEFAULT_PLUS_ITEMS });
+    ok(res, {
+      items: db.plusPanel, icons: PLUS_ICONS, actions: PLUS_ACTIONS, defaults: DEFAULT_PLUS_ITEMS,
+      /* 输入框上面那排快捷按钮 + 「＋」按钮的外观 */
+      quick: db.quickBar, quickActions: QUICK_ACTIONS, quickDefaults: DEFAULT_QUICK_ITEMS,
+      plus: db.plusButton
+    });
     return;
   }
 
   if (sub === 'plus-panel' && method === 'PUT') {
     const body = await readBody(req);
-    if (!Array.isArray(body.items)) return fail(res, 400, 'items 必须是数组');
-    db.plusPanel = normalizePlusItems(body.items);
+    /* items / quick / plus 三个都能单独改（老后台只传 items 也照样能用） */
+    if (body.items !== undefined) {
+      if (!Array.isArray(body.items)) return fail(res, 400, 'items 必须是数组');
+      db.plusPanel = normalizePlusItems(body.items);
+    }
+    if (body.quick !== undefined) {
+      if (!Array.isArray(body.quick)) return fail(res, 400, 'quick 必须是数组');
+      db.quickBar = normalizeQuickItems(body.quick);
+    }
+    if (body.plus !== undefined) db.plusButton = normalizePlusButton(body.plus);
     savePlusPanel();
     // 在线用户实时更新，不用刷新
     connections.forEach(function (set, userId) {
-      sendTo(userId, { type: 'pluspanel', items: db.plusPanel });
+      sendTo(userId, { type: 'pluspanel', items: db.plusPanel, quick: db.quickBar, plus: db.plusButton });
     });
-    ok(res, { items: db.plusPanel });
+    ok(res, { items: db.plusPanel, quick: db.quickBar, plus: db.plusButton });
     return;
   }
 
@@ -9590,6 +10982,10 @@ function pruneShakes() {
 async function handleApi(req, res, pathname, query) {
   const method = req.method.toUpperCase();
   const parts = pathname.split('/').filter(Boolean).slice(1);
+  /* ⚠ 这一句必须在**所有**路由之前：以前它被放在函数中间，
+     JS 的 TDZ 会让它前面那些接口（音乐点赞、状态点赞、注册…）一调用就报
+     "Cannot access 'user' before initialization"。别往下挪。 */
+  const user = currentUser(req);
 
   if (parts[0] === 'admin') {
     await handleAdmin(req, res, parts, query);
@@ -9597,6 +10993,359 @@ async function handleApi(req, res, pathname, query) {
   }
 
   /* 独立的管理员后台（/manage.html）：多账号 + 角色 + 审计日志 + 风控 */
+  /* ============================================================ 小店 + 卡包
+     2026-10-11 照微信的逻辑加的两块：
+       · 小店：商品列表 → 下单（走零钱扣款，和 AI 那边"点第 1 个"同一个道理）→ 我的订单
+       · 卡包：我的卡券（优惠券 / 会员卡 / 礼品卡 / 票），带核销码；管理侧能发卡、核销
+     数据落 data/shop.json（商品）+ data/cards.json（卡券）+ 复用 data/orders.json（订单）。
+     管理侧（上架/下架/改价/发卡）走 /api/ops/*，只有 ops 账号能用。
+     ============================================================ */
+  function readShopCfg() {
+    const def = (function () {
+      try { const s = loadShop(); return { items: (s.goods || []).map((g, i) => ({ id: 'g' + (i + 1), name: g.name, price: g.price, img: g.img || '', kind: 'physical', desc: '', stock: 999, on: true, sort: i })) }; }
+      catch (e) { return { items: [] }; }
+    })();
+    const f = path.join(DATA_DIR, 'shop.json');
+    const cfg = readJson(f, null);
+    if (!cfg || !Array.isArray(cfg.items)) { writeJson(f, def); return def; }
+    return cfg;
+  }
+  function saveShopCfg(cfg) { writeJson(path.join(DATA_DIR, 'shop.json'), cfg); }
+  function readCards() { const f = path.join(DATA_DIR, 'cards.json'); const c = readJson(f, { cards: [] }); if (!Array.isArray(c.cards)) c.cards = []; return c; }
+  function saveCards(c) { writeJson(path.join(DATA_DIR, 'cards.json'), c); }
+  function isOpsUser(u) { return !!(u && (u.ops === true || u.admin === true)); }
+
+  /* ============================================================ 小星（顶栏那颗眼睛）的三档开关
+     2026-10-12 用户要求：**每个用户自己设**，而且"开启小星"是付费的（¥40 一次性）。
+       · off    ：顶栏不画（免费，最安全）
+       · static ：画但不动（免费；两段 repeatForever 动画不跑）
+       · on     ：会动的眼睛（¥40 一次性买断，走零钱；余额不足告诉他还差多少）
+     状态存在用户对象上（跟着账号走，换设备也在）；管理侧能免费给某个用户开。
+     端点：GET/POST /api/me/eyes、POST /api/ops/eyes
+     ============================================================ */
+  const EYES_PRICE = 40;
+  if (parts[0] === 'me' && parts[1] === 'eyes' && method === 'GET') {
+    ok(res, { eyes: user.eyes || 'on', paid: user.eyesPaidAt ? true : false,
+              price: EYES_PRICE, balance: Number(user.balance) || 0 });
+    return;
+  }
+  if (parts[0] === 'me' && parts[1] === 'eyes' && method === 'POST') {
+    const b = await readBody(req);
+    const want = String(b.eyes || '').trim();
+    if (!['on', 'static', 'off'].includes(want)) return fail(res, 400, '档位不对');
+    if (want === 'on' && !user.eyesPaidAt) {
+      const bal = Number(user.balance) || 0;
+      if (bal < EYES_PRICE) return fail(res, 400, '零钱不够（还差 ' + money(EYES_PRICE - bal) + '），去「我 → 服务 → 充值余额」');
+      user.balance = Math.round((bal - EYES_PRICE) * 100) / 100;
+      user.eyesPaidAt = now();
+      sendTo(user.id, { type: 'balance', balance: user.balance });
+    }
+    user.eyes = want;
+    saveUsers();
+    ok(res, { eyes: user.eyes, paid: user.eyesPaidAt ? true : false, balance: Number(user.balance) || 0 });
+    return;
+  }
+  if (parts[0] === 'ops' && parts[1] === 'eyes' && method === 'POST') {
+    if (!isOpsUser(user)) return fail(res, 403, '没有权限');
+    const b = await readBody(req);
+    const target = findUser(String(b.userId || '')) || user;
+    const want = String(b.eyes || 'on').trim();
+    if (['on', 'static', 'off'].includes(want)) {
+      target.eyes = want;
+      if (want === 'on' && !target.eyesPaidAt) target.eyesPaidAt = now();   // 管理侧免费开
+      saveUsers();
+    }
+    ok(res, { userId: target.id, eyes: target.eyes || 'on', paid: target.eyesPaidAt ? true : false });
+    return;
+  }
+
+  /* ============================================================ 拼多多商城（原生）CHRIS_MALL_ADMIN_V1
+     2026-10-12 用户要求「拼多多商城后台给管理（可以上架的 / 换轮播图的）」：
+     商城数据从 App 内置搬到这里，落 data/mall.json = { products: [...], banners: [...] }
+       · GET  /api/mall       → { products, banners }（App 的商城首页/详情读它）
+       · POST /api/ops/mall   → 管理侧（上架/下架/改价/删除/新增商品 + 换轮播图），只有 ops 能调
+     商品字段：id / em（emoji 图标）/ img（图片地址，可空）/ title / price（拼单价）/
+              orig（单买价）/ sold / grp（几人团）/ tags / shop / cate / on（是否上架）
+     没文件就按 App 里那 16 个内置商品 + 3 张渐变轮播图种子写一份。
+     ============================================================ */
+  function mallSeed() {
+    const P = [
+      ['p01','🎧','【百亿补贴】无线蓝牙耳机 主动降噪 入耳式 超长续航 苹果安卓通用',39.9,199,'10万+',2,['百亿补贴','官方直营'],'数码优选旗舰店','数码'],
+      ['p02','👟','轻便透气跑步鞋 男款夏季网面运动鞋 软底减震',59.9,159,'3.2万',2,['限时秒杀','退货包运费'],'潮鞋工厂店','服饰'],
+      ['p03','🍊','现摘沃柑 5斤装 手剥甜橙 新鲜当季水果 产地直发',16.8,39.9,'8.6万',2,['产地直发','坏果包赔'],'果农直供店','生鲜'],
+      ['p04','🧴','氨基酸洗面奶 深层清洁温和不紧绷 敏感肌可用 200ml',19.9,69,'5.1万',3,['正品保障'],'肌研美妆专营','美妆'],
+      ['p05','☕','保温杯 316不锈钢 大容量便携车载水杯 24小时保温',29.9,99,'2.7万',2,['限时秒杀'],'日用家居优选','家居'],
+      ['p06','🍜','螺蛳粉 广西正宗柳州风味 5包装 加臭加辣速食',24.9,49.9,'12万',2,['百亿补贴','爆款'],'美味零食铺','食品'],
+      ['p07','📱','120W超级快充充电宝 20000毫安 大容量 自带四线',69,199,'4.4万',2,['官方补贴'],'数码优选旗舰店','数码'],
+      ['p08','🧸','儿童毛绒玩具公仔 安抚陪睡娃娃 生日礼物正版授权',22.8,79,'1.9万',3,['母婴优选'],'萌趣玩具城','母婴'],
+      ['p09','👕','纯棉短袖T恤 男款夏季宽松百搭 三件装 不易变形',39.9,129,'6.8万',2,['退货包运费'],'基础款服饰店','服饰'],
+      ['p10','🥛','纯牛奶 250ml×12盒 全脂营养早餐奶 整箱实惠装',33.9,69,'9.3万',2,['百亿补贴','日期新鲜'],'乳品官方旗舰','食品'],
+      ['p11','🪥','电动牙刷 声波震动 智能定时 情侣款 含4个刷头',45.9,169,'2.2万',2,['限时秒杀'],'口腔护理专营','美妆'],
+      ['p12','🍚','东北五常大米 10斤装 当季新米 香糯软弹 真空包装',34.9,79,'7.5万',2,['产地直发'],'粮油旗舰店','食品'],
+      ['p13','⌚','智能运动手环 心率血氧监测 防水计步 长续航 通用腕带',79,299,'1.6万',3,['官方补贴'],'数码优选旗舰店','数码'],
+      ['p14','🧺','衣物收纳箱 大容量可折叠 防潮防尘 衣柜整理三件套',26.9,89,'3.7万',2,['9.9元包邮'],'日用家居优选','家居'],
+      ['p15','🍰','千层蛋糕 动物奶油 现做现发 网红下午茶甜品',29.9,88,'2.5万',2,['顺丰冷链'],'甜品烘焙坊','食品'],
+      ['p16','🧢','棒球帽 男女同款 遮阳防晒 显脸小 可调节',15.9,59,'4.1万',2,['9.9元包邮'],'基础款服饰店','服饰']
+    ];
+    return {
+      products: P.map((x) => ({ id: x[0], em: x[1], img: '', title: x[2], price: x[3], orig: x[4],
+                                sold: x[5], grp: x[6], tags: x[7], shop: x[8], cate: x[9], on: true })),
+      banners: [],
+      /* CHRIS_MALL_NAME_V1 商城名/标语：管理页可以改（用户要求「商城名」） */
+      name: '星言商城',
+      slogan: '拼着买 才便宜'
+    };
+  }
+  function readMall() {
+    const f = path.join(DATA_DIR, 'mall.json');
+    const m = readJson(f, null);
+    if (!m || !Array.isArray(m.products)) { const s0 = mallSeed(); writeJson(f, s0); return s0; }
+    if (!Array.isArray(m.banners)) m.banners = [];
+    if (typeof m.name !== 'string' || !m.name.trim()) m.name = '星言商城';   // CHRIS_MALL_NAME_V1
+    if (typeof m.slogan !== 'string') m.slogan = '拼着买 才便宜';
+    return m;
+  }
+  function saveMall(m) { writeJson(path.join(DATA_DIR, 'mall.json'), m); }
+  if (parts[0] === 'mall' && method === 'GET') { ok(res, readMall()); return; }
+  if (parts[0] === 'ops' && parts[1] === 'mall' && method === 'POST') {
+    if (!isOpsUser(user)) return fail(res, 403, '没有权限');
+    const b = await readBody(req);
+    const m = readMall();
+    const action = String(b.action || '').trim();
+    if (action === 'product') {
+      const it = b.item || {};
+      const id = String(it.id || '').trim() || ('p' + Date.now().toString(36));
+      const one = {
+        id,
+        em: String(it.em || '').slice(0, 8) || '📦',
+        img: String(it.img || '').slice(0, 400),
+        title: String(it.title || '').slice(0, 120) || '新商品',
+        price: Math.max(0, Number(it.price) || 0),
+        orig: Math.max(0, Number(it.orig) || 0),
+        sold: String(it.sold || '').slice(0, 16) || '0',
+        grp: Math.max(2, Math.min(9, Number(it.grp) || 2)),
+        tags: Array.isArray(it.tags) ? it.tags.slice(0, 4).map((t) => String(t).slice(0, 12)) : [],
+        shop: String(it.shop || '').slice(0, 40),
+        cate: String(it.cate || '').slice(0, 20) || '其它',
+        on: it.on === false ? false : true
+      };
+      const i = m.products.findIndex((x) => x.id === id);
+      if (i >= 0) m.products[i] = one; else m.products.unshift(one);
+      saveMall(m); ok(res, m); return;
+    }
+    if (action === 'remove') {
+      const id = String(b.id || '');
+      m.products = m.products.filter((x) => x.id !== id);
+      saveMall(m); ok(res, m); return;
+    }
+    if (action === 'settings') {                       // CHRIS_MALL_NAME_V1 改商城名/标语
+      if (b.name !== undefined) m.name = String(b.name).slice(0, 24).trim() || m.name;
+      if (b.slogan !== undefined) m.slogan = String(b.slogan).slice(0, 40).trim();
+      saveMall(m); ok(res, m); return;
+    }
+    if (action === 'banners') {
+      m.banners = Array.isArray(b.banners) ? b.banners.slice(0, 8).map((u) => String(u).slice(0, 400)) : m.banners;
+      saveMall(m); ok(res, m); return;
+    }
+    return fail(res, 400, 'action 不对');
+  }
+
+  /* 小店：商品 + 我的订单 */
+  if (parts[0] === 'shop' && method === 'GET') {
+    const cfg = readShopCfg();
+    const items = cfg.items.filter((x) => x.on !== false)
+      .sort((a, b) => (Number(a.sort) || 0) - (Number(b.sort) || 0))
+      .map((x) => ({ id: x.id, name: x.name, price: Number(x.price) || 0, img: x.img || '',
+                     kind: x.kind || 'physical', desc: x.desc || '', stock: Number(x.stock) || 0 }));
+    const orders = loadOrders().filter((o) => o.userId === user.id).slice(0, 30);
+    ok(res, { items, orders, balance: Number(user.balance) || 0 });
+    return;
+  }
+  /* 小店：下单（零钱扣款） */
+  if (parts[0] === 'shop' && parts[1] === 'order' && method === 'POST') {
+    const b = await readBody(req);
+    const cfg = readShopCfg();
+    const it = cfg.items.find((x) => x.id === String(b.itemId || '') && x.on !== false);
+    if (!it) return fail(res, 404, '这个商品不在架上了');
+    const count = Math.max(1, Math.min(99, Number(b.count) || 1));
+    const total = Math.round((Number(it.price) || 0) * count * 100) / 100;
+    const bal = Number(user.balance) || 0;
+    if (bal < total) return fail(res, 400, '零钱不够（还差 ' + money(total - bal) + '），去「我 → 服务 → 充值余额」');
+    /* 有支付密码的用户：传了就必须对；没传（比如小额/调试）先放行，App 那边会主动弹密码框 */
+    if (user.payPassword && b.payPassword && String(b.payPassword) !== String(user.payPassword)) {
+      return fail(res, 400, '支付密码不对');
+    }
+    user.balance = Math.round((bal - total) * 100) / 100;
+    if (it.stock !== undefined && it.stock !== null && it.stock !== '') it.stock = Math.max(0, (Number(it.stock) || 0) - count);
+    saveShopCfg(cfg);
+    saveUsers();
+    sendTo(user.id, { type: 'balance', balance: user.balance });
+    const order = { id: uid('od'), userId: user.id, kind: it.kind || 'physical', itemId: it.id,
+                    name: it.name + (count > 1 ? (' ×' + count) : ''), price: total,
+                    address: String(b.address || ''), at: now(), status: '已下单' };
+    const orders = loadOrders(); orders.unshift(order); saveOrders(orders.slice(0, 500));
+    ok(res, { order, balance: user.balance });
+    return;
+  }
+  /* 卡包：我的卡券（优惠券 / 会员卡 / 礼品卡 / 票） */
+  if (parts[0] === 'cards' && method === 'GET') {
+    const mine = readCards().cards.filter((c) => c.userId === user.id)
+      .sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
+    ok(res, { cards: mine });
+    return;
+  }
+  /* 卡包：我自己核销一张（商家扫码那条路由商家侧来做） */
+  if (parts[0] === 'cards' && parts[1] === 'use' && method === 'POST') {
+    const b = await readBody(req);
+    const c = readCards();
+    const one = c.cards.find((x) => x.id === String(b.id || '') && x.userId === user.id);
+    if (!one) return fail(res, 404, '没有这张卡');
+    if (one.used) return fail(res, 400, '这张卡已经用过了');
+    one.used = true; one.usedAt = now();
+    saveCards(c);
+    ok(res, { card: one });
+    return;
+  }
+  /* 管理：小店上架/下架/改价/改库存 + 卡包发卡/核销（只给 ops） */
+  /* 管理：小店全部商品（含已下架的）—— 编辑页要能改上架开关 */
+  /* 管理：红包封面（App 内 ops 账号）—— 和后台 manage.html 的「红包封面」是同一份数据。
+     传的是整份 covers（封面就几张，整份覆盖最简单，也跟后台那套校验完全一致）。 */
+  if (parts[0] === 'ops' && parts[1] === 'rpcovers' && method === 'GET') {
+    if (!isOpsUser(user)) return fail(res, 403, '没有权限');
+    ok(res, { covers: readRpCovers() });
+    return;
+  }
+  if (parts[0] === 'ops' && parts[1] === 'rpcovers' && method === 'POST') {
+    if (!isOpsUser(user)) return fail(res, 403, '没有权限');
+    const b = await readBody(req);
+    const next = {};
+    if (Array.isArray(b.covers)) {
+      next.covers = b.covers.slice(0, 40).map((c, i) => ({
+        id: str(c && c.id, 30) || ('cv' + Date.now().toString().slice(-5) + i),
+        name: str(c && c.name, 20) || ('封面 ' + (i + 1)),
+        image: str(c && c.image, 300),
+        thumb: str(c && (c.thumb || c.image), 300),
+        color: /^#[0-9a-fA-F]{6}$/.test(String((c && c.color) || '')) ? String(c.color) : '#B3241C',
+        enabled: !(c && c.enabled === false)
+      })).filter((c) => c.image);
+      if (!next.covers.length) next.covers = DEFAULT_RP_COVERS.covers;
+    }
+    if (b.defaultId !== undefined) next.defaultId = str(b.defaultId, 30);
+    const saved = saveRpCovers(next);
+    ok(res, { covers: saved });
+    return;
+  }
+  /* 管理：改一个 ui.json 里的开关/数值（App 内 ops 账号）—— 比如「实名前先刷脸」realnameFace。
+     /api/ui 每次现读文件，所以改完 App 重拉一次 UI 配置就生效。 */
+  if (parts[0] === 'ops' && parts[1] === 'ui' && method === 'POST') {
+    if (!isOpsUser(user)) return fail(res, 403, '没有权限');
+    const b = await readBody(req);
+    const key = String(b.key || '').trim();
+    if (!/^[A-Za-z][A-Za-z0-9_]{0,40}$/.test(key)) return fail(res, 422, '键名不合法');
+    let value = b.value;
+    if (typeof value === 'string') {
+      const n = Number(value);
+      value = (value !== '' && !isNaN(n)) ? n : value;
+    }
+    if (!['number', 'string', 'boolean'].includes(typeof value)) return fail(res, 422, '值不合法');
+    const file = path.join(DATA_DIR, 'ui.json');
+    let ui = {};
+    try { ui = JSON.parse(fs.readFileSync(file, 'utf8')) || {}; } catch (e) { ui = {}; }
+    const before = ui[key];
+    ui[key] = value;
+    try { fs.copyFileSync(file, file + '.bak-ops' + Date.now().toString().slice(-6)); } catch (e) { }
+    writeJson(file, ui);
+    console.log('[管理] ui.' + key + ' ' + JSON.stringify(before) + ' -> ' + JSON.stringify(value));
+    ok(res, { key: key, value: value });
+    return;
+  }
+  /* App 日志 / 崩溃汇入（只有 App 内的 ops 账号能看）：
+     手机上的崩溃、异常、体检上传都走 POST /api/clientlog 落到 data/client-errors.jsonl，
+     这里按类型汇总 + 给最近几条（倒序），点开能看到完整调用栈。 */
+  if (parts[0] === 'ops' && parts[1] === 'logs' && method === 'GET') {
+    if (!isOpsUser(user)) return fail(res, 403, '没有权限');
+    const limit = Math.min(200, Math.max(1, Number(query.get('limit')) || 50));
+    const want = String(query.get('kind') || '').trim();
+    let all = [];
+    try {
+      all = fs.readFileSync(path.join(DATA_DIR, 'client-errors.jsonl'), 'utf8')
+        .split('\n').filter(Boolean).map((line) => {
+          try { return JSON.parse(line); } catch (e) { return null; }
+        }).filter(Boolean);
+    } catch (e) { all = []; }
+    const counts = {};
+    all.forEach((r) => { const k = String(r.kind || '未分类'); counts[k] = (counts[k] || 0) + 1; });
+    const kinds = Object.keys(counts).map((k) => ({ kind: k, n: counts[k] })).sort((a, b) => b.n - a.n);
+    let list = all.slice().reverse();
+    if (want) list = list.filter((r) => String(r.kind || '未分类').indexOf(want) >= 0);
+    list = list.slice(0, limit).map((r) => ({
+      id: String(r.id || ''), kind: String(r.kind || ''), text: String(r.text || '').slice(0, 1200),
+      stack: String(r.stack || '').slice(0, 6000), app: String(r.app || ''), user: String(r.user || ''),
+      ip: String(r.ip || ''), at: String(r.at || '')
+    }));
+    ok(res, { total: all.length, kinds: kinds, rows: list });
+    return;
+  }
+  if (parts[0] === 'ops' && parts[1] === 'shop' && method === 'GET') {
+    if (!isOpsUser(user)) return fail(res, 403, '没有权限');
+    ok(res, { items: readShopCfg().items });
+    return;
+  }
+  if (parts[0] === 'ops' && parts[1] === 'shop' && method === 'POST') {
+    if (!isOpsUser(user)) return fail(res, 403, '没有权限');
+    const b = await readBody(req);
+    const cfg = readShopCfg();
+    if (b.removeId) {
+      cfg.items = cfg.items.filter((x) => x.id !== String(b.removeId));
+    } else if (b.item && b.item.id) {
+      const i = cfg.items.findIndex((x) => x.id === String(b.item.id));
+      if (i >= 0) cfg.items[i] = Object.assign({}, cfg.items[i], b.item);
+      else cfg.items.push(Object.assign({ id: uid('g'), kind: 'physical', on: true, stock: 999, sort: cfg.items.length }, b.item));
+    } else if (b.newItem) {
+      cfg.items.push(Object.assign({ id: uid('g'), kind: 'physical', on: true, stock: 999, sort: cfg.items.length }, b.newItem));
+    }
+    saveShopCfg(cfg);
+    ok(res, { items: cfg.items });
+    return;
+  }
+  if (parts[0] === 'ops' && parts[1] === 'cards' && method === 'POST') {
+    if (!isOpsUser(user)) return fail(res, 403, '没有权限');
+    const b = await readBody(req);
+    const c = readCards();
+    /* 按用户名 / 昵称找人（发卡前先搜人） */
+    if (b.action === 'find') {
+      const q = String(b.q || '').trim().toLowerCase();
+      const all = readCards().cards;
+      const rows = db.users
+        .filter((u) => !u.bot)
+        .filter((u) => !q || String(u.username || '').toLowerCase().indexOf(q) >= 0
+                       || String(u.nickname || '').toLowerCase().indexOf(q) >= 0)
+        .slice(0, 12)
+        .map((u) => ({ id: u.id, username: u.username || '', nickname: u.nickname || '',
+                       avatar: u.avatar || '', cards: all.filter((c) => c.userId === u.id).length }));
+      ok(res, { users: rows });
+      return;
+    }
+    /* 某个用户名下的卡（管理页要能看、能删） */
+    if (b.action === 'list') {
+      const target = findUser(String(b.userId || '')) || user;
+      ok(res, { cards: readCards().cards.filter((c) => c.userId === target.id), userId: target.id });
+      return;
+    }
+    if (b.action === 'delete' && b.id) {
+      c.cards = c.cards.filter((x) => x.id !== String(b.id));
+    } else if (b.action === 'issue') {
+      const target = findUser(String(b.userId || '')) || user;
+      c.cards.unshift({ id: uid('cd'), userId: target.id, kind: String(b.kind || 'coupon'),
+                        title: String(b.title || '优惠券'), sub: String(b.sub || ''),
+                        amount: Number(b.amount) || 0, code: String(b.code || uid('code')), used: false,
+                        validTo: String(b.validTo || ''), note: String(b.note || ''), createdAt: now() });
+    }
+    saveCards(c);
+    ok(res, { cards: c.cards.filter((x) => x.userId === (findUser(String(b.userId || '')) || user).id) });
+    return;
+  }
+
   if (parts[0] === 'ops') {
     await handleOps(req, res, parts, query);
     return;
@@ -9639,8 +11388,37 @@ async function handleApi(req, res, pathname, query) {
     prunePairCodes();
     let code = '';
     do { code = String(Math.floor(100000 + Math.random() * 900000)); } while (pairCodes.has(code));
-    pairCodes.set(code, { secret: uid('pair'), createdAt: Date.now(), expiresAt: Date.now() + PAIR_TTL_MS, userId: null, approvedName: '' });
+    /* 发起登录的那台设备是谁：在手机上确认登录时要显示出来（微信的确认页也写设备名） */
+    let stBody = {};
+    try { stBody = await readBody(req); } catch (e) { stBody = {}; }
+    const device = str(stBody.device, 40) || '新设备';
+    /* 发起端能带上「以前登录过的账号名」的话，直接给这个账号已登录的手机推一条确认通知
+       （微信也是新设备一发、老手机就弹）；带不上也没关系 —— 老手机扫二维码一样能确认。 */
+    let hintUserId = '';
+    const hintName = str(stBody.username, 24);
+    if (hintName) {
+      const hu = findUserByName(hintName);
+      if (hu && !hu.bot && !hu.banned) hintUserId = hu.id;
+    }
+    pairCodes.set(code, { secret: uid('pair'), createdAt: Date.now(), expiresAt: Date.now() + PAIR_TTL_MS,
+                          userId: null, approvedName: '', device, ip: clientInfo(req).ip, hintUserId });
+    if (hintUserId) notifyPairRequest(hintUserId, code, device, '');
     ok(res, { code, expiresIn: Math.round(PAIR_TTL_MS / 1000) });
+    return;
+  }
+
+  /* 确认方先看一眼：这是哪台设备在请求登录（微信确认页会写设备名 + 时间） */
+  if (parts[0] === 'pair' && parts[1] === 'info' && method === 'GET') {
+    prunePairCodes();
+    const ic = str(query.get('code'), 10);
+    const irec = pairCodes.get(ic);
+    if (!irec) return ok(res, { status: 'expired' });
+    /* 谁在查这个码 = 谁要确认（已登录的那台）。顺手给他**其它**已登录设备也推一条，
+       这样另一台手机点通知就能直接进「登录确认」卡片，不用手输数字。 */
+    const cuPair = currentUser(req);
+    if (cuPair) notifyPairRequest(cuPair.id, ic, irec.device || '新设备', clientInfo(req).deviceId);
+    ok(res, { status: 'pending', device: irec.device || '新设备', ip: irec.ip || '',
+              at: new Date(irec.createdAt).toISOString() });
     return;
   }
 
@@ -9652,8 +11430,10 @@ async function handleApi(req, res, pathname, query) {
     const u = findUser(rec.userId);
     if (!u) { pairCodes.delete(str(query.get('code'), 10)); return ok(res, { status: 'expired' }); }
     pairCodes.delete(str(query.get('code'), 10));   // 一次性
+    /* 这台新设备刚刚登录成功：记进设备表（型号 / 系统 / 最后登录时间） */
+    try { rememberDevice(u, req); saveUsers(); } catch (e) { }
     ok(res, { status: 'approved', user: publicUser(u) },
-      { 'Set-Cookie': sessionCookie(signToken(u.id), Math.floor(userSessionTtlMs() / 1000)) });
+      { 'Set-Cookie': sessionCookie(signToken(u.id, req), Math.floor(userSessionTtlMs() / 1000)) });
     return;
   }
 
@@ -9714,9 +11494,11 @@ async function handleApi(req, res, pathname, query) {
 
   /* 登录前只开放这几个接口（登录页要用的），其它一律要求先登录。
      这样没账号的黑客连「发现页配了什么、我页配了什么、礼物有哪些」都看不到。 */
-  const PUBLIC_API = ['captcha', 'version', 'health', 'lan', 'branding', 'ui', 'badges', 'endpoints', 'register', 'login', 'logout', 'session', 'pair', 'unban', 'which', 'qr', 'clientlog'];
+  const PUBLIC_API = ['captcha', 'version', 'health', 'lan', 'branding', 'ui', 'badges', 'endpoints', 'register', 'login', 'logout', 'session', 'pair', 'unban', 'account', 'which', 'qr', 'clientlog'];   // CHRIS_FREEZE_V1 加了 account
   if (PUBLIC_API.indexOf(parts[0]) < 0) {
     if (!currentUser(req)) {
+      /* 手机在别处登录了（令牌作废）：回一个明确的 code，App 弹「已在别处登录」卡片 */
+      if (req.__otherLogin) return fail(res, 401, '你的账号在另一台设备上登录了', { code: 'other_login' });
       /* 只有「压根没带令牌」的裸请求才算异常（扫描器）。
          令牌过期是正常现象 —— 以前一律记 strike，会话一过期 App 每次轮询都记一笔，
          60 笔就把整个 IP 封了（用户看到的就是「完全进不去」）。 */
@@ -9730,7 +11512,33 @@ async function handleApi(req, res, pathname, query) {
   {
     const cu = currentUser(req);
     if (cu) {
-      const blocked = teenBlocked(cu, parts);
+      /* 设备表里的「最后活跃时间」：同一台设备最多每 20 分钟写一次 */
+      try {
+        const info0 = clientInfo(req);
+        if (info0.deviceId) {
+          const list0 = Array.isArray(cu.devices) ? cu.devices : [];
+          const hit0 = list0.filter((d) => (d.id || '') === info0.deviceId)[0];
+          if (hit0) {
+            if (Date.now() - msOf(hit0.at) > 20 * 60 * 1000) {
+              hit0.at = now();
+              hit0.ip = info0.ip || hit0.ip;
+              if (info0.model) hit0.model = friendlyModelName(info0.model);
+              if (info0.os) hit0.os = info0.os;
+              saveUsers();
+            }
+          } else if (list0.length) {
+            /* 新设备登录：给用户发一条系统通知（和微信团队一样） */
+            try {
+              const i1 = clientInfo(req);
+              sysNotice(cu.id, '你的账号在' + (i1.model ? friendlyModelName(i1.model) : '新设备')
+                + '上登录了（' + (i1.os || '') + '，IP ' + (i1.ip || '') + '）。不是你操作的？去「我 → 设置 → 账号与安全 → 登录设备管理」看看。', '登录提醒', 'login');
+            } catch (e) {}
+            rememberDevice(cu, req);
+            saveUsers();
+          }
+        }
+      } catch (e) { }
+      const blocked = teenBlocked(cu, parts, method);
       if (blocked) return fail(res, 403, blocked);
     }
   }
@@ -9896,6 +11704,18 @@ async function handleApi(req, res, pathname, query) {
     return;
   }
 
+  /* 搜索页的「猜你想搜」：后台 data/search-hot.json 里配词（words: [...]），
+     App 进搜索页拉一次；改完不用出包。没配就给内置那组。 */
+  if (parts[0] === 'search-hot' && method === 'GET') {
+    const cfg = readJson(path.join(DATA_DIR, 'search-hot.json'), { words: null });
+    const def = ['朋友圈', '聊天记录', '公众号', '视频号', '附近的人', '群聊'];
+    const words = Array.isArray(cfg.words) && cfg.words.length
+      ? cfg.words.map((w) => String(w || '').trim()).filter(Boolean).slice(0, 20)
+      : def;
+    ok(res, { words });
+    return;
+  }
+
   /* 多入口：App 每次进前台拉一次，主入口连不上时按这张表自动换线路。
      放在公开接口里（还没登录也要能拿到），后台「线路入口」页可以随时改。 */
   if (parts[0] === 'endpoints' && method === 'GET') {
@@ -9913,6 +11733,19 @@ async function handleApi(req, res, pathname, query) {
     try {
       icons = JSON.parse(fs.readFileSync(path.join(DATA_DIR, 'icons.json'), 'utf8')) || {};
     } catch (err) { icons = {}; }
+    /* 按版本回落：换成「自定义 SVG」的那批图标，B856 之前的 App 解析器不认
+       fill-rule=evenodd —— 现成图标集（Iconly 这类）是用「一条 path + 奇偶挖空」
+       画轮廓的，老解析器只会按默认规则填，会把齿轮中间的孔、放大镜的圈糊成实心块。
+       所以老版本一律不发 SVG 覆盖，让它们继续用内置图标（图片/emoji 那类照发）。 */
+    const uiBuildNo = Number((String(req.headers['x-app-build'] || '').match(/B(\d+)/) || [])[1] || 0);
+    const SVG_ICON_MIN_BUILD = 856;
+    if (uiBuildNo && uiBuildNo < SVG_ICON_MIN_BUILD) {
+      const kept = {};
+      Object.keys(icons).forEach((k) => {
+        if (!String(icons[k] || '').trim().startsWith('<svg')) kept[k] = icons[k];
+      });
+      icons = kept;
+    }
     ok(res, { ui, icons });
     return;
   }
@@ -10428,6 +12261,473 @@ async function handleApi(req, res, pathname, query) {
     return;
   }
 
+  /* 音乐：我正在听什么（好友的「朋友推荐」那一栏看这个） */
+  if (parts[0] === 'music' && parts[1] === 'now' && method === 'POST') {
+    const b = await readBody(req);
+    const t = {
+      id: str(b.id, 60),
+      title: str(b.title, 80),
+      artist: str(b.artist, 80),
+      cover: str(b.cover, 400),
+      url: str(b.url, 400)
+    };
+    if (!t.title) return fail(res, 422, '缺少歌名');
+    const j = readMusicNow();
+    j.users[user.id] = Object.assign({}, t, { at: Date.now() });
+    saveMusicNow(j);
+    ok(res, { at: j.users[user.id].at });
+    return;
+  }
+
+  /* 我好友最近在听的（2 小时内的才算"在听"；机器人不进） */
+  if (parts[0] === 'music' && parts[1] === 'friends' && method === 'GET') {
+    const j = readMusicNow();
+    const now = Date.now();
+    const rows = [];
+    friendIds(user.id).forEach((id) => {
+      const it = j.users[id];
+      if (!it || !it.title) return;
+      if (now - Number(it.at || 0) > 2 * 3600 * 1000) return;
+      const u = findUser(id);
+      if (!u || u.bot) return;
+      rows.push({
+        id: id,
+        name: displayNameFor(user.id, u) || u.nickname || u.username || '好友',
+        avatar: u.avatar || '',
+        trackId: it.id || '',
+        title: it.title,
+        artist: it.artist || '',
+        cover: it.cover || '',
+        url: it.url || '',
+        at: Number(it.at) || 0
+      });
+    });
+    rows.sort((a, b) => (b.at - a.at) || String(a.name).localeCompare(String(b.name)));
+    ok(res, { list: rows.slice(0, 50), mine: j.users[user.id] || null });
+    return;
+  }
+
+  /* 给好友的状态点个赞 / 取消（「朋友的状态」那一页） */
+  if (parts[0] === 'status' && parts[1] === 'like' && method === 'POST') {
+    const b = await readBody(req);
+    const id = str(b.id, 60);
+    const target = findUser(id);
+    if (!target) return fail(res, 404, '找不到这个人');
+    if (id === user.id) return fail(res, 422, '不能给自己的状态点赞');
+    if (!Array.isArray(target.moodLikes)) target.moodLikes = [];
+    const at = target.moodLikes.indexOf(user.id);
+    if (at >= 0) target.moodLikes.splice(at, 1);
+    else {
+      target.moodLikes.push(user.id);
+      /* 顺手给对方发一条实时事件：他那边能马上看到小红点/点赞数变了 */
+      sendTo(id, { type: 'statusLike', userId: user.id, name: displayNameFor(id, user) || '' });
+    }
+    saveUsers();
+    ok(res, { liked: at < 0, count: target.moodLikes.length });
+    return;
+  }
+
+  /* 给这首歌点个赞 / 取消（播放器下面那颗心） */
+  if (parts[0] === 'music' && parts[1] === 'like' && method === 'POST') {
+    const b = await readBody(req);
+    const id = str(b.id, 60);
+    const dbm = readMusicDb();
+    const t = dbm.tracks.filter((x) => x.id === id)[0];
+    if (!t) return fail(res, 404, '找不到这首歌');
+    if (!Array.isArray(t.likes)) t.likes = [];
+    const at = t.likes.indexOf(user.id);
+    if (at >= 0) t.likes.splice(at, 1);
+    else t.likes.push(user.id);
+    saveMusicDb(dbm);
+    ok(res, { liked: at < 0, count: t.likes.length });
+    return;
+  }
+
+  /* 转发一次（把音乐卡片发给好友时调一下）：只用来显示"被转了 N 次" */
+  if (parts[0] === 'music' && parts[1] === 'share' && method === 'POST') {
+    const b = await readBody(req);
+    const id = str(b.id, 60);
+    const dbm = readMusicDb();
+    const t = dbm.tracks.filter((x) => x.id === id)[0];
+    if (!t) return fail(res, 404, '找不到这首歌');
+    t.shares = (Number(t.shares) || 0) + 1;
+    saveMusicDb(dbm);
+    ok(res, { count: t.shares });
+    return;
+  }
+
+  /* ---------------- 棋牌大厅：桌子 ---------------- */
+  if (parts[0] === 'games' && parts[1] === 'tables') {
+    const sub = parts[2] || '';
+
+    /* 大厅：现在摆着哪些桌子 */
+    if (sub === '' && method === 'GET') {
+      const want = str(query.get('game'), 20) || 'g09';
+      const j = readTables();
+      const list = j.tables.filter((t) => (t.game || 'g09') === want)
+        .sort((a, b) => (b.at || 0) - (a.at || 0)).slice(0, 30)
+        .map((t) => tablePublic(t, user.id));
+      ok(res, { tables: list });
+      return;
+    }
+
+    /* 自己开一桌 */
+    if (sub === 'create' && method === 'POST') {
+      const b = await readBody(req);
+      const game = str(b.game, 20) || 'g09';
+      const j = readTables();
+      const seat = {
+        id: user.id,
+        name: displayNameFor(user.id, user) || user.nickname || '我',
+        avatar: user.avatar || '', at: Date.now()
+      };
+      const t = {
+        code: newTableCode(), game: game, host: user.id, started: false,
+        seats: [seat, null, null, null], moves: [], seq: 0, at: Date.now()
+      };
+      j.tables.push(t);
+      saveTables(j);
+      ok(res, { table: tablePublic(t, user.id), seat: 0 });
+      return;
+    }
+
+    /* 坐下（自动找最靠前的空位） */
+    if (sub === 'sit' && method === 'POST') {
+      const b = await readBody(req);
+      const code = str(b.code, 10);
+      const j = readTables();
+      const t = j.tables.filter((x) => x.code === code)[0];
+      if (!t) return fail(res, 404, '这张桌子没了（可能散场了）');
+      if (!Array.isArray(t.seats)) t.seats = [null, null, null, null];
+      let mine = t.seats.findIndex((x) => x && x.id === user.id);
+      if (mine < 0) {
+        mine = t.seats.findIndex((x) => !x);
+        if (mine < 0) return fail(res, 409, '这桌坐满了，换一桌吧');
+        t.seats[mine] = {
+          id: user.id, name: displayNameFor(user.id, user) || user.nickname || '玩家',
+          avatar: user.avatar || '', at: Date.now()
+        };
+      }
+      if (!t.host) t.host = user.id;
+      t.at = Date.now();
+      const full = t.seats.filter(Boolean).length >= 4;
+      if (full && !t.started) { t.started = true; t.seq = 0; t.moves = []; }
+      saveTables(j);
+      /* 通知同桌的人刷新 */
+      t.seats.filter(Boolean).forEach((x) => {
+        if (x.id !== user.id) sendTo(x.id, { type: 'gameTable', code: code });
+      });
+      ok(res, { table: tablePublic(t, user.id), seat: mine, started: t.started });
+      return;
+    }
+
+    /* 开始（人没满也能先开，剩下的位由 AI 顶着） */
+    if (sub === 'start' && method === 'POST') {
+      const b = await readBody(req);
+      const code = str(b.code, 10);
+      const j = readTables();
+      const t = j.tables.filter((x) => x.code === code)[0];
+      if (!t) return fail(res, 404, '这张桌子没了');
+      t.started = true;
+      t.seq = 0;
+      t.moves = [];
+      t.at = Date.now();
+      saveTables(j);
+      (t.seats || []).filter(Boolean).forEach((x) => {
+        if (x.id !== user.id) sendTo(x.id, { type: 'gameTable', code: code, started: true });
+      });
+      ok(res, { table: tablePublic(t, user.id) });
+      return;
+    }
+
+    /* 离开 */
+    if (sub === 'leave' && method === 'POST') {
+      const b = await readBody(req);
+      const code = str(b.code, 10);
+      const j = readTables();
+      const t = j.tables.filter((x) => x.code === code)[0];
+      if (t) {
+        t.seats = (t.seats || []).map((x) => (x && x.id === user.id) ? null : x);
+        t.at = Date.now();
+        if (!t.seats.filter(Boolean).length) j.tables = j.tables.filter((x) => x.code !== code);
+        saveTables(j);
+      }
+      ok(res, { left: true });
+      return;
+    }
+
+    /* 走一步：记下来，同桌的人轮询就能拿到 */
+    if (sub === 'move' && method === 'POST') {
+      const b = await readBody(req);
+      const code = str(b.code, 10);
+      const j = readTables();
+      const t = j.tables.filter((x) => x.code === code)[0];
+      if (!t) return fail(res, 404, '这张桌子没了');
+      const seat = (t.seats || []).findIndex((x) => x && x.id === user.id);
+      if (seat < 0) return fail(res, 403, '你没坐在这张桌子上');
+      t.seq = (Number(t.seq) || 0) + 1;
+      t.moves = (t.moves || []).concat([{ n: t.seq, seat: seat, move: b.move }]).slice(-500);
+      t.at = Date.now();
+      saveTables(j);
+      ok(res, { n: t.seq });
+      return;
+    }
+
+    /* 拉别人走的步 */
+    if (sub === 'moves' && method === 'GET') {
+      const code = str(query.get('code'), 10);
+      const since = Number(query.get('since')) || 0;
+      const j = readTables();
+      const t = j.tables.filter((x) => x.code === code)[0];
+      if (!t) return fail(res, 404, '这张桌子没了');
+      const list = (t.moves || []).filter((m) => m.n > since);
+      ok(res, { n: Number(t.seq) || 0, moves: list, started: !!t.started, table: tablePublic(t, user.id) });
+      return;
+    }
+  }
+
+  /* ============ App 里的「管理」（只有 ops = true 的用户能用） ============ */
+
+  /* 拿管理页要的数据：曲库 + 小游戏/小程序清单 */
+  if (parts[0] === 'manage' && parts.length === 1 && method === 'GET') {
+    const mu = currentUser(req);
+    if (!mu) return fail(res, 401, '请先登录');
+    if (!mu.ops) return fail(res, 403, '你没有管理权限');
+    ok(res, {
+      music: readMusicDb().tracks,
+      apps: miniAppList(null),
+      games: miniAppList('game')
+    });
+    return;
+  }
+
+  /* 上新音乐（音频先用 /api/upload 传，再把地址发过来） */
+  if (parts[0] === 'manage' && parts[1] === 'music' && parts.length === 2 && method === 'POST') {
+    const mu = currentUser(req);
+    if (!mu) return fail(res, 401, '请先登录');
+    if (!mu.ops) return fail(res, 403, '你没有管理权限');
+    const b = await readBody(req);
+    const title = str(b.title, 60).replace(/\s+/g, ' ').trim();
+    const url = str(b.url, 400).trim();
+    if (!title) return fail(res, 422, '歌名不能为空');
+    if (!/^(\/uploads\/|https?:\/\/)/.test(url)) return fail(res, 422, '先上传音频文件');
+    /* iOS 只认 mp3 / m4a / wav / aac：别的格式（flac、ape、wma、下载来的怪后缀）
+       在这里先用 ffmpeg 转成 mp3 再入库，不然 App 里点了没声音。 */
+    let finalUrl = url;
+    if (url.indexOf('/uploads/') === 0) {
+      const base = path.basename(url);
+      const ext = path.extname(base).toLowerCase();
+      if (['.mp3', '.m4a', '.mp4', '.wav', '.aac'].indexOf(ext) < 0) {
+        const conv = transcodeAudioToMp3(base);
+        if (!conv) return fail(res, 422, '这个音频转不成 mp3（可能是加密格式或文件损坏）—— 换成 mp3 / m4a / flac 再传一次');
+        finalUrl = conv;
+      }
+    }
+    const dbm = readMusicDb();
+    const id = str(b.id, 60);
+    const old = id ? dbm.tracks.filter((t) => t.id === id)[0] : null;
+    if (old) {
+      old.title = title;
+      old.artist = str(b.artist, 60).trim();
+      if (/^(\/uploads\/|https?:\/\/)/.test(str(b.cover, 400).trim())) old.cover = str(b.cover, 400).trim();
+      old.url = finalUrl;
+    } else {
+      dbm.tracks.unshift({
+        id: uid('mus'),
+        title: title,
+        artist: str(b.artist, 60).trim(),
+        cover: /^(\/uploads\/|https?:\/\/)/.test(str(b.cover, 400).trim()) ? str(b.cover, 400).trim() : '',
+        url: finalUrl,
+        lyrics: str(b.lyrics, 20000),
+        at: Date.now()
+      });
+    }
+    saveMusicDb(dbm);
+    ok(res, { tracks: dbm.tracks.length, id: old ? old.id : dbm.tracks[0].id });
+    return;
+  }
+
+  /* App 管理页里的「系统通知」开关（同一个配置文件） */
+  if (parts[0] === 'manage' && parts[1] === 'sysnotice' && method === 'GET') {
+    const mu = currentUser(req);
+    if (!mu) return fail(res, 401, '请先登录');
+    if (!mu.ops) return fail(res, 403, '你没有管理权限');
+    ok(res, readSysNoticeCfg());
+    return;
+  }
+  if (parts[0] === 'manage' && parts[1] === 'sysnotice' && method === 'POST') {
+    const mu2 = currentUser(req);
+    if (!mu2) return fail(res, 401, '请先登录');
+    if (!mu2.ops) return fail(res, 403, '你没有管理权限');
+    const mb = await readBody(req);
+    const cur = readSysNoticeCfg();
+    if (mb.enabled !== undefined) cur.enabled = mb.enabled ? 1 : 0;
+    if (mb.types && typeof mb.types === 'object') {
+      Object.keys(cur.types).forEach((k) => { if (mb.types[k] !== undefined) cur.types[k] = mb.types[k] ? 1 : 0; });
+    }
+    saveSysNoticeCfg(cur);
+    ok(res, cur);
+    return;
+  }
+
+  /* 批量删除音乐（管理页多选以后点删除） */
+  if (parts[0] === 'manage' && parts[1] === 'music' && parts[2] === 'remove' && method === 'POST') {
+    const mu = currentUser(req);
+    if (!mu) return fail(res, 401, '请先登录');
+    if (!mu.ops) return fail(res, 403, '你没有管理权限');
+    const b = await readBody(req);
+    const ids = Array.isArray(b.ids) ? b.ids.map((x) => String(x).slice(0, 60)) : [];
+    const one = str(b.id, 60);
+    const kill = ids.length ? ids : (one ? [one] : []);
+    if (!kill.length) return fail(res, 422, '没选要删的歌');
+    const dbm = readMusicDb();
+    const before = dbm.tracks.length;
+    dbm.tracks = dbm.tracks.filter((t) => kill.indexOf(t.id || '') < 0);
+    saveMusicDb(dbm);
+    ok(res, { removed: before - dbm.tracks.length, tracks: dbm.tracks.length });
+    return;
+  }
+
+  /* 改小程序/小游戏：名字、说明、图标（emoji）、入口地址 */
+  if (parts[0] === 'manage' && parts[1] === 'miniapp' && method === 'POST') {
+    const mu = currentUser(req);
+    if (!mu) return fail(res, 401, '请先登录');
+    if (!mu.ops) return fail(res, 403, '你没有管理权限');
+    const b = await readBody(req);
+    const id = str(b.id, 60);
+    const cfg = readMiniApps();
+    const it = (cfg.items || []).filter((x) => (x.id || '') === id)[0];
+    if (!it) return fail(res, 404, '找不到这个小程序');
+    if (b.name !== undefined) it.name = str(b.name, 20) || it.name;
+    if (b.desc !== undefined) it.desc = str(b.desc, 40);
+    if (b.icon !== undefined) it.icon = str(b.icon, 8);
+    if (b.group !== undefined) it.group = str(b.group, 16);
+    if (b.action !== undefined) it.action = str(b.action, 6);
+    if (b.url !== undefined) {
+      const u = str(b.url, 400);
+      if (u && !/^(\/|https?:\/\/)/.test(u)) return fail(res, 422, '入口地址要是 / 开头的路径或 http(s) 网址');
+      if (u) it.url = u;
+    }
+    if (b.cover !== undefined) {
+      const c = str(b.cover, 400).trim();
+      if (c && !/^(\/uploads\/|https?:\/\/)/.test(c)) return fail(res, 422, '图标图片先上传再设置');
+      it.cover = c;
+    }
+    saveMiniApps(cfg);
+    ok(res, { id: id, item: it });
+    return;
+  }
+
+  /* 换图标：音乐封面 或 小游戏图标（都是换一张图） */
+  if (parts[0] === 'manage' && parts[1] === 'icon' && method === 'POST') {
+    const mu = currentUser(req);
+    if (!mu) return fail(res, 401, '请先登录');
+    if (!mu.ops) return fail(res, 403, '你没有管理权限');
+    const b = await readBody(req);
+    const kind = str(b.kind, 20);
+    const id = str(b.id, 60);
+    const cover = str(b.cover, 400).trim();
+    if (!/^(\/uploads\/|https?:\/\/)/.test(cover)) return fail(res, 422, '先上传图片');
+    if (kind === 'music') {
+      const dbm = readMusicDb();
+      const t = dbm.tracks.filter((x) => x.id === id)[0];
+      if (!t) return fail(res, 404, '找不到这首歌');
+      t.cover = cover;
+      saveMusicDb(dbm);
+      ok(res, { id: id, cover: cover });
+      return;
+    }
+    if (kind === 'miniapp') {
+      const cfg = readMiniApps();
+      const it = (cfg.items || []).filter((x) => (x.id || '') === id)[0];
+      if (!it) return fail(res, 404, '找不到这个小游戏');
+      it.cover = cover;
+      saveMiniApps(cfg);
+      ok(res, { id: id, cover: cover });
+      return;
+    }
+    return fail(res, 422, 'kind 只能是 music 或 miniapp');
+  }
+
+  /* 官方号（名字 / 头像）：GET 拿清单，POST 改一个 —— 都属于「管理」，只有 ops 能用 */
+  if (parts[0] === 'manage' && parts[1] === 'official' && parts.length === 2 && method === 'GET') {
+    const mu = currentUser(req);
+    if (!mu) return fail(res, 401, '请先登录');
+    if (!mu.ops) return fail(res, 403, '你没有管理权限');
+    ok(res, { items: officialList() });
+    return;
+  }
+  if (parts[0] === 'manage' && parts[1] === 'official' && parts.length === 2 && method === 'POST') {
+    const mu2 = currentUser(req);
+    if (!mu2) return fail(res, 401, '请先登录');
+    if (!mu2.ops) return fail(res, 403, '你没有管理权限');
+    const mb = await readBody(req);
+    const k = str(mb.key, 40).trim();
+    if (!k) return fail(res, 422, '缺少 key');
+    if (OFFICIAL_KEYS.indexOf(k) < 0) return fail(res, 422, '这个号不能改');
+    const cfg = readOfficial();
+    const cur = (cfg[k] && typeof cfg[k] === 'object') ? cfg[k] : {};
+    if (mb.name !== undefined) {
+      const nm = str(mb.name, 20).trim();
+      if (!nm) return fail(res, 422, '名字不能为空');
+      cur.name = nm;
+    }
+    if (mb.avatar !== undefined) {
+      const av = str(mb.avatar, 400).trim();
+      if (av && !/^(\/uploads\/|https?:\/\/)/.test(av)) return fail(res, 422, '头像先上传再设置');
+      cur.avatar = av;
+    }
+    cfg[k] = cur;
+    saveOfficial(cfg);
+    applyOfficial(k);
+    ok(res, { items: officialList() });
+    return;
+  }
+
+  /* 小游戏：报分（App 的运行时在小游戏里自动调，游戏自己不用改） */
+  if (parts[0] === 'games' && parts[1] === 'score' && method === 'POST') {
+    const mu = currentUser(req);
+    if (!mu) return fail(res, 401, '请先登录');
+    const b = await readBody(req);
+    const game = str(b.game, 40).replace(/[^A-Za-z0-9_.-]/g, '');
+    const score = Math.max(0, Math.floor(Number(b.score) || 0));
+    if (!game) return fail(res, 422, '缺少游戏标识');
+    const dbg = readGameScores();
+    const g = dbg.scores[game] || (dbg.scores[game] = {});
+    const old = Number(g[mu.id]) || 0;
+    if (score > old) { g[mu.id] = score; saveGameScores(dbg); }
+    ok(res, { game: game, best: Math.max(old, score), improved: score > old });
+    return;
+  }
+
+  /* 小游戏：好友排名（我 + 我的好友，按最高分排） */
+  if (parts[0] === 'games' && parts[1] === 'rank' && method === 'GET') {
+    const mu = currentUser(req);
+    if (!mu) return fail(res, 401, '请先登录');
+    const game = str(query.get('game'), 40).replace(/[^A-Za-z0-9_.-]/g, '');
+    const dbg = readGameScores();
+    const g = dbg.scores[game] || {};
+    const ids = [mu.id].concat(friendIds(mu.id));
+    const rows = [];
+    ids.forEach((id) => {
+      const u = findUser(id);
+      if (!u || u.bot) return;                 // 机器人不进榜
+      rows.push({
+        id: id,
+        name: displayNameFor(mu.id, u) || u.nickname || u.username || '好友',
+        avatar: u.avatar || '',
+        score: Number(g[id]) || 0,
+        me: id === mu.id
+      });
+    });
+    rows.sort((a, b) => (b.score - a.score) || String(a.name).localeCompare(String(b.name)));
+    rows.forEach((r, i) => { r.rank = i + 1; });
+    const mine = rows.filter((r) => r.me)[0] || { rank: rows.length, score: 0 };
+    ok(res, { game: game, list: rows.slice(0, 60), total: rows.length,
+              myRank: mine.rank || 0, myScore: mine.score || 0 });
+    return;
+  }
+
   if (parts[0] === 'games' && method === 'GET') {
     const cfg = readJson(path.join(DATA_DIR, 'games.json'), { items: [] });
     ok(res, { items: (cfg.items || []).filter((x) => x.enabled !== false) });
@@ -10533,7 +12833,7 @@ async function handleApi(req, res, pathname, query) {
 
   // 聊天输入栏「＋」面板（手机版启动时就拉这份配置）
   if (parts[0] === 'plus-panel' && method === 'GET') {
-    ok(res, { items: db.plusPanel });
+    ok(res, { items: db.plusPanel, quick: db.quickBar, plus: db.plusButton });
     return;
   }
 
@@ -10547,9 +12847,17 @@ async function handleApi(req, res, pathname, query) {
     defs.forEach((d) => { builtin[d.key] = d.svg || ''; });
     const items = (db.discover || [])
       .filter((it) => it.enabled !== false)
-      .map((it) => Object.assign({}, it, {
-        svg: it.svg || overrides[it.icon] || builtin[it.icon] || ''
-      }));
+      .map((it) => {
+        let svg = it.svg || overrides[it.icon] || builtin[it.icon] || '';
+        /* 和「我」页一套规矩：会动的图标（anim:xxx）只发给认识它的版本，
+           老版本回落到它本来就认识的静态 SVG —— 不然会被画成一串文字。 */
+        if (svg.indexOf('anim:') === 0) {
+          const bm = String(req.headers['x-app-build'] || '').match(/B(\d+)/);
+          const buildNo = bm ? Number(bm[1]) : 0;
+          if (buildNo < 723) svg = builtin[it.icon] || svg;
+        }
+        return Object.assign({}, it, { svg: svg });
+      });
     ok(res, { items, version: assetVersion() });
     return;
   }
@@ -10562,14 +12870,17 @@ async function handleApi(req, res, pathname, query) {
     defs.forEach((d) => { builtin[d.key] = d.svg || ''; });
     /* 会动的图标（服务端写 anim:xxx）只发给 B723 及以后的版本：
        老版本不认识这个字段，会把它当文字画出来 —— 所以按版本回落成静态 PNG。 */
-    const ANIM_MIN_BUILD = 723;
+    const ANIM_MIN_BUILD = 832;
     const ANIM_FALLBACK = {
       service: '/uploads/micon-service.png',
       favorites: '/uploads/micon-favorites.png',
       moments: '/uploads/micon-moments.png',
       works: '/uploads/micon-works.png',
       stickers: '/uploads/micon-stickers.png',
-      settings: '/uploads/micon-settings.png'
+      settings: '/uploads/micon-settings.png',
+      /* 我页照微信补的两行：老版本上没有对应的静态图，先借用主题接近的那两张 */
+      shop: '/uploads/micon-works.png',
+      plugins: '/uploads/micon-settings.png'
     };
     const meBuildNo = (() => {
       const m = String(req.headers['x-app-build'] || '').match(/B(\d+)/);
@@ -10589,6 +12900,15 @@ async function handleApi(req, res, pathname, query) {
     return;
   }
 
+
+
+  /* 聊天壁纸：App「聊天背景」页的 6 张基础壁纸 + 默认壁纸（全部后台配，不用出新包） */
+  if (parts[0] === 'chat-bg' && method === 'GET') {
+    const cfg = db.chatBg || normalizeChatBg(null);
+    ok(res, { default: cfg.default, presets: cfg.presets,
+              version: String(cfg.version) + '-' + String(assetVersion()) });
+    return;
+  }
   /* 服务页（我 → 服务）：整页都由后台配（绿卡 + 分类 + 格子），
      前端每次进来拉一次，后台改完切回前台就生效。 */
   if (parts[0] === 'service' && method === 'GET') {
@@ -11236,7 +13556,7 @@ async function handleApi(req, res, pathname, query) {
     noteSignupRisk(user, req);   // 风控：同 IP 批量注册（要在记安全事件之前算，才算得准）
     recordSecurity(user.id, req, 'register');
     ok(res, { user: publicUser(user) },
-      { 'Set-Cookie': sessionCookie(signToken(user.id), Math.floor(userSessionTtlMs() / 1000)) });
+      { 'Set-Cookie': sessionCookie(signToken(user.id, req), Math.floor(userSessionTtlMs() / 1000)) });
     return;
   }
 
@@ -11254,6 +13574,7 @@ async function handleApi(req, res, pathname, query) {
     const user = db.users.find((u) => normalizePhone(u.phone) === phone);
     if (!user) return fail(res, 404, '这个手机号还没有绑定账号，先用账号密码登录，在「手机号」里绑定');
     if (user.banned) return fail(res, 403, banMsg(user));
+    if (user.frozen) return fail(res, 403, frozenMsg(user));      // CHRIS_FREEZE_V1
     const code = String(Math.floor(100000 + Math.random() * 900000));
     phoneCodes.set(phone, { code, userId: user.id, expiresAt: Date.now() + 5 * 60 * 1000 });
     recordSecurity(user.id, req, 'phone-code', { phone });
@@ -11296,13 +13617,14 @@ async function handleApi(req, res, pathname, query) {
     const salt = crypto.randomBytes(16).toString('hex');
     target.salt = salt;
     target.passwordHash = hashPassword(nextPwd, salt);
+    sysNotice(target.id, '你的账号密码被客服重置了（如果不是你申请的，请马上联系客服）。', '安全提醒', 'security');
     target.passwordUpdatedAt = now();
     target.tokenVersion = (target.tokenVersion || 0) + 1;
     saveUsers();
     phoneCodes.delete(phone);
     recordSecurity(target.id, req, 'reset-password', { phone: phone });
     ok(res, { user: publicUser(target), reset: true },
-      { 'Set-Cookie': sessionCookie(signToken(target.id), Math.floor(userSessionTtlMs() / 1000)) });
+      { 'Set-Cookie': sessionCookie(signToken(target.id, req), Math.floor(userSessionTtlMs() / 1000)) });
     return;
   }
 
@@ -11317,13 +13639,15 @@ async function handleApi(req, res, pathname, query) {
     const user = findUser(rec.userId);
     if (!user) return fail(res, 404, '账号不存在');
     if (user.banned) return fail(res, 403, banMsg(user));
+    if (user.frozen) return fail(res, 403, frozenMsg(user));      // CHRIS_FREEZE_V1
     phoneCodes.delete(phone);
     rememberDevice(user, req);      // 短信登录也记设备（换设备登录才会被要求验证）
+    kickOtherPhones(user, req);     // 手机单点登录：新手机一登，旧手机立刻下线
     saveUsers();
     noteLoginRisk(user, req);   // 风控：新设备 / 同 IP 多账号（要在记安全事件之前算）
     recordSecurity(user.id, req, 'login');
     ok(res, { user: publicUser(user) },
-      { 'Set-Cookie': sessionCookie(signToken(user.id), Math.floor(userSessionTtlMs() / 1000)) });
+      { 'Set-Cookie': sessionCookie(signToken(user.id, req), Math.floor(userSessionTtlMs() / 1000)) });
     return;
   }
 
@@ -11353,17 +13677,213 @@ async function handleApi(req, res, pathname, query) {
       return fail(res, 401, '用户名或密码不正确');
     }
     if (user.banned) return fail(res, 403, banMsg(user));
+    if (user.frozen) return fail(res, 403, frozenMsg(user));      // CHRIS_FREEZE_V1
     clearLoginFails([kUser, kIp]);
     rememberDevice(user, req);      // 这台设备登过这个账号了：下次同一台设备直接过
+    kickOtherPhones(user, req);     // 手机单点登录：新手机一登，旧手机立刻下线
     saveUsers();
     noteLoginRisk(user, req);   // 风控：新设备 / 同 IP 多账号（要在记安全事件之前算）
     recordSecurity(user.id, req, 'login');
     ok(res, { user: publicUser(user) },
-      { 'Set-Cookie': sessionCookie(signToken(user.id), Math.floor(userSessionTtlMs() / 1000)) });
+      { 'Set-Cookie': sessionCookie(signToken(user.id, req), Math.floor(userSessionTtlMs() / 1000)) });
     return;
   }
 
   /* 身份证自助解封：被封的账号在登录页填「账号 + 密码 + 身份证号」就能自己解开 */
+  /* ============================================================ 冻结 / 解冻（CHRIS_FREEZE_V1）
+     2026-10-12 用户要求「把微信的真实封号和解冻、可以自己冻结做出来对齐」：
+       · 自己冻结：POST /api/me/freeze（登录态；设过登录密码要先验密码）
+         —— 冻上以后所有设备都会拿到 403，App 自己退回登录页并显示原因
+       · 自助解冻：POST /api/account/unfreeze（不需要登录；账号 + 密码 +（可选）实名身份证号）
+         —— 解开之后直接把登录态发下去（和「身份证自助解封」同一套写法）
+       · 查状态：GET /api/account/state?u=账号 → 登录页用它决定提示「被冻结」还是「被禁用」
+       · 管理侧：POST /api/ops/account（冻结 / 解冻 / 封禁 / 解封，带原因）
+     ============================================================ */
+  if (parts[0] === 'account' && parts[1] === 'state' && method === 'GET') {
+    const q = str(query.get('u'), 24);
+    const u = findUserByName(q) || (normalizePhone(q) ? db.users.find((x) => normalizePhone(x.phone) && normalizePhone(x.phone) === normalizePhone(q)) : null);   // CHRIS_FREEZE_V1b
+    ok(res, {
+      exists: !!u,
+      banned: !!(u && u.banned),
+      frozen: !!(u && u.frozen),
+      reason: u ? (u.banned ? (u.banReason || '') : (u.frozenReason || '')) : ''
+    });
+    return;
+  }
+
+  if (parts[0] === 'account' && parts[1] === 'unfreeze' && method === 'POST') {
+    const body = await readBody(req);
+    const ip = clientInfo(req).ip;
+    if (!unbanRateAllow(ip)) return fail(res, 429, '试得太频繁了，10 分钟后再试');
+    const rawName = str(body.username, 24);
+    const u = findUserByName(rawName)
+      || (normalizePhone(rawName) ? db.users.find((x) => normalizePhone(x.phone) && normalizePhone(x.phone) === normalizePhone(rawName)) : null);   // CHRIS_FREEZE_V1b
+    if (!u) return fail(res, 404, '这个账号不存在');
+    if (!verifyPassword(u, String(body.password || ''))) {
+      noteLoginFail('u:' + u.username);
+      noteLoginFail('ip:' + ip);
+      return fail(res, 401, '账号或密码不对');
+    }
+    if (!u.frozen) return fail(res, 409, '这个账号没有被冻结，直接登录就行');
+    const idc = normalizeIdCard(body.idCard);
+    if (idc) {
+      if (!isValidIdCard(idc)) {
+        return fail(res, 422, '身份证号不合法：要 18 位，前 6 位是地区、中间 8 位是生日、最后一位是校验位（可能是 X）');
+      }
+      const h = idCardHash(idc);
+      if (u.idCardHash && u.idCardHash !== h) {
+        return fail(res, 403, '这张身份证和这个账号之前实名登记的不一致');
+      }
+      const taken = db.users.find((x) => x.id !== u.id && x.idCardHash === h);
+      if (taken) return fail(res, 403, '这张身份证已经绑定过其它账号了，请联系管理员');
+      u.idCardHash = h;
+      u.idCardMask = maskIdCard(idc);
+      u.idCardVerifiedAt = now();
+      u.realNameVerified = true;
+    }
+    u.frozen = false;
+    u.frozenAt = 0;
+    u.frozenReason = '';
+    saveUsers();
+    recordSecurity(u.id, req, 'unfreeze-self');
+    audit(req, { username: u.username, name: u.nickname, role: '用户自助' },
+      '自助解冻账号', u.username, idc ? maskIdCard(idc) : '只验了密码');
+    ok(res, { unfrozen: true, user: publicUser(u), note: '已解冻，正在登录…' },
+      { 'Set-Cookie': sessionCookie(signToken(u.id, req), Math.floor(userSessionTtlMs() / 1000)) });
+    return;
+  }
+
+  if (parts[0] === 'me' && parts[1] === 'freeze' && method === 'POST') {
+    const body = await readBody(req);
+    if (user.frozen) return fail(res, 409, '这个账号已经冻结了');
+    const hasPwd = !!user.passwordHash;
+    if (hasPwd && !verifyPassword(user, String(body.password || ''))) {
+      return fail(res, 401, '密码不对：冻结账号前要先验证登录密码');
+    }
+    user.frozen = true;
+    user.frozenAt = now();
+    user.frozenReason = str(body.reason, 40) || (hasPwd ? '本人操作' : '本人操作（未设登录密码）');
+    saveUsers();
+    closeUserConnections(user.id);            // 所有设备立刻掉线
+    recordSecurity(user.id, req, 'freeze-self');
+    audit(req, { username: user.username, name: user.nickname, role: '本人' },
+      '冻结自己的账号', user.username, user.frozenReason);
+    ok(res, { frozen: true, reason: user.frozenReason });
+    return;
+  }
+
+  if (parts[0] === 'ops' && parts[1] === 'account' && method === 'POST') {
+    if (!isOpsUser(user)) return fail(res, 403, '没有权限');
+    const body = await readBody(req);
+    const t = findUser(String(body.userId || ''));
+    if (!t) return fail(res, 404, '用户不存在');
+    const act = String(body.action || '').trim();
+    const why = str(body.reason, 100);
+    if (act === 'freeze') {
+      t.frozen = true; t.frozenAt = now(); t.frozenReason = why || '管理员冻结';
+      saveUsers(); closeUserConnections(t.id);
+    } else if (act === 'unfreeze') {
+      t.frozen = false; t.frozenAt = 0; t.frozenReason = '';
+      saveUsers();
+    } else if (act === 'ban') {
+      setUserBanned(t, true, why || '违规', user.username);
+    } else if (act === 'unban') {
+      setUserBanned(t, false, '', user.username);
+    } else {
+      return fail(res, 400, 'action 只能是 freeze / unfreeze / ban / unban');
+    }
+    audit(req, { username: user.username, name: user.nickname, role: '管理' },
+      '账号状态：' + act, t.username, why || '');
+    ok(res, {
+      user: {
+        id: t.id, username: t.username, nickname: t.nickname,
+        banned: !!t.banned, frozen: !!t.frozen,
+        reason: t.banned ? (t.banReason || '') : (t.frozenReason || '')
+      }
+    });
+    return;
+  }
+
+  /* ============================================================ 漂流瓶（CHRIS_BOTTLE_V1）
+     2026-10-12 用户：「摇一摇改成漂流瓶」。
+       · POST /api/bottle/throw  { text }        → 扔一个瓶子（最多 200 字）
+       · POST /api/bottle/pick                  → 捞一个（别人的、我没捞过的；海里没有就回 empty）
+       · GET  /api/bottle/count                 → 海里现在有多少瓶子
+     数据落 data/bottles.json，最多留 500 个（老的自动滚掉）；每个瓶子记住谁捞过，
+     同一个人不会反复捞到同一个。看不到是谁扔的（只给昵称），和微信一样。
+     ============================================================ */
+  const BOTTLE_FILE = 'bottles.json';
+  const BOTTLE_MAX = 500;
+  /* CHRIS_BOTTLE_SEED_V1：海里空的时候先放几个「官方瓶」——
+     用户反馈「漂流瓶里也没内容」：一个人都没扔过，捞自然什么都捞不到。
+     这些瓶子 system:true，谁都能捞到、不会被捞空，也不占别人的名额。 */
+  const BOTTLE_SEEDS = [
+    '在海边捡到过一颗会发光的贝壳，它好像在等谁回来。',
+    '今天把想说的话写在纸上，折成小船放进了水里。',
+    '陌生人你好，希望你今天遇到的事都刚刚好。',
+    '记得吃饭，记得早睡，记得有人在想你。',
+    '如果此刻你也不开心，就当这个瓶子是我递给你的糖。',
+    '想去看一次海，把烦恼都扔进去。'
+  ];
+  function bottleSeedList() {
+    return BOTTLE_SEEDS.map((t, i) => ({
+      id: 'bt_seed_' + i, text: t, fromId: '__sea__', fromName: '大海', at: now(),
+      pickedBy: [], system: true
+    }));
+  }
+  function readBottles() {
+    const f = path.join(DATA_DIR, BOTTLE_FILE);
+    const b = readJson(f, null);
+    if (!b || !Array.isArray(b.bottles)) { const s0 = { bottles: bottleSeedList() }; writeJson(f, s0); return s0; }
+    /* 老文件里只有真人瓶子 → 把官方瓶补上（只补一次，按 id 判重） */
+    const hasSeed = b.bottles.some((x) => x && String(x.id).indexOf('bt_seed_') === 0);
+    if (!hasSeed) { b.bottles = bottleSeedList().concat(b.bottles); writeJson(f, b); }
+    return b;
+  }
+  function saveBottles(b) { writeJson(path.join(DATA_DIR, BOTTLE_FILE), b); }
+
+  if (parts[0] === 'bottle' && parts[1] === 'count' && method === 'GET') {
+    ok(res, { total: readBottles().bottles.length });
+    return;
+  }
+
+  if (parts[0] === 'bottle' && parts[1] === 'throw' && method === 'POST') {
+    const body = await readBody(req);
+    const text = str(body.text, 200).trim();
+    if (!text) return fail(res, 422, '先写一句话再扔');
+    if (!bottleRateAllow(user.id)) return fail(res, 429, '扔得太快了，歇一会儿再扔');
+    const b = readBottles();
+    b.bottles.push({
+      id: uid('bt'), text: text, fromId: user.id,
+      fromName: user.nickname || user.username || '', at: now(), pickedBy: []
+    });
+    if (b.bottles.length > BOTTLE_MAX) b.bottles = b.bottles.slice(-BOTTLE_MAX);
+    saveBottles(b);
+    ok(res, { thrown: true, total: b.bottles.length });
+    return;
+  }
+
+  if (parts[0] === 'bottle' && parts[1] === 'pick' && method === 'POST') {
+    if (!bottleRateAllow(user.id)) return fail(res, 429, '捞得太快了，歇一会儿再捞');
+    const b = readBottles();
+    /* 先捞别人的真瓶子；真瓶子捞完了就捞「官方瓶」（system:true，谁都能捞、捞不光） */
+    let pool = b.bottles.filter((x) => x && !x.system && x.fromId !== user.id && !(x.pickedBy || []).includes(user.id));
+    let fromSeed = false;
+    if (!pool.length) {
+      pool = b.bottles.filter((x) => x && x.system);
+      fromSeed = true;
+    }
+    if (!pool.length) { ok(res, { bottle: null, empty: true, total: b.bottles.length }); return; }
+    const one = pool[Math.floor(Math.random() * pool.length)];
+    if (!fromSeed) {
+      one.pickedBy = (one.pickedBy || []).concat([user.id]).slice(-80);
+    }
+    saveBottles(b);
+    ok(res, { bottle: { id: one.id, text: one.text, fromName: one.fromName || '', at: one.at },
+              total: b.bottles.length });
+    return;
+  }
+
   if (parts[0] === 'unban' && method === 'POST') {
     const body = await readBody(req);
     const ip = clientInfo(req).ip;
@@ -11403,7 +13923,7 @@ async function handleApi(req, res, pathname, query) {
     ok(res, {
       unbanned: true, user: publicUser(user), idMask: maskIdCard(idc),
       note: '已解封，正在登录…'
-    }, { 'Set-Cookie': sessionCookie(signToken(user.id), Math.floor(userSessionTtlMs() / 1000)) });
+    }, { 'Set-Cookie': sessionCookie(signToken(user.id, req), Math.floor(userSessionTtlMs() / 1000)) });
     return;
   }
 
@@ -11412,14 +13932,14 @@ async function handleApi(req, res, pathname, query) {
     return;
   }
 
-  const user = currentUser(req);
   if (parts[0] === 'session') {
     /* 被封禁的账号：登录态即使还在，也要明确告诉 App「你被禁用了」，
        这样手机端会退到登录页并显示原因，而不是继续用缓存的资料硬撑。 */
-    if (user && user.banned) {
+    if (user && (user.banned || user.frozen)) {          // CHRIS_FREEZE_V1
       ok(res, {
-        authenticated: false, banned: true,
-        reason: user.banReason || '', bannedAt: user.bannedAt || 0
+        authenticated: false, banned: !!user.banned, frozen: !!user.frozen,
+        reason: user.banned ? (user.banReason || '') : (user.frozenReason || ''),
+        bannedAt: user.bannedAt || 0
       });
       return;
     }
@@ -11432,12 +13952,79 @@ async function handleApi(req, res, pathname, query) {
   if (user && user.banned) {
     return fail(res, 403, banMsg(user));
   }
+  /* CHRIS_FREEZE_V1：被冻结的账号（本人冻的或管理冻的）在这台手机上直接踢到登录页 */
+  if (user && user.frozen) {
+    return fail(res, 403, frozenMsg(user));
+  }
   if (!user) {
+    /* 手机在别处登录了：明确回一个 code，App 收到就弹「已在别处登录」卡片 */
+    if (req.__otherLogin) return fail(res, 401, '你的账号在另一台设备上登录了', { code: 'other_login' });
     /* 同上：只有没带任何令牌的裸请求才记 strike，令牌过期不记（不然一个 IP 会被自己人刷爆） */
     if (!req.headers.authorization && !req.headers.cookie) {
       strikeIp(clientInfo(req).ip, '裸请求取数据 ' + parts[0]);
     }
     fail(res, 401, '请先登录');
+    return;
+  }
+
+  /* 登录设备管理（微信「我 → 设置 → 账号与安全 → 登录设备管理」）：
+     每台登录过的设备一条（重装的 App 换 deviceId 也算一台），最后登录时间倒序，
+     当前这台标 current=true。记录是登录时 rememberDevice() 写进 user.devices 的。 */
+  /* 音乐曲库（App「听一听」）：登录后就能看，发卡片也是拿这里的歌 */
+  /* 小程序 / 小游戏（App「发现 → 小程序」那一页 + 游戏页都用它）：
+     ?kind=game 只要小游戏 */
+  if (parts[0] === 'miniapps' && method === 'GET') {
+    const onlyKind = String(query.get('kind') || '');
+    ok(res, { items: miniAppList(onlyKind || null) });
+    return;
+  }
+
+  if (parts[0] === 'music' && method === 'GET') {
+    ok(res, { tracks: musicTracks() });
+    return;
+  }
+
+  if (parts[0] === 'devices' && method === 'GET') {
+    const cur = clientInfo(req);
+    const rows = (Array.isArray(user.devices) ? user.devices : []).map((d) => ({
+      id: d.id || '',
+      name: d.name || '',
+      device: d.device || '未知设备',
+      /* 机型名优先（老记录存的是 iPhone17,1 这种机器号，这里映射成人看的名字） */
+      model: friendlyModelName(d.model) || friendlyModelName(d.deviceMachine) || '',
+      os: d.os || '',
+      ip: d.ip || '',
+      /* ⚠ 必须是毫秒数字：以前给 ISO 字符串，客户端解不出来整页就空了 */
+      at: msOf(d.at),
+      current: !!(cur.deviceId && d.id && d.id === cur.deviceId)
+    }));
+    /* 这台设备是「恢复会话」进来的（没走过登录那一步）也不能漏：列表里补一条本机 */
+    if (cur.deviceId && !rows.some((d) => d.id === cur.deviceId)) {
+      rows.unshift({ id: cur.deviceId, name: cur.name || '', device: cur.device || '',
+                     model: friendlyModelName(cur.model) || '', os: cur.os || '', ip: cur.ip || '',
+                     at: msOf(now()), current: true });
+    }
+    ok(res, {
+      devices: rows,
+      current: { id: cur.deviceId, device: cur.device, model: cur.model, os: cur.os, ip: cur.ip, at: now() }
+    });
+    return;
+  }
+
+  /* 登录设备管理 → 编辑 → 删除某个设备（只删记录 + 记一条安全事件） */
+  if (parts[0] === 'devices' && parts[1] === 'remove' && method === 'POST') {
+    const body = await readBody(req);
+    const id = String(body.id || '');
+    const cur = clientInfo(req);
+    if (!id) return fail(res, 422, '缺少设备标识');
+    if (cur.deviceId && id === cur.deviceId) return fail(res, 400, '不能删除当前设备');
+    const list = Array.isArray(user.devices) ? user.devices : [];
+    const hit = list.find((d) => (d.id || '') === id);
+    user.devices = list.filter((d) => (d.id || '') !== id);
+    saveUsers();
+    recordSecurity(user.id, req, 'device-remove',
+      { note: '删除登录设备：' + ((hit && (hit.name || hit.device)) || '未命名设备') });
+    ok(res, { removed: !!hit, devices: user.devices.length });
     return;
   }
 
@@ -11618,12 +14205,51 @@ async function handleApi(req, res, pathname, query) {
       t.scopes = Object.assign({}, DEFAULT_TEEN_SCOPES, t.scopes || {});
       Object.keys(DEFAULT_TEEN_SCOPES).forEach((k) => { if (body.scopes[k] !== undefined) t.scopes[k] = body.scopes[k] ? 1 : 0; });
     }
+    /* 使用时长 / 宵禁 / 支付上限（家长设定） */
+    if (body.limits && typeof body.limits === 'object') {
+      const L = Object.assign({}, DEFAULT_TEEN_LIMITS, t.limits || {});
+      if (body.limits.dailyMinutes !== undefined) {
+        L.dailyMinutes = Math.max(0, Math.min(1440, Math.round(Number(body.limits.dailyMinutes) || 0)));
+      }
+      if (body.limits.curfewOn !== undefined) L.curfewOn = body.limits.curfewOn ? 1 : 0;
+      if (hhmm(body.limits.curfewStart) !== null) L.curfewStart = String(body.limits.curfewStart);
+      if (hhmm(body.limits.curfewEnd) !== null) L.curfewEnd = String(body.limits.curfewEnd);
+      if (body.limits.payLimit !== undefined) {
+        const v = Number(body.limits.payLimit);
+        L.payLimit = v < 0 ? -1 : Math.max(0, Math.min(100000, Math.round(v)));
+      }
+      t.limits = L;
+    }
     if (body.guardianPhone !== undefined) {
       const ph = String(body.guardianPhone || '').replace(/\D/g, '');
       t.guardianPhoneMask = ph.length === 11 ? (ph.slice(0, 3) + '****' + ph.slice(7)) : '';
     }
+    /* 家长临时解锁：给 5~60 分钟（到点自动又锁上） */
+    if (body.unlockMinutes !== undefined) {
+      const m = Math.max(5, Math.min(60, Math.round(Number(body.unlockMinutes) || 0)));
+      t.unlockUntil = Date.now() + m * 60 * 1000;
+    }
+    if (body.relock === true) t.unlockUntil = 0;
     user.teen = t;
     saveUsers();
+    ok(res, { teen: teenCfg(user) });
+    return;
+  }
+
+  /* 使用时长上报（App 在前台每 30~60 秒报一次）—— 这一个是**不许权限**的：
+     报了才有得管；服务端把一次最多认 10 分钟、一天最多认 24 小时，防着被灌数据。 */
+  if (parts[0] === 'me' && parts[1] === 'teen' && parts[2] === 'usage' && method === 'POST') {
+    const body = await readBody(req);
+    const t = user.teen || {};
+    if (!t.enabled) { ok(res, { teen: teenCfg(user) }); return; }
+    const add = Math.max(0, Math.min(10, Math.round(Number(body.minutes) || 0)));
+    const u = teenUsageOf(user);
+    if (add > 0) {
+      u.minutes = Math.min(24 * 60, u.minutes + add);
+      t.usage = u;
+      user.teen = t;
+      saveUsers();
+    }
     ok(res, { teen: teenCfg(user) });
     return;
   }
@@ -12198,6 +14824,12 @@ async function handleApi(req, res, pathname, query) {
     if (tr.toId !== user.id) return fail(res, 403, '只有收款方可以退还');
     if (tr.status === 'pending') return fail(res, 409, '这笔还没收款，24 小时没领会自动退回');
     if (tr.status === 'refunded') return fail(res, 409, '这笔已经退还过了');
+    /* 用户规则：**收款后 5 小时内才能退还**，超过 5 小时就不能退了
+       （24 小时那个是"还没收款自动退回"，跟这里的"收了又退"不是一回事）。 */
+    const receivedMs = Date.parse(String(tr.receivedAt || ''));
+    if (receivedMs && Date.now() - receivedMs > 5 * 60 * 60 * 1000) {
+      return fail(res, 409, '收款超过 5 小时，不能再退回了');
+    }
     const payer = findUser(tr.fromId);
     if (!payer) return fail(res, 404, '对方账号不在了，联系管理员处理');
     const amount = rpRound2(Number(tr.amount) || 0);
@@ -12728,7 +15360,11 @@ async function handleApi(req, res, pathname, query) {
 
   /* 收藏：GET 列表 / POST 加一条 / DELETE 删一条 */
   if (parts[0] === 'favorites' && method === 'GET') {
-    ok(res, { favorites: Array.isArray(user.favorites) ? user.favorites : [] });
+    /* 置顶的排最前面，其余按时间倒序（微信收藏就是这样；pinned 是 2026-10-12 加的） */
+    const list = (Array.isArray(user.favorites) ? user.favorites.slice() : [])
+      .sort((a, b) => ((b.pinned ? 1 : 0) - (a.pinned ? 1 : 0))
+        || String(b.at || '').localeCompare(String(a.at || '')));
+    ok(res, { favorites: list });
     return;
   }
   if (parts[0] === 'favorites' && method === 'POST') {
@@ -12754,8 +15390,28 @@ async function handleApi(req, res, pathname, query) {
     ok(res, { favorite: fav, count: user.favorites.length });
     return;
   }
-  if (parts[0] === 'favorites' && parts.length === 3 && method === 'DELETE') {
-    const id = str(parts[2], 40);
+  /* 收藏：改一条（编辑正文 / 改标题 / 置顶）—— App 里笔记的「编辑」「置顶」用它，
+     编辑后 id 和位置都不变（以前是删旧加新，会跳到最前面） */
+  if (parts[0] === 'favorites' && parts.length === 2 && method === 'PATCH') {
+    const id = str(parts[1], 40);
+    const body = await readBody(req);
+    if (!Array.isArray(user.favorites)) user.favorites = [];
+    const one = user.favorites.find((f) => f.id === id);
+    if (!one) return fail(res, 404, '没有这条收藏');
+    if (body.content !== undefined) {
+      const c = str(body.content, 20000);
+      if (!c) return fail(res, 422, '内容不能为空');
+      one.content = c;
+    }
+    if (body.title !== undefined) one.title = str(body.title, 60);
+    if (body.pinned !== undefined) one.pinned = !!body.pinned;
+    one.updatedAt = now();
+    saveUsers();
+    ok(res, { favorite: one });
+    return;
+  }
+  if (parts[0] === 'favorites' && parts.length === 2 && method === 'DELETE') {
+    const id = str(parts[1], 40);
     if (!Array.isArray(user.favorites)) user.favorites = [];
     const before = user.favorites.length;
     user.favorites = user.favorites.filter((f) => f.id !== id);
@@ -12765,6 +15421,45 @@ async function handleApi(req, res, pathname, query) {
   }
 
   /* 支付密码：GET 看有没有设置 / POST 设置或修改 / POST verify 校验（转账确认用） */
+  /* 「我的文件」（我们自己的文件选择页用它，不走苹果那个文件 App）：
+     把这个账号在各会话里发过 / 收到过的文件按时间倒序列出来（同一个文件只列一次）。
+     管理里把 filePickerSystem 打开时，App 才回去用苹果的文件 App。 */
+  if (parts[0] === 'files' && parts[1] === 'mine' && method === 'GET') {
+    const limit = Math.min(300, Math.max(1, Number(query.get('limit')) || 120));
+    const out = [];
+    const seen = {};
+    const myChats = db.chats.filter((c) => Array.isArray(c.memberIds) && c.memberIds.includes(user.id));
+    /* 新的会话排前面：最近发过的文件一定在最上面 */
+    myChats.sort((a, b) => String(b.lastAt || b.createdAt || '').localeCompare(String(a.lastAt || a.createdAt || '')));
+    for (let ci = 0; ci < myChats.length && out.length < limit; ci += 1) {
+      const c = myChats[ci];
+      const list = loadMessages(c.id);
+      for (let i = list.length - 1; i >= 0 && out.length < limit; i -= 1) {
+        const m = list[i];
+        if (!m || m.kind !== 'file' || m.recalled) continue;
+        let o = null;
+        try { o = JSON.parse(String(m.content || '')); } catch (e) { o = null; }
+        if (!o || !o.url) continue;
+        const url = String(o.url);
+        if (seen[url]) continue;
+        seen[url] = 1;
+        let title = '';
+        try { title = chatSummary(c, user.id, null).name || ''; } catch (e) { title = c.name || ''; }
+        out.push({
+          id: m.id,
+          url: url,
+          name: String(o.name || '文件').slice(0, 120),
+          bytes: Math.max(0, Number(o.bytes) || 0),
+          at: m.createdAt || '',
+          chatId: c.id,
+          chatName: title,
+          mine: m.senderId === user.id
+        });
+      }
+    }
+    ok(res, { files: out });
+    return;
+  }
   if (parts[0] === 'me' && parts[1] === 'paypassword') {
     if (parts[2] === 'verify' && method === 'POST') {
       if (!hasPayPassword(user)) return fail(res, 409, '还没有设置支付密码');
@@ -12874,6 +15569,7 @@ async function handleApi(req, res, pathname, query) {
       if (pure !== (user.phone || '')) {
         user.phone = pure;
         user.phoneUpdatedAt = now();
+        sysNotice(user.id, '你的账号绑定的手机号已改成 ' + String(pure).replace(/^(\d{3})\d{4}(\d{4})$/, '$1****$2') + '。', '安全提醒', 'security');
       }
     }
     if (body.moodText !== undefined || body.moodIcon !== undefined
@@ -12915,6 +15611,11 @@ async function handleApi(req, res, pathname, query) {
       if (!user.moodText) user.moodColor = '';
       if (!user.moodText) user.moodColor2 = '';
     }
+    /* 拍一拍后缀（微信：我 → 个人资料 → 拍一拍）。别人拍我时显示成
+       「XXX 拍了拍我的＿＿」，最多 10 个字；留空就是默认的「拍了拍我」。 */
+    if (body.patText !== undefined) {
+      user.patText = str(body.patText, 12);
+    }
     if (body.momentCover !== undefined) {
       const v = safeImageRef(str(body.momentCover, 2000));
       if (v === null) return fail(res, 422, '朋友圈封面只能用 App 上传的图片');
@@ -12955,12 +15656,13 @@ async function handleApi(req, res, pathname, query) {
     const salt = crypto.randomBytes(16).toString('hex');
     user.salt = salt;
     user.passwordHash = hashPassword(nextPwd, salt);
+    sysNotice(user.id, '你的账号密码刚刚被修改了。如果是你改的，忽略这条；不是的话请立刻重新登录并改密码。', '安全提醒', 'security');
     user.passwordUpdatedAt = now();
     user.tokenVersion = (user.tokenVersion || 0) + 1;
     saveUsers();
     recordSecurity(user.id, req, 'password');
     ok(res, { updated: true },
-      { 'Set-Cookie': sessionCookie(signToken(user.id), Math.floor(userSessionTtlMs() / 1000)) });
+      { 'Set-Cookie': sessionCookie(signToken(user.id, req), Math.floor(userSessionTtlMs() / 1000)) });
     return;
   }
 
@@ -12976,6 +15678,11 @@ async function handleApi(req, res, pathname, query) {
     ['needVerify', 'strangerMoments', 'addByWx', 'addByPhone', 'addByGroup', 'addByQR'].forEach((k) => {
       if (body[k] !== undefined) next[k] = !!body[k];
     });
+    /* 朋友圈可见范围：只认这三个值（最近三天 / 最近半年 / 全部） */
+    if (body.momentsRange !== undefined) {
+      const v = String(body.momentsRange || '').trim();
+      next.momentsRange = (v === '3d' || v === '6m') ? v : 'all';
+    }
     user.privacy = next;
     saveUsers();
     ok(res, { privacy: next });
@@ -13116,7 +15823,7 @@ async function handleApi(req, res, pathname, query) {
     saveUsers();
     recordSecurity(user.id, req, 'logout-others');
     ok(res, { loggedOut: true },
-      { 'Set-Cookie': sessionCookie(signToken(user.id), Math.floor(userSessionTtlMs() / 1000)) });
+      { 'Set-Cookie': sessionCookie(signToken(user.id, req), Math.floor(userSessionTtlMs() / 1000)) });
     return;
   }
 
@@ -13679,16 +16386,17 @@ async function handleApi(req, res, pathname, query) {
     const chat = db.chats.find((c) => c.id === parts[1]);
     if (!chat) return fail(res, 404, '会话不存在');
     if (!chat.memberIds.includes(user.id)) return fail(res, 403, '你不在这个会话里');
-    /* 贾维斯AI / AI 助手 / 星联世界：会话固定置顶，不能被「不显示」或「删除」藏起来 */
+    /* 贾维斯AI / AI 助手 / 星联世界：以前是「固定置顶、不允许删」。
+       用户要求**这几个置顶的机器人也可以删掉** —— 现在删了就只对自己隐藏，
+       同时把「自动置顶」也撤掉（不然它还会被顶回会话列表最上面）。 */
     const botPeer = chat.memberIds.filter((id) => id !== user.id)
       .map((id) => findUser(id)).find((u) => u && u.bot);
     if (botPeer) {
-      chat.hiddenFor = (chat.hiddenFor || []).filter((id) => id !== user.id);
-      const set = new Set(chat.pinnedFor || []);
-      if (!set.has(user.id)) set.add(user.id);
-      chat.pinnedFor = Array.from(set);
+      chat.hiddenFor = Array.from(new Set((chat.hiddenFor || []).concat([user.id])));
+      chat.pinnedFor = (chat.pinnedFor || []).filter((id) => id !== user.id);
       saveChats();
-      return fail(res, 400, (botPeer.nickname || '机器人') + '的会话不能删，它是自动置顶的');
+      ok(res, { hidden: true, chatId: chat.id, bot: true });
+      return;
     }
     chat.hiddenFor = Array.from(new Set((chat.hiddenFor || []).concat([user.id])));
     saveChats();
@@ -13874,15 +16582,57 @@ async function handleApi(req, res, pathname, query) {
     const before = Number(query.get('before')) || Number.MAX_SAFE_INTEGER;
     /* 自己清空过聊天记录：清空点之前的一律不返回（别人不受影响） */
     const clearedSeq = ((db.cleared || {})[user.id] || {})[chat.id] || 0;
-    const slice = loadMessages(chat.id)
-      .filter((m) => m.seq < before && m.seq > clearedSeq).slice(-limit);
-    const messages = slice.map((m) => Object.assign({}, m, {
-      /* 群里显示群昵称（和微信一致），单聊就是备注/昵称 */
-      senderName: chat.type === 'group'
-        ? groupNameFor(chat, user.id, findUser(m.senderId))
-        : displayNameFor(user.id, findUser(m.senderId)),
-      senderAvatar: (findUser(m.senderId) || {}).avatar || ''
-    }));
+    /* ⚠ 超长会话保护（2026-10-11）：一条会话一次最多只给最近 300 条，
+       更早的不再返回 —— 客户端往上滑也不会一直往内存里堆（700 条 / 内容高
+       4.8 万 pt 会把 App 拖到被系统杀掉，家人群就是这么崩的）。 */
+    /* ⚠ 2026-10-11 晚：这个上限原来是写死 300 条，结果用户反馈「聊天内容只到前天、
+       再往上就没了」—— 家人群两天就有 300+ 条，一刀切在 300 就等于把更早的全藏了。
+       现在改成可调：data/ui.json 里写 maxHistory（默认 1000），不用重启服务。 */
+    /* 2026-10-11 晚（照微信那套）：一次取多少**不再设全局上限** —— 上限交给"服务端保留期"
+       （messages-retention.js，默认 7 天，ui.json 的 retentionDays 可调）+ 客户端按页往回要。
+       ui.json 的 maxHistory 写 0 或不写 = 不截；写正数就是"一次最多给这么多条"。 */
+    const uiCfgHist = readJson(path.join(DATA_DIR, 'ui.json'), {});
+    const cap = Number(uiCfgHist.maxHistory) || 0;      // 0 = 不设上限
+    const allMsgs = loadMessages(chat.id);
+    const capFromSeq = (cap > 0 && allMsgs.length > cap) ? (allMsgs[allMsgs.length - cap].seq || 0) : 0;
+    const slice = allMsgs
+      .filter((m) => m.seq < before && m.seq > clearedSeq && m.seq >= capFromSeq).slice(-limit);
+    /* 拉历史消息的人可能是老版本：名片这类卡片消息要降级成纯文本，否则他那边是乱码 */
+    const reqBuild = Number((String(req.headers['x-app-build'] || '').match(/B(\d+)/) || [])[1] || 0);
+    const messages = slice.map((m) => {
+      const one = Object.assign({}, m, {
+        /* 群里显示群昵称（和微信一致），单聊就是备注/昵称 */
+        senderName: chat.type === 'group'
+          ? groupNameFor(chat, user.id, findUser(m.senderId))
+          : displayNameFor(user.id, findUser(m.senderId)),
+        senderAvatar: (findUser(m.senderId) || {}).avatar || ''
+      });
+      if (reqBuild < CARD_MIN_BUILD && one.kind === 'card') {
+        const nm = cardFallbackName(one.content);
+        one.kind = 'text';
+        one.content = nm ? ('[名片] ' + nm) : '[名片]';
+      } else if (one.kind === 'card') {
+        /* 读历史时把名片补全：老的那几张 content 里存的可能就是一串号，
+           这里用服务端最新资料重写一遍（名字优先取我对他的备注） */
+        try {
+          const o = JSON.parse(String(one.content || '{}'));
+          const t = findUser(String(o.userId || ''));
+          if (t) {
+            o.name = displayNameFor(user.id, t) || t.nickname || t.username || '';
+            o.username = t.username || '';
+            o.avatar = t.avatar || '';
+            one.content = JSON.stringify(o);
+          }
+        } catch (err) { /* 解析不出来就原样给 */ }
+      }
+      /* 图片宽高（骨架落位）：老消息里没有，这里从文件头补上 ——
+         客户端拿到就能按真实比例先占好位，不会等图下完再撑开。 */
+      if (one.kind === 'image' && !(Number(one.imgW) > 1 && Number(one.imgH) > 1)) {
+        const d = imageDimsOf(one.content);
+        if (d) { one.imgW = d.w; one.imgH = d.h; }
+      }
+      return one;
+    });
     ok(res, { chat: chatSummary(chat, user.id), messages, hasMore: slice.length === limit });
     return;
   }
@@ -13903,7 +16653,7 @@ async function handleApi(req, res, pathname, query) {
       if (mwhy) return fail(res, 403, mwhy);
     }
     /* 文字炸弹（几千个换行 / 几千个一样的字）会让手机排版卡死，先洗一遍 */
-    const clean = (body.kind || 'text') === 'text' ? sanitizeText(body.content) : body.content;
+    let clean = (body.kind || 'text') === 'text' ? sanitizeText(body.content) : body.content;
     if ((body.kind || 'text') === 'text') {
       const sameTo = noteTextSend(user.id, parts[1], clean);      // 群发检测
       if (sameTo >= 5) riskEvent(user, 'mass_send', { note: '同一内容发给了 ' + sameTo + ' 个会话' });
@@ -13917,7 +16667,23 @@ async function handleApi(req, res, pathname, query) {
       const dup = recent.find((m) => m.clientId === cid && m.senderId === user.id);
       if (dup) return ok(res, { message: dup });
     }
-    const result = deliverMessage(user, parts[1], body.kind || 'text', clean, body.clientId, body.mentions);
+    /* 名片：正文只信 userId，名字/头像/微信号一律用服务端最新的资料再补一遍。
+       发送端可能拿着旧数据、或者只有 username，用户反馈的「发出去显示成个号」就是这个。
+       名字优先取「发送方对他的备注」—— 微信名片上显示的就是备注名。 */
+    if ((body.kind || 'text') === 'card') {
+      try {
+        const cardObj = JSON.parse(String(clean || '{}'));
+        const target = findUser(String(cardObj.userId || ''));
+        if (target) {
+          cardObj.name = displayNameFor(user.id, target) || target.nickname || target.username || '';
+          cardObj.username = target.username || '';
+          cardObj.avatar = target.avatar || '';
+          clean = JSON.stringify(cardObj);
+        }
+      } catch (err) { /* 解析不出来就原样存 */ }
+    }
+    const result = deliverMessage(user, parts[1], body.kind || 'text', clean, body.clientId, body.mentions,
+      { imgW: body.imgW, imgH: body.imgH, quote: body.quote });
     if (result.error) return fail(res, 422, result.error);
     /* 自己刚发的这条：群里要带上群昵称（客户端是直接拿这条追加到列表里的） */
     let sent = result.message;
@@ -14168,6 +16934,77 @@ async function handleApi(req, res, pathname, query) {
   }
 
   // 消息免打扰（群屏蔽）：每个人自己设，别人不受影响
+  /* CHRIS_BURN_V1 阅后即焚开关（聊天信息页里那个开关） */
+  if (parts[0] === 'chats' && parts[2] === 'burn' && method === 'POST') {
+    const chat = db.chats.find((c) => c.id === parts[1]);
+    if (!chat || !chat.memberIds.includes(user.id)) return fail(res, 404, '会话不存在');
+    const body = await readBody(req);
+    chat.burn = body.on !== false;
+    saveChats();
+    chat.memberIds.forEach((id) => sendTo(id, { type: 'chat', action: 'updated', chat: chatSummary(chat, id) }));
+    ok(res, { burn: !!chat.burn });
+    return;
+  }
+
+  /* CHRIS_BURN_V1 扫一遍阅后即焚：
+     —— 别人发给我的、还没销毁的：标记成「我已看过」；看过满 8 秒的直接删掉（双方都没了）
+     —— 我发给别人的：只有对方也看过、并且满 8 秒才删（我这边也会消失，和微信一样）
+     返回这次真正销毁掉的消息 id，客户端收到就把它从列表里去掉。 */
+  if (parts[0] === 'chats' && parts[2] === 'burn-sweep' && method === 'POST') {
+    const chat = db.chats.find((c) => c.id === parts[1]);
+    if (!chat || !chat.memberIds.includes(user.id)) return fail(res, 404, '会话不存在');
+    if (!chat.burn) { ok(res, { ids: [] }); return; }
+    const list = loadMessages(chat.id);
+    const nowTs = Date.now();
+    const HOLD = 60000;      // CHRIS_BURN_V1 看过 1 分钟后焚毁（用户要求）
+    const gone = [];
+    let changed = false;
+    list.forEach((m) => {
+      if (!m.burn) return;
+      if (m.senderId !== user.id) {
+        if (!m.seenBy) m.seenBy = [];
+        if (m.seenBy.indexOf(user.id) < 0) { m.seenBy.push(user.id); m.seenAt = nowTs; changed = true; }
+      }
+      /* 谁扫都行：只要**接收方**的已读游标已经过了这一条，就算看过了。
+         （发送方来扫也能据此开始计时，不用等对方那台手机也来扫一遍。） */
+      if (!m.seenAt) {
+        const read = chat.memberIds.some((id) => id !== m.senderId
+          && ((db.reads[id] && db.reads[id][chat.id]) || 0) >= (m.seq || 0));
+        if (read) { m.seenAt = nowTs; changed = true; }
+      }
+      /* 看过满 1 分钟就烧（不再要求「所有人」都扫过一遍：以前发送方也得来扫一次，
+         两个人都不动就永远不烧 —— 用户报「阅后即焚没生效」就是这个）。
+         单聊里 seenBy 就是对方；群里以**第一个看过的人**开始计时。 */
+      /* CHRIS_BURN_LOG_V1 两条销毁条件：
+         ① 有人看过（seenAt）并且满 1 分钟；
+         ② 兜底：这条消息本身已经超过 5 分钟（对方是旧版本、压根不会上报「已读」时，
+            否则会永远留在屏幕上，用户报的「消息还是不会消失」就是这个）。 */
+      const born = Date.parse(m.createdAt) || 0;
+      if ((m.seenAt && nowTs - m.seenAt >= HOLD) || (born && nowTs - born > 5 * 60 * 1000)) gone.push(m.id);
+    });
+    if (gone.length) {
+      /* CHRIS_BURN_FIX_V1 ⚠ 必须**原地删**：loadMessages 返回的就是 messageCache 里那个数组，
+         以前这里 list.filter(...) 生成一个新数组写进文件 —— 缓存里那 3 条还在，
+         于是每次扫描都「销毁=3」，客户端就一直收到焚毁事件（用户报的「一直跳、消息还在」就是这个）。
+         原地 splice 之后缓存、文件、以后每次读都是干净的。 */
+      const goneSet = {};
+      gone.forEach((id) => { goneSet[id] = 1; });
+      for (let i = list.length - 1; i >= 0; i--) {
+        if (goneSet[list[i].id]) list.splice(i, 1);
+      }
+      saveMessagesFile(chat.id, list);
+      chat.memberIds.forEach((id) => sendTo(id, { type: 'burn', chatId: chat.id, ids: gone }));
+    } else if (changed) {
+      saveMessagesFile(chat.id, list);      // CHRIS_BURN_V1
+    }
+    try {
+      callTrace('burn-sweep ' + chat.id + ' by ' + (user.nickname || user.username)
+        + ' 条数=' + list.length + ' 销毁=' + gone.length + ' 标记已读=' + changed);
+    } catch (e) { }
+    ok(res, { ids: gone });
+    return;
+  }
+
   if (parts[0] === 'chats' && parts[2] === 'mute' && method === 'POST') {
     const chat = db.chats.find((c) => c.id === parts[1]);
     if (!chat || !chat.memberIds.includes(user.id)) return fail(res, 404, '会话不存在');
@@ -14381,6 +17218,7 @@ async function handleApi(req, res, pathname, query) {
      （哪怕账号是刚注册的、或者服务器还没重启过） */
   if (parts[0] === 'bots' && parts[1] === 'ensure' && method === 'POST') {
     ensureBots();
+    try { ensureSysChat(currentUser(req)); } catch (e) {}
     const hello = {
       ai: '你好，我是 AI 助手，只负责这个 App 的使用问题 👋\n哪找不到、怎么操作都可以问我，比如「怎么换头像」「朋友圈在哪发」。',
       housekeeper: '您好，我是 AI 助手，您的管家，随时为您效劳。\n整个微信里的事都能吩咐我：\n· 给张三发消息 你好　· 建个群 张三 李四　· 加好友 微信号\n· 提醒我 8:30 开会　· 天气 上海　· 记账 午饭 25 / 账本\n· 发朋友圈 今天天气真好 / 写条朋友圈 加班 / 改签名 岁月静好\n· 给张三的朋友圈点赞　· 评论张三的朋友圈：好看\n· 置顶/免打扰/删掉 张三　· 清空和张三的聊天记录\n· 我和张三聊了什么 / 找张三说过 合同\n· 给张三转 50　· 我的账单　· 谁在线　· 余额',
@@ -14554,6 +17392,28 @@ async function handleApi(req, res, pathname, query) {
     return;
   }
 
+  /* 朋友圈「消息列表」（微信右上角那个小信封）：
+     GET  /api/moments/notices        谁赞了/评论了我（新→旧）
+     POST /api/moments/notices/seen   点开这一页 = 看过，未读数清零 */
+  if (parts[0] === 'moments' && parts[1] === 'notices' && parts.length === 3
+      && parts[2] === 'seen' && method === 'POST') {
+    db.momentNoticeSeen[user.id] = now();
+    saveMomentNotices();
+    ok(res, { unread: 0 });
+    return;
+  }
+
+  if (parts[0] === 'moments' && parts[1] === 'notices' && parts.length === 2 && method === 'GET') {
+    const limit = Math.min(100, Math.max(1, Number(query.get('limit')) || 60));
+    const mine = db.momentNotices.filter((r) => r.toUserId === user.id);
+    /* 动态被删掉的那种通知不再显示（微信删了动态，消息列表里那条也点不开） */
+    const rows = mine.slice(-limit).reverse()
+      .filter((r) => db.moments.some((m) => m.id === r.momentId))
+      .map((r) => publicMomentNotice(r, user.id));
+    ok(res, { items: rows, unread: momentNoticeUnread(user.id), total: mine.length });
+    return;
+  }
+
   if (parts[0] === 'moments' && method === 'GET' && parts.length === 1) {
     const limit = Math.min(50, Math.max(1, Number(query.get('limit')) || 20));
     const before = str(query.get('before'), 40);
@@ -14579,6 +17439,26 @@ async function handleApi(req, res, pathname, query) {
       return theirs.block === true || theirs.hideMyMoments === true;
     };
     list = list.filter((m) => !hiddenForMe(m.authorId));
+    /* 朋友圈可见范围（微信那套）：作者设了「最近三天 / 最近半年」，
+       别人就只能看到这个范围内的；**自己看自己永远是全部**。
+       范围按作者算一次（同一个人一页里可能好几条，别每条都重算）。 */
+    const rangeCutCache = {};
+    const rangeCut = (authorId) => {
+      if (authorId in rangeCutCache) return rangeCutCache[authorId];
+      const rg = String(userPrivacy(findUser(authorId) || {}).momentsRange || 'all');
+      const cut = (rg === '3d' || rg === '6m')
+        ? Date.now() - (rg === '3d' ? 3 : 183) * 24 * 3600 * 1000
+        : 0;
+      rangeCutCache[authorId] = cut;
+      return cut;
+    };
+    list = list.filter((m) => {
+      if (m.authorId === user.id) return true;
+      const cut = rangeCut(m.authorId);
+      if (!cut) return true;
+      const t = Date.parse(m.createdAt);
+      return !isFinite(t) || t >= cut;
+    });
     if (onlyUser) list = list.filter((m) => m.authorId === onlyUser);
     /* 排序要稳定：时间一样时再按 id 排。
        否则「同一毫秒发的几十条」在翻页时会被整段跳过（时间戳当游标最怕这个）。 */
@@ -14601,8 +17481,15 @@ async function handleApi(req, res, pathname, query) {
       moments: slice.map((m) => visibleMoment(m, user.id)),
       hasMore: list.length > slice.length,
       unread: momentUnread(user.id),
+      /* 朋友圈「消息列表」的未读数（右上角小信封上的红点） */
+      noticeUnread: momentNoticeUnread(user.id),
       total: list.length,
-      target
+      target,
+      /* 看别人的朋友圈时把这个人的可见范围一起给客户端（all / 3d / 6m）——
+         App 会用它显示「朋友仅展示最近三天的朋友圈」那句提示 */
+      range: (onlyUser && onlyUser !== user.id)
+        ? String(userPrivacy(findUser(onlyUser) || {}).momentsRange || 'all')
+        : 'all'
     });
     return;
   }
@@ -14624,12 +17511,27 @@ async function handleApi(req, res, pathname, query) {
     /* 视频（微信：一条动态要么九张图，要么一条视频） */
     const video = safeImageRef(str(body.video, 2000)) || '';
     const videoCover = safeImageRef(str(body.videoCover, 2000)) || '';
+    /* 每张图的宽高（客户端上传时带上）：列表那边一上来就能按真实比例把框画好，
+       不会再「先 4:3、加载完跳一下」（用户反馈的尺寸跳变） */
+    const imageSizes = {};
+    {
+      const raw = (body.imageSizes && typeof body.imageSizes === 'object') ? body.imageSizes : {};
+      images.forEach((pth) => {
+        const v = raw[pth];
+        if (Array.isArray(v) && v.length === 2) {
+          const w = Math.min(20000, Math.max(0, Number(v[0]) || 0));
+          const h = Math.min(20000, Math.max(0, Number(v[1]) || 0));
+          if (w > 0 && h > 0) imageSizes[pth] = [w, h];
+        }
+      });
+    }
     if (!content && !images.length && !video) return fail(res, 422, '写点什么，或者发张图/视频');
     const moment = {
       id: uid('mo'),
       authorId: user.id,
       content,
       images,
+      imageSizes,
       video,
       videoCover,
       videoSeconds: Math.min(900, Math.max(0, Number(body.videoSeconds) || 0)),
@@ -14666,6 +17568,16 @@ async function handleApi(req, res, pathname, query) {
     broadcastMoment(m.authorId, {
       type: 'moment', action: 'like', momentId: m.id, authorId: m.authorId, userId: user.id, liked
     });
+    /* 朋友圈消息列表：别人赞了我的动态 → 记一条（取消赞就把那条撤掉） */
+    if (liked) {
+      pushMomentNotice(m.authorId, user.id, 'like', m.id, '');
+    } else {
+      for (let i = db.momentNotices.length - 1; i >= 0; i -= 1) {
+        const r = db.momentNotices[i];
+        if (r.momentId === m.id && r.fromUserId === user.id && r.kind === 'like') db.momentNotices.splice(i, 1);
+      }
+      saveMomentNotices();
+    }
     ok(res, { moment: visibleMoment(m, user.id) });
     return;
   }
@@ -14697,6 +17609,11 @@ async function handleApi(req, res, pathname, query) {
     if (c.userId !== user.id && m.authorId !== user.id) return fail(res, 403, '只能删自己的评论');
     m.comments.splice(idx, 1);
     saveMoments();
+    /* 评论删了，这条评论在「消息列表」里的那条通知也一起撤掉（微信也是删了就没） */
+    for (let i = db.momentNotices.length - 1; i >= 0; i -= 1) {
+      if (db.momentNotices[i].commentId === c.id) db.momentNotices.splice(i, 1);
+    }
+    saveMomentNotices();
     const audience = momentAudience(m.authorId);
     audience.forEach((id) => sendTo(id, {
       type: 'moment', action: 'comment-deleted', momentId: m.id, commentId: c.id
@@ -14719,6 +17636,12 @@ async function handleApi(req, res, pathname, query) {
     if (!m.comments) m.comments = [];
     m.comments.push({ id: uid('cm'), userId: user.id, content, replyTo, at: now() });
     saveMoments();
+    /* 朋友圈消息列表：评论了谁的动态就通知谁；回复某人的评论，被回复的人也收一条 */
+    const newCommentId = m.comments[m.comments.length - 1].id;
+    pushMomentNotice(m.authorId, user.id, 'comment', m.id, content, { commentId: newCommentId });
+    if (replyTo && replyTo !== m.authorId) {
+      pushMomentNotice(replyTo, user.id, 'reply', m.id, content, { commentId: newCommentId });
+    }
     const views = visibleMoment(m, user.id);
     const audience = momentAudience(m.authorId);
     audience.forEach((id) => {
@@ -14776,6 +17699,7 @@ async function handleApi(req, res, pathname, query) {
   /* 二进制直传：视频/图片直接把原始字节 PUT 上来，不再塞 base64
      （base64 会多传 33%，一条 5MB 视频要多跑 1.7MB 流量 → 手机上就是多等十几秒） */
   if (parts[0] === 'upload' && parts[1] === 'raw' && method === 'POST') {
+    const clientSaidCompressed = String(req.headers['x-chris-compressed'] || '').trim() === '1';   // CHRIS_UPLOAD_SKIP_SHRINK_V1
     if (!uploadRateAllow(user.id)) {
       return fail(res, 429, '上传太频繁了，歇一会儿再传');
     }
@@ -14811,7 +17735,7 @@ async function handleApi(req, res, pathname, query) {
         const img2 = checkImage(buf2, mime2);
         if (!img2.ok) { try { fs.unlinkSync(outPath); } catch (err) { } return fail(res, 422, img2.error); }
         let final2 = img2.buffer;
-        if (img2.needShrink) {
+        if (img2.needShrink && !clientSaidCompressed) {      // CHRIS_UPLOAD_SKIP_SHRINK_V1
           const small2 = shrinkImageBuffer(img2.buffer, '.' + ext);
           if (small2 && small2.length) final2 = small2;
         }
@@ -15352,8 +18276,9 @@ scheduleReminderTick();// 管家的定时提醒
 setTimeout(() => {
   try {
     ensureBots();        // 建「AI 助手 / 管家 / 星联世界」几个机器人账号，并和所有人加好友
+    try { dropSysFriendships(); } catch (e) {}   // 「星言团队」不是好友，只占会话列表一条
     /* 一次性补齐：所有还没有机器人会话的用户（含之前注册的），都给他们开好欢迎会话 */
-    db.users.filter((u) => !u.bot).forEach((u) => { try { attachBotsFor(u); } catch (e) { } });
+    db.users.filter((u) => !u.bot).forEach((u) => { try { attachBotsFor(u); } catch (e) { } try { ensureSysChat(u); } catch (e) { } });
     welcomeBots();       // 给主要账号开个「欢迎」会话，一打开就能看到机器人
   } catch (e) {
     console.log('[bots] 启动异常：' + e.message);
@@ -15423,7 +18348,18 @@ async function handleHttpRequest(req, res) {
     }
     /* 后台一律走加密通道：明文 http 打开后台，密码和暗号会被同网段的人抓走。
        本机（127.0.0.1）除外，方便本地脚本；其它来源自动跳到 https://<主机>:5443。 */
-    if (isAdminPath(parsed.pathname) && !req.socket.encrypted && !/^(127\.0\.0\.1|::1)$/.test(peerIp(req))) {
+    /* TLS 前端（/opt/chris/tlsproxy.js）是从本机 127.0.0.1 回源的：
+       它已经替客户端做过 TLS，并且带了 X-Forwarded-Proto=https。
+       以前这里只看 socket.encrypted —— 会把握手已经在 https 上的请求
+       误判成明文，于是 https://<host>:5443/manage.html 自己 302 到自己，
+       后台在公网永远打不开（ERR_TOO_MANY_REDIRECTS）。
+       直接连明文口 5180 的外部请求仍然照旧跳到 5443，安全性不变。 */
+    const _rawPeerAdmin = String((req.socket && req.socket.remoteAddress) || '')
+      .replace('::ffff:', '');
+    const _viaTlsFront = /^(127\.0\.0\.1|::1)$/.test(_rawPeerAdmin)
+      && String(req.headers['x-forwarded-proto'] || '').toLowerCase() === 'https';
+    if (isAdminPath(parsed.pathname) && !req.socket.encrypted && !_viaTlsFront
+        && !/^(127\.0\.0\.1|::1)$/.test(peerIp(req))) {
       const hostOnly = String(req.headers.host || '').split(':')[0] || '192.168.2.7';
       res.writeHead(302, {
         Location: 'https://' + hostOnly + ':5443' + parsed.pathname + (parsed.search || ''),
@@ -15443,7 +18379,16 @@ async function handleHttpRequest(req, res) {
          接口（/api）和上传文件不走跳转 —— App 里的登录态不会因为跨端口跳转丢掉，
          保证老版本 App 依然能正常用。App 的安全性靠"新版 App 内置 https 地址"来解决。 */
       const isPage = /^\/(index|m|install|admin|admin2|manage|ai|login)\.html$/i.test(parsed.pathname) || parsed.pathname === '/';
-      if (!isPage) {
+      /* 这一段是 nginx 回源的（TCP 对端是本机），而且它已经替客户端做过 TLS：
+         X-Forwarded-Proto=https。这时客户端那一段本来就是加密的，
+         千万别再跳 5443 —— 那个端口在一些线路上是被拦的，一跳就打不开
+         （用户反馈的「首页/下载页打不开」就是这个）。 */
+      const rawPeerX = String((req.socket && req.socket.remoteAddress) || '').replace('::ffff:', '');
+      const viaNginxTls = /^(127\.0\.0\.1|::1)$/.test(rawPeerX)
+        && String(req.headers['x-forwarded-proto'] || '').toLowerCase() === 'https';
+      if (viaNginxTls) {
+        /* 已经是加密通道了：正常往下走，什么都不用做 */
+      } else if (!isPage) {
         /* 接口请求：以前为了兼容老版 App 原样放行 —— 等于把密码和令牌放在明文上过网，
            抓包就能用。现在只放行本机 / 局域网（服务器上的脚本、内网调试），
            公网来的明文接口一律让他改用 https（新版 App 本来就是 https/wss）。 */
@@ -15856,7 +18801,10 @@ function handleWsUpgrade(req, socket) {
       const q = new URL(req.url, 'http://localhost');
       const data = verifyTokenData(q.searchParams.get('token'));
       const u = data && db.users.find((x) => x.id === data.sub);
-      if (u && (data.v || 0) === (u.tokenVersion || 0)) user = u;
+      /* 被顶下线的旧手机：连长连接也不给连（不然它还能白收消息） */
+      const phoneOk = !u ? false : (((data.k || 'phone') !== 'phone')
+        || (Number(data.ps) || 0) === (Number(u.phoneSession) || 0));
+      if (u && (data.v || 0) === (u.tokenVersion || 0) && phoneOk) user = u;
     } catch (err) { /* 忽略 */ }
   }
   if (user && user.banned) {
@@ -15880,6 +18828,9 @@ function handleWsUpgrade(req, socket) {
   /* 客户端会带 X-App-Build（"B456 · 09-23 21:08" 这种）——
      记在 socket 上，通话日志里打出来，排查「两台手机版本不一样」时一眼可见 */
   socket.__appBuild = String(req.headers['x-app-build'] || '').slice(0, 40);
+  socket.__deviceId = String(req.headers['x-device-id'] || '').slice(0, 64);
+  /* 端类型（手机 / 平板 / 电脑）：顶下线时只踢手机，平板电脑留着 */
+  socket.__kind = deviceKindOf(req);
   callTrace('ws 连上(带IP) ' + user.id + ' ip=' + wsIp + (socket.encrypted ? ' wss' : ' ws')
     + ' 版本=' + String(req.headers['x-app-build'] || '?'));
   userIps.set(user.id, wsIp);           // 记一下每个账号的出口 IP：通话时判断两边是不是同一个网络
@@ -15901,6 +18852,8 @@ server.on('error', (err) => {
 
 server.listen(PORT, BIND_HOST, () => {
   console.log('CHRIS Chat 已启动');
+  /* 后台预热朋友圈图片尺寸（分批、不阻塞请求） */
+  try { warmMomentSizes(); } catch (err) { /* 预热失败不影响使用 */ }
   /* 内置 TURN：语音/视频通话直连不上时，声音走服务器中转（手机 4G、
      路由器 AP 隔离、公司网挡 UDP 这些情况全靠它）。端口 3478/udp。 */
   try {
@@ -16401,7 +19354,9 @@ function rememberDevice(user, req) {
     const key = deviceKeyOf(info);
     const list = (Array.isArray(user.devices) ? user.devices : [])
       .filter((d) => deviceKeyOf(d) !== key);
-    list.unshift({ id: info.deviceId || '', ip: info.ip, device: info.device, at: now() });
+    list.unshift({ id: info.deviceId || '', ip: info.ip, device: info.device,
+                   model: friendlyModelName(info.model) || '', deviceMachine: info.model || '',
+                   os: info.os || '', name: info.name || '', at: now() });
     if (list.length > 10) list.length = 10;
     user.devices = list;
     user.deviceUpdatedAt = now();
@@ -17082,8 +20037,14 @@ async function handleOps(req, res, parts, query) {
     const body = await readBody(req);
     const username = str(body.username, 24).toLowerCase();
     const password = String(body.password || '');
-    /* 后台密码不允许走明文 http（同网段抓包就拿到），本机除外 */
-    if (!req.socket.encrypted && !/^(127\.0\.0\.1|::1)$/.test(peerIp(req))) {
+    /* 后台密码不允许走明文 http（同网段抓包就拿到），本机除外。
+       ⚠ 经过 TLS 前端（tlsproxy，本机回源 + X-Forwarded-Proto=https）的请求
+       客户端那一段本来就是加密的，别误判成明文拒掉 —— 不然公网谁都登不进后台。 */
+    const _rawPeerOps = String((req.socket && req.socket.remoteAddress) || '').replace('::ffff:', '');
+    const _viaTlsFrontOps = /^(127\.0\.0\.1|::1)$/.test(_rawPeerOps)
+      && String(req.headers['x-forwarded-proto'] || '').toLowerCase() === 'https';
+    if (!req.socket.encrypted && !_viaTlsFrontOps
+        && !/^(127\.0\.0\.1|::1)$/.test(peerIp(req))) {
       strikeIp(clientInfo(req).ip, '明文 HTTP 登录后台');
       audit(req, { username: username || '-', name: '未知', role: '-' }, '明文登录被拒', '', '要求改用 HTTPS');
       return fail(res, 403, httpsHint(req));
@@ -19174,6 +22135,167 @@ async function handleOps(req, res, parts, query) {
     return;
   }
 
+  /* ---------------- 音乐（App「听一听」的曲库） ---------------- */
+  /* ---------------- 小程序 / 小游戏（后台可以加，App 不用出包） ---------------- */
+  if (sub === 'miniapps' && method === 'GET') {
+    if (!can(admin, 'ops')) return fail(res, 403, '你的角色没有查看内容的权限');
+    ok(res, { items: (readMiniApps().items || []) });
+    return;
+  }
+  if (sub === 'miniapps' && parts[2] === 'add' && method === 'POST') {
+    if (!can(admin, 'ops.write')) return fail(res, 403, '你的角色没有改内容的权限');
+    const mb = await readBody(req);
+    const name = str(mb.name, 20).replace(/\s+/g, ' ').trim();
+    const url = str(mb.url, 400).trim();
+    if (!name) return fail(res, 422, '名字不能为空');
+    if (!/^(\/|https?:\/\/)/.test(url)) return fail(res, 422, '入口地址要写 / 开头（服务器上的文件）或 http(s):// 开头');
+    const cfg = readMiniApps();
+    const item = {
+      id: 'ma' + Date.now().toString(36),
+      name: name,
+      desc: str(mb.desc, 40).replace(/\s+/g, ' ').trim(),
+      icon: str(mb.icon, 8) || '🧩',
+      kind: (str(mb.kind, 8) === 'game') ? 'game' : 'mini',
+      url: url,
+      cover: /^(\/|https?:\/\/)/.test(str(mb.cover, 400).trim()) ? str(mb.cover, 400).trim() : '',
+      group: str(mb.group, 16).replace(/\s+/g, ' ').trim(),
+      action: str(mb.action, 6).replace(/\s+/g, ' ').trim() || '立即玩',
+      enabled: true
+    };
+    cfg.items.push(item);
+    saveMiniApps(cfg);
+    audit(req, admin, 'miniapp.add', '小程序', name + ' → ' + url);
+    ok(res, { item: item, items: cfg.items.length });
+    return;
+  }
+  if (sub === 'miniapps' && parts[2] === 'update' && method === 'POST') {
+    if (!can(admin, 'ops.write')) return fail(res, 403, '你的角色没有改内容的权限');
+    const mb = await readBody(req);
+    const id = str(mb.id, 40);
+    const cfg = readMiniApps();
+    const it = cfg.items.filter((x) => (x.id || '') === id)[0];
+    if (!it) return fail(res, 404, '找不到这个小程序');
+    const name = str(mb.name, 20).replace(/\s+/g, ' ').trim();
+    const url = str(mb.url, 400).trim();
+    if (name) it.name = name;
+    if (url && /^(\/|https?:\/\/)/.test(url)) it.url = url;
+    if (mb.icon !== undefined) it.icon = str(mb.icon, 8);
+    if (mb.desc !== undefined) it.desc = str(mb.desc, 40).replace(/\s+/g, ' ').trim();
+    if (mb.kind !== undefined) it.kind = (str(mb.kind, 8) === 'game') ? 'game' : 'mini';
+    if (mb.cover !== undefined) {
+      const cv = str(mb.cover, 400).trim();
+      it.cover = /^(\/|https?:\/\/)/.test(cv) ? cv : '';
+    }
+    if (mb.group !== undefined) it.group = str(mb.group, 16).replace(/\s+/g, ' ').trim();
+    if (mb.action !== undefined) it.action = str(mb.action, 6).replace(/\s+/g, ' ').trim() || '立即玩';
+    saveMiniApps(cfg);
+    audit(req, admin, 'miniapp.update', '小程序', it.name + ' → ' + it.url);
+    ok(res, { item: it });
+    return;
+  }
+  if (sub === 'miniapps' && parts[2] === 'remove' && method === 'POST') {
+    if (!can(admin, 'ops.write')) return fail(res, 403, '你的角色没有改内容的权限');
+    const mb = await readBody(req);
+    const id = str(mb.id, 40);
+    const cfg = readMiniApps();
+    const before = cfg.items.length;
+    cfg.items = cfg.items.filter((x) => (x.id || '') !== id);
+    saveMiniApps(cfg);
+    audit(req, admin, 'miniapp.remove', '小程序', id);
+    ok(res, { removed: before - cfg.items.length, items: cfg.items.length });
+    return;
+  }
+  if (sub === 'miniapps' && parts[2] === 'toggle' && method === 'POST') {
+    if (!can(admin, 'ops.write')) return fail(res, 403, '你的角色没有改内容的权限');
+    const mb = await readBody(req);
+    const id = str(mb.id, 40);
+    const cfg = readMiniApps();
+    const it = cfg.items.filter((x) => (x.id || '') === id)[0];
+    if (!it) return fail(res, 404, '找不到这个小程序');
+    it.enabled = !(it.enabled !== false);
+    saveMiniApps(cfg);
+    ok(res, { id: id, enabled: it.enabled !== false });
+    return;
+  }
+
+  /* 系统通知开关（照微信团队那个号）：后台面板里管控 */
+  if (sub === 'sysnotice' && method === 'GET') {
+    if (!can(admin, 'ops')) return fail(res, 403, '你的角色没有查看内容的权限');
+    ok(res, readSysNoticeCfg());
+    return;
+  }
+  if (sub === 'sysnotice' && method === 'POST') {
+    if (!can(admin, 'ops.write')) return fail(res, 403, '你的角色没有改内容的权限');
+    const b = await readBody(req);
+    const cur = readSysNoticeCfg();
+    if (b.enabled !== undefined) cur.enabled = b.enabled ? 1 : 0;
+    if (b.types && typeof b.types === 'object') {
+      Object.keys(cur.types).forEach((k) => { if (b.types[k] !== undefined) cur.types[k] = b.types[k] ? 1 : 0; });
+    }
+    if (b.texts && typeof b.texts === 'object') {
+      Object.keys(b.texts).forEach((k) => { cur.texts[k] = String(b.texts[k] || '').slice(0, 500); });
+    }
+    saveSysNoticeCfg(cur);
+    audit(req, admin, 'sysnotice.save', '系统通知', JSON.stringify(cur.types));
+    ok(res, cur);
+    return;
+  }
+
+  if (sub === 'music' && method === 'GET') {
+    if (!can(admin, 'ops')) return fail(res, 403, '你的角色没有查看内容的权限');
+    ok(res, { tracks: readMusicDb().tracks });
+    return;
+  }
+  if (sub === 'music' && parts[2] === 'add' && method === 'POST') {
+    if (!can(admin, 'ops.write')) return fail(res, 403, '你的角色没有改内容的权限');
+    const mb = await readBody(req);
+    const title = str(mb.title, 60).replace(/\s+/g, ' ').trim();
+    const url = str(mb.url, 400).trim();
+    if (!title) return fail(res, 422, '歌名不能为空');
+    if (!/^(\/uploads\/|https?:\/\/)/.test(url)) return fail(res, 422, '音频地址不对（先用上面的「音频文件」传一次）');
+    const dbm = readMusicDb();
+    const track = {
+      id: uid('mus'),
+      title: title,
+      artist: str(mb.artist, 60).replace(/\s+/g, ' ').trim(),
+      cover: /^(\/uploads\/|https?:\/\/)/.test(str(mb.cover, 400).trim()) ? str(mb.cover, 400).trim() : '',
+      url: url,
+      lyrics: str(mb.lyrics, 20000),
+      at: Date.now()
+    };
+    dbm.tracks.unshift(track);
+    saveMusicDb(dbm);
+    audit(req, admin, 'music.add', '音乐曲库', title + (track.artist ? ' / ' + track.artist : ''));
+    ok(res, { track: track, tracks: dbm.tracks.length });
+    return;
+  }
+  /* 改歌词 / 清空歌词（后台「音乐（听一听）」里每首后面那个按钮） */
+  if (sub === 'music' && parts[2] === 'lyrics' && method === 'POST') {
+    if (!can(admin, 'ops.write')) return fail(res, 403, '你的角色没有改内容的权限');
+    const mb = await readBody(req);
+    const id = str(mb.id, 40);
+    const dbm = readMusicDb();
+    const t = dbm.tracks.filter((x) => (x.id || '') === id)[0];
+    if (!t) return fail(res, 404, '找不到这首歌');
+    t.lyrics = str(mb.lyrics, 20000);
+    saveMusicDb(dbm);
+    audit(req, admin, 'music.lyrics', '音乐曲库', t.title + '（' + t.lyrics.length + ' 字）');
+    ok(res, { id: id, lyrics: t.lyrics, length: t.lyrics.length });
+    return;
+  }
+  if (sub === 'music' && parts[2] === 'remove' && method === 'POST') {
+    if (!can(admin, 'ops.write')) return fail(res, 403, '你的角色没有改内容的权限');
+    const mb = await readBody(req);
+    const id = str(mb.id, 40);
+    const dbm = readMusicDb();
+    const before = dbm.tracks.length;
+    dbm.tracks = dbm.tracks.filter((t) => (t.id || '') !== id);
+    saveMusicDb(dbm);
+    audit(req, admin, 'music.remove', '音乐曲库', id);
+    ok(res, { removed: before - dbm.tracks.length, tracks: dbm.tracks.length });
+    return;
+  }
+
   if (sub === 'membership' && method === 'GET') {
     if (!can(admin, 'ops')) return fail(res, 403, '你的角色没有查看会员的权限');
     const dbm = readMemberDb();
@@ -19542,6 +22664,32 @@ async function handleOps(req, res, parts, query) {
     audit(req, admin, 'mepage.save', '我页', items.length + ' 行');
     sendToAll({ type: 'ui' });
     ok(res, { items: db.mePage });
+    return;
+  }
+
+
+  /* ---------------- 聊天壁纸（默认壁纸 + 6 张基础壁纸，都能换）---------------- */
+  if (sub === 'chatbg' && method === 'GET') {
+    ok(res, { cfg: db.chatBg || normalizeChatBg(null), defaults: DEFAULT_CHAT_BG });
+    return;
+  }
+
+  if (sub === 'chatbg' && method === 'POST') {
+    if (!can(admin, 'icons.write')) return fail(res, 403, '只有超级管理员能改聊天壁纸');
+    const body = await readBody(req);
+    const prevVer = Number((db.chatBg && db.chatBg.version) || 1) || 1;
+    const cfg = normalizeChatBg({ default: body.default, presets: body.presets });
+    cfg.version = prevVer + 1;
+    db.chatBg = cfg;
+    saveChatBg();
+    /* 默认壁纸同步写进 branding.chatBackground，App 拿这个字段当默认背景 */
+    if (!db.branding || typeof db.branding !== 'object') db.branding = {};
+    db.branding.chatBackground = cfg.default || '';
+    saveBranding();
+    audit(req, admin, 'chatbg.save', '聊天壁纸',
+          cfg.presets.length + ' 张' + (cfg.default ? ' + 默认' : ''));
+    sendToAll({ type: 'ui' });
+    ok(res, { cfg: db.chatBg });
     return;
   }
 
@@ -19958,4 +23106,3 @@ function badLinkHit(text) {
   }
   return '';
 }
-

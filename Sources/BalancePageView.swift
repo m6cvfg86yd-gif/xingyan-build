@@ -52,10 +52,13 @@ struct BalancePageView: View {
         .hidesTabBar()
         .navigationDestination(isPresented: $showBills) { BillsView() }
         /* 充值 / 提现：微信那套完整页面（金额 + 到账银行卡 + 服务费 + 支付密码） */
-        .sheet(isPresented: $showRecharge) {
+        /* 充值和提现一样：**单独一整页**（微信零钱这两个入口都是整页，不是弹窗） */
+        .navigationDestination(isPresented: $showRecharge) {
             RechargeView().environmentObject(app)
         }
-        .sheet(isPresented: $showWithdraw) {
+        /* 提现对齐微信：**单独一整页**（不是半屏弹窗）——从零钱页推上去，
+           左上有返回、右边能侧滑回来，页面里是「提现到 / 金额 / 服务费 / 提现 / 常见问题」 */
+        .navigationDestination(isPresented: $showWithdraw) {
             WithdrawView().environmentObject(app)
         }
         .confirmationDialog(Tr("常见问题"), isPresented: $showFaq, titleVisibility: .visible) {

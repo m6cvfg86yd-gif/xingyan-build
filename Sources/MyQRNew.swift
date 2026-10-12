@@ -139,6 +139,9 @@ struct MyQRView: View {
         .toolbar(.hidden, for: .navigationBar)
         .swipeBack { dismiss() }
         .hidesTabBar()
+        /* 进「我的二维码」把屏幕**渐亮到最亮**，退出还原 —— 微信那一下（扫码枪才扫得出来）。
+           ⚠ 之前 BrightenScreen 写好了却一个页面都没挂，所以用户反馈「点开没有变亮」。 */
+        .modifier(BrightenScreen())
         .fullScreenCover(isPresented: $showScan) {
             ScannerView { text in handleScanned(text, app: app) }
         }
