@@ -123,6 +123,8 @@ struct GroupQRView: View {
         .toolbar(.hidden, for: .navigationBar)
         .swipeBack { dismiss() }
         .hidesTabBar()
+        /* 群二维码也是给人扫的：进来渐亮、退出还原 */
+        .modifier(BrightenScreen())
         .task {
             let r = await API.shared.groupInvite(chatId: chat.id)
             code = r.code

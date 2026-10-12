@@ -135,6 +135,8 @@ struct FaceToFaceFileSheet: View {
         .background(C.pageBg.ignoresSafeArea())
         .toolbar(.hidden, for: .navigationBar)
         .swipeBack { dismiss() }
+        /* 这一页也是给对方扫的（面对面收照片和文件）：进来渐亮、退出还原 */
+        .modifier(BrightenScreen())
         .fullScreenCover(isPresented: $showScan) {
             ScannerView { text in handleScanned(text, app: app) }
         }
