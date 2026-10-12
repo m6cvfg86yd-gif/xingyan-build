@@ -69,6 +69,8 @@ final class CallAudioPipe: NSObject, AVCaptureAudioDataOutputSampleBufferDelegat
     private var lastPlayPeak = 0
     /// 采集端「不出帧」被自动重抢了几次（用户报的「一会会我的声音没了、对方还在」）
     private(set) var captureStalls = 0
+    /// 最近一帧用的软件增益（诊断用：太大说明输入太小）
+    private var lastCaptureGain = 1.0
 
     /// 通话结束时上报给服务器，写进 call-trace.log
     var playDiag: String {
@@ -78,6 +80,7 @@ final class CallAudioPipe: NSObject, AVCaptureAudioDataOutputSampleBufferDelegat
             + " 引擎=\(player.isRunning ? "跑" : "停")"
             + " 播放器=\(playerReady ? (playerNode.isPlaying ? "跑" : "停") : "没起")"
             + " 采集电平=\(lastCapturePeak) 播放电平=\(lastPlayPeak)"
+            + " 采集增益=\(String(format: "%.1f", lastCaptureGain))"
             + " 重抢麦=\(captureStalls)次"
     }
 
@@ -326,7 +329,15 @@ final class CallAudioPipe: NSObject, AVCaptureAudioDataOutputSampleBufferDelegat
     private func configureSession() {
         let session = AVAudioSession.sharedInstance()
         do {
-            try session.setCategory(.playAndRecord, mode: .voiceChat,
+            /* ⚠ 这里**不能用 .voiceChat 模式**（2026-10-12 定位到的「听不见」根因）：
+               .voiceChat 会打开系统的声学处理单元（VoiceProcessingIO），它和我们的
+               AVCaptureSession 音频输入抢同一个输入设备 —— 表现就是采集回调照常来、
+               帧照常发（采集端 发出=124帧），但采出来的 PCM **几乎是静音**
+               （通话上报里「采集电平=17」，满量程 32767）。
+               两边都在发帧、都在排播、都听不见，就是这么来的。
+               换成 .default（不做声学处理）之后输入电平就正常了；代价是没有系统级回声消除，
+               所以外面再加一层软件增益 + 限幅（见 captureOutput）。 */
+            try session.setCategory(.playAndRecord, mode: .default,
                                     options: [.defaultToSpeaker, .allowBluetooth])
         } catch {
             lastError = "setCategory 失败: \(error.localizedDescription)"
@@ -414,8 +425,32 @@ final class CallAudioPipe: NSObject, AVCaptureAudioDataOutputSampleBufferDelegat
         }
         guard err == nil, out.frameLength > 0, let ch = out.int16ChannelData else { return }
         let chunk0 = Data(bytes: ch[0], count: Int(out.frameLength) * 2)
-        lastCapturePeak = peakOfInt16(chunk0)
-        pending.append(chunk0)
+        let peak = peakOfInt16(chunk0)
+        lastCapturePeak = peak
+        /* 软件增益（简易 AGC）：输入偏小的时候提一把，太响的时候压一下 ——
+           .default 模式下没有系统 AGC，不补一下对面听着还是很小。
+           目标峰值约 6000（满量程的 18%），增益限在 0.5~6 倍之间；只对小于 4000 的做提升，
+           避免把已经很响的声音再放大到削波。 */
+        var out0 = chunk0
+        if peak > 0, peak < 4000 {
+            let gain = min(6.0, max(0.5, 6000.0 / Double(peak)))
+            lastCaptureGain = gain
+            if gain > 1.05 {
+                var bytes = [UInt8](chunk0)
+                var i = 0
+                while i + 1 < bytes.count {
+                    let raw = Int16(bitPattern: UInt16(bytes[i]) | (UInt16(bytes[i + 1]) << 8))
+                    let v = Int(Double(raw) * gain)
+                    let clamped = Int16(max(-32768, min(32767, v)))
+                    let u = UInt16(bitPattern: clamped)
+                    bytes[i] = UInt8(u & 0xff)
+                    bytes[i + 1] = UInt8((u >> 8) & 0xff)
+                    i += 2
+                }
+                out0 = Data(bytes)
+            }
+        }
+        pending.append(out0)
         let frameBytes = frameSamples * 2
         while pending.count >= frameBytes {
             let chunk = pending.prefix(frameBytes)

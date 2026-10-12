@@ -150,8 +150,21 @@ final class PushCenter: NSObject, ObservableObject, UIApplicationDelegate, UNUse
             completionHandler()
             return
         }
-        /* 点通知本体：如果是来电，把通话界面调出来（App 一进前台就能看到来电页） */
-        if (info["kind"] as? String) == "call" { CallCenter.shared.restore() }
+        /* 点通知本体：如果是来电，把通话界面调出来。
+           ⚠ 不能立刻弹：点通知进来时 App 可能刚冷启动 / 刚从后台回来，这时候直接
+           把整页通话界面压上去会和启动那一帧打架，被系统 watchdog 杀掉
+           （用户报的「群语音弹出通知闪退」，日志里一条崩溃栈都没有、内存也正常）。
+           和「点通知进聊天」那条一样：等 App 真的 active、再等 0.8 秒稳定了才弹。 */
+        if (info["kind"] as? String) == "call" {
+            Task { @MainActor in
+                for _ in 0..<25 {
+                    if UIApplication.shared.applicationState == .active { break }
+                    try? await Task.sleep(nanoseconds: 200_000_000)
+                }
+                try? await Task.sleep(nanoseconds: 800_000_000)
+                CallCenter.shared.restore()
+            }
+        }
         /* 点「登录确认」那条通知：直接进确认卡片（不用再手输 6 位数字） */
         if (info["kind"] as? String) == "pair",
            let code = info["code"] as? String, !code.isEmpty {

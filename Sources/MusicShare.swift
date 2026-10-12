@@ -592,6 +592,7 @@ struct MusicBubble: View {
 struct ListenView: View {
     @EnvironmentObject var app: AppState
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.colorScheme) private var scheme
     /// 有值 = 从聊天里进来的：点一首 = 发给这个会话（音乐卡片）
     var sendTo: Chat? = nil
     var onSend: ((MusicTrack) -> Void)? = nil
@@ -826,8 +827,7 @@ struct ListenView: View {
                         /* 用**歌 id** 当身份（不是行号）：换一批的时候行是"换内容"，
                            不是"整排重建"，不会闪 */
                         ForEach(Array(recommend.enumerated()), id: \.element.id) { i, t in
-                            if i > 0 { HairLine(inset: 66) }
-                            row(t)
+                            row(t, rank: i + 1)
                         }
 
                         if artists.count > 1 {
@@ -852,16 +852,14 @@ struct ListenView: View {
                             .padding(.bottom, 10)
                         }
                     } else if tab == 1 {
-                        ForEach(Array(matched.enumerated()), id: \.offset) { i, t in
-                            if i > 0 { HairLine(inset: 66) }
+                        ForEach(Array(matched.enumerated()), id: \.offset) { _, t in
                             row(t)
                         }
                     } else {
                         /* 朋友推荐 = 好友最近 2 小时在听的歌（用户要的「让好友看到我在听啥」）。
                            进来的时候拉一次，切到这一栏也会再拉一次。 */
                         if !friends.isEmpty {
-                            ForEach(Array(friends.enumerated()), id: \.element.id) { i, f in
-                                if i > 0 { HairLine(inset: 66) }
+                            ForEach(Array(friends.enumerated()), id: \.element.id) { _, f in
                                 friendRow(f)
                             }
                             Text(Tr("好友最近 2 小时在听的歌"))
@@ -991,24 +989,80 @@ struct ListenView: View {
         }
     }
 
-    /* 好友在听的一行：头像 + 名字 + 在听什么 + 一起听（点了直接播这首） */
+    /* 好友在听的一行：头像 + 名字 + 在听什么 + 一起听（点了直接播这首）
+       2026-10-12 跟歌曲列表一样改成 QQ 音乐那种独立卡片。 */
     private func friendRow(_ f: FriendNowPlaying) -> some View {
         let t = f.asTrack
         return Button { MusicPlayer.shared.toggle(t) } label: {
             HStack(spacing: 12) {
-                Avatar(path: f.avatar ?? "", size: 40, radius: 6)
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(f.name).font(pf(15)).foregroundColor(C.label).lineLimit(1)
+                Avatar(path: f.avatar ?? "", size: 52, radius: 12)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(f.name).font(pf(16, .medium)).foregroundColor(C.label).lineLimit(1)
                     Text(f.line)
-                        .font(pf(12)).foregroundColor(C.subLabel).lineLimit(1)
+                        .font(pf(12.5)).foregroundColor(C.subLabel).lineLimit(1)
                 }
                 Spacer(minLength: 6)
-                MusicPlayButton(playing: player.isPlaying(t.id), loading: player.loadingId == t.id,
-                                size: 30, tint: .white, bg: C.green)
+                playDot(playing: player.isPlaying(t.id), loading: player.loadingId == t.id)
             }
-            .padding(.horizontal, 14).frame(height: 64)
-            .background(C.cardBg)
+            .padding(.horizontal, 12).frame(height: 78)
+            .background(cardFace)
             .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .padding(.horizontal, 16).padding(.vertical, 5)
+    }
+
+    /* ---------------- 卡片外壳 / 零件（照 QQ 音乐列表那一套） ---------------- */
+
+    /// 一张独立卡片的底：圆角 14 + 一条极淡的描边 + 浅色模式下一点点投影
+    private var cardFace: some View {
+        RoundedRectangle(cornerRadius: 14, style: .continuous)
+            .fill(C.cardBg)
+            .overlay(
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .stroke(C.hairline.opacity(scheme == .dark ? 1 : 0.65), lineWidth: 0.5)
+            )
+            .shadow(color: .black.opacity(scheme == .dark ? 0 : 0.06), radius: 7, x: 0, y: 2)
+    }
+
+    /// 右边那颗播放钮：在播 = 实心绿 + 白图标，没在播 = 淡绿底 + 绿图标（QQ 音乐就是这个）
+    private func playDot(playing: Bool, loading: Bool) -> some View {
+        MusicPlayButton(playing: playing, loading: loading, size: 34,
+                        tint: playing ? .white : C.green,
+                        bg: playing ? C.green : C.green.opacity(0.12))
+    }
+
+    /// 「推荐」那一栏的排名徽章（1 红 / 2 橙 / 3 金，其余灰），贴在封面左上角
+    private func rankBadge(_ n: Int) -> some View {
+        let c: Color = n == 1 ? Color(hex: 0xFA3B4B)
+            : (n == 2 ? Color(hex: 0xFF8A00) : (n == 3 ? Color(hex: 0xF7B500) : Color.black.opacity(0.45)))
+        return Text("\(n)")
+            .font(pf(11, .bold))
+            .foregroundColor(.white)
+            .frame(width: 19, height: 19)
+            .background(Circle().fill(c))
+            .overlay(Circle().stroke(Color.white.opacity(0.9), lineWidth: 1.2))
+            .offset(x: -5, y: -5)
+    }
+
+    /// 管理模式的勾选圈
+    private func checkDot(_ t: MusicTrack) -> some View {
+        Image(systemName: pickedTracks.contains(t.id) ? "checkmark.circle.fill" : "circle")
+            .font(.system(size: 21))
+            .foregroundColor(pickedTracks.contains(t.id) ? C.green : C.subLabel)
+    }
+
+    /// ops 账号在列表里直接换封面那颗小按钮
+    private func iconPickDot(_ t: MusicTrack) -> some View {
+        Button {
+            iconPickFor = t.id
+            showIconPick = true
+        } label: {
+            Image(systemName: "photo.badge.plus")
+                .font(.system(size: 17))
+                .foregroundColor(C.green)
+                .frame(width: 34, height: 44)
+                .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
     }
@@ -1018,7 +1072,11 @@ struct ListenView: View {
         friendsLoaded = true
     }
 
-    private func row(_ t: MusicTrack) -> some View {
+    /* 一首歌 = 一张独立卡片（2026-10-12 用户要求「听一听对齐 QQ 音乐那种卡片」）：
+       大封面 58 圆角 12 + 标题 16 + 歌手 12.5 + 右边一颗圆形播放钮，
+       卡与卡之间留缝、圆角 14、浅色下带一点点投影；「推荐」栏前 3 名封面左上角带排名。
+       点整张卡的行为没变：管理模式 = 勾选，发歌模式 = 发给这个会话，平时 = 播放/暂停。 */
+    private func row(_ t: MusicTrack, rank: Int? = nil) -> some View {
         Button {
             if manageMode {
                 if pickedTracks.contains(t.id) { pickedTracks.remove(t.id) }
@@ -1034,42 +1092,28 @@ struct ListenView: View {
             }
         } label: {
             HStack(spacing: 12) {
-                if manageMode {
-                    Image(systemName: pickedTracks.contains(t.id) ? "checkmark.circle.fill" : "circle")
-                        .font(.system(size: 21))
-                        .foregroundColor(pickedTracks.contains(t.id) ? C.green : C.subLabel)
+                if manageMode { checkDot(t) }
+                ZStack(alignment: .topLeading) {
+                    MusicCover(path: t.cover ?? "", size: 58, radius: 12)
+                    /* 排名只在「推荐」那一栏显示（搜索出来的列表不显示） */
+                    if let rank, !manageMode { rankBadge(rank) }
                 }
-                ZStack(alignment: .bottomTrailing) {
-                    MusicCover(path: t.cover ?? "", size: 46, radius: 7)
-                    MusicPlayButton(playing: player.isPlaying(t.id), loading: player.loadingId == t.id, size: 20)
-                        .offset(x: 3, y: 3)
-                }
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(t.title).font(pf(15.5)).foregroundColor(C.label).lineLimit(1)
-                    Text(t.artistText).font(pf(12)).foregroundColor(C.subLabel).lineLimit(1)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(t.title).font(pf(16, .medium)).foregroundColor(C.label).lineLimit(1)
+                    Text(t.artistText).font(pf(12.5)).foregroundColor(C.subLabel).lineLimit(1)
                 }
                 Spacer(minLength: 8)
+                playDot(playing: player.isPlaying(t.id), loading: player.loadingId == t.id)
                 /* 有管理权限的账号：在听一听列表里直接点一下就能给这首歌换图标
                    （后台、App 管理页里也都能换，这里最顺手） */
-                if app.me?.ops == true && !manageMode {
-                    Button {
-                        iconPickFor = t.id
-                        showIconPick = true
-                    } label: {
-                        Image(systemName: "photo.badge.plus")
-                            .font(.system(size: 17))
-                            .foregroundColor(C.green)
-                            .frame(width: 40, height: 44)
-                            .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                }
+                if app.me?.ops == true && !manageMode { iconPickDot(t) }
             }
-            .padding(.horizontal, 14).frame(height: 64)
-            .background(C.cardBg)
+            .padding(.horizontal, 12).frame(height: 78)
+            .background(cardFace)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .padding(.horizontal, 16).padding(.vertical, 5)
     }
 
     /// 底下一根播放条（微信听一听就这样）

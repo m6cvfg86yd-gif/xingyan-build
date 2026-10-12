@@ -24,6 +24,8 @@ struct ShopView: View {
     /// 点开的商品（详情 + 下单都在这一页 sheet 里）
     @State private var open: API.ShopItem? = nil
     @State private var showOrders = false
+    /// 拼多多风格 H5 商城（2026-10-12 接入）：整页 WebView 打开
+    @State private var showMall = false
 
     private let cols = [GridItem(.adaptive(minimum: 104), spacing: 10)]
 
@@ -41,6 +43,38 @@ struct ShopView: View {
 
             ScrollView(showsIndicators: false) {
                 VStack(spacing: 10) {
+                    /* 拼多多风格 H5 商城：一进来最显眼的一行（微信小程序那种入口） */
+                    Button { showMall = true } label: {
+                        HStack(spacing: 12) {
+                            ZStack {
+                                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                    .fill(LinearGradient(colors: [Color(hex: 0xFF5A3C), Color(hex: 0xE02A0F)],
+                                                         startPoint: .topLeading, endPoint: .bottomTrailing))
+                                Image(systemName: "bag.fill")
+                                    .font(.system(size: 19, weight: .semibold)).foregroundColor(.white)
+                            }
+                            .frame(width: 44, height: 44)
+                            VStack(alignment: .leading, spacing: 3) {
+                                HStack(spacing: 6) {
+                                    Text(Tr("拼多多商城")).font(pf(16.5, .medium)).foregroundColor(C.label)
+                                    Text(Tr("H5")).font(pf(10.5)).foregroundColor(.white)
+                                        .padding(.horizontal, 5).padding(.vertical, 1.5)
+                                        .background(RoundedRectangle(cornerRadius: 4).fill(Color(hex: 0xE02A0F)))
+                                }
+                                Text(Tr("拼团 · 秒杀 · 种草 · 购物车（和商城后台同一套数据）"))
+                                    .font(pf(12)).foregroundColor(C.subLabel).lineLimit(1)
+                            }
+                            Spacer(minLength: 4)
+                            Chevron(size: 9, line: 1.6)
+                        }
+                        .padding(.horizontal, 14).frame(height: 66)
+                        .background(C.cardBg)
+                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                        .padding(.horizontal, 12)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+
                     balanceCard
 
                     if loading && items.isEmpty {
@@ -88,6 +122,10 @@ struct ShopView: View {
         .sheet(isPresented: $showOrders) {
             ShopOrdersSheet(orders: orders, balance: balance)
                 .environmentObject(app)
+        }
+        /* 拼多多风格 H5 商城：整页打开（改商城只要换服务器上的文件，不用重新出包） */
+        .fullScreenCover(isPresented: $showMall) {
+            MallWebPage().environmentObject(app)
         }
     }
 
