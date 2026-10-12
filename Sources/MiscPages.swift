@@ -22,16 +22,31 @@ struct FavoritesView: View {
     @State private var showTakePhoto = false
     @State private var showPickPhoto = false
     @State private var savingImage = false
+    /// 要转发的那条（选完人由 ForwardPickerView 发出去）
+    @State private var forward: [ForwardItem] = []
+    @State private var showForward = false
 
     private var shown: [[String: Any]] {
         let key = q.trimmingCharacters(in: .whitespaces)
         return items.filter { it in
             let kind = (it["kind"] as? String) ?? "text"
-            if kindFilter == "image" && kind != "image" { return false }
-            if kindFilter == "text" && kind == "image" { return false }
+            /* 「图片与视频」把九宫格（images）、视频、实况也算进去（以前只认单张 image，
+               从聊天里收藏的九宫格在"图片"这一栏里根本看不到） */
+            let isPic = ["image", "images", "video", "livephoto"].contains(kind)
+            if kindFilter == "image" && !isPic { return false }
+            if kindFilter == "text" && isPic { return false }
             if key.isEmpty { return true }
+            /* 搜索按微信那套：正文、标题、来源都算；再宽一点 ——
+               打「图片 / 视频 / 转账 / 笔记」这种类型词也能把对应的挑出来 */
             let content = (it["content"] as? String) ?? ""
-            return content.localizedCaseInsensitiveContains(key)
+            let title = (it["title"] as? String) ?? ""
+            let from = (it["fromName"] as? String) ?? ""
+            if content.localizedCaseInsensitiveContains(key) { return true }
+            if title.localizedCaseInsensitiveContains(key) { return true }
+            if from.localizedCaseInsensitiveContains(key) { return true }
+            let typeWords: [String] = isPic ? [Tr("图片"), Tr("视频"), Tr("照片")]
+                                        : (kind == "transfer" ? [Tr("转账")] : [Tr("文字"), Tr("笔记")])
+            return typeWords.contains { $0.localizedCaseInsensitiveContains(key) }
         }
     }
 
@@ -116,13 +131,16 @@ struct FavoritesView: View {
                     let kind = (item["kind"] as? String) ?? "text"
                     let content = (item["content"] as? String) ?? ""
                     HStack(spacing: 12) {
-                        if kind == "image" {
-                            RemoteImage(path: content)
+                        if let thumb = thumbOf(item) {
+                            /* 图片收藏（单张）和从聊天里收藏的「九宫格」都出缩略图 ——
+                               以前九宫格那种（kind=images）会把一整段 JSON 当正文显示出来 */
+                            RemoteImage(path: thumb)
                                 .frame(width: 52, height: 52)
                                 .clipShape(RoundedRectangle(cornerRadius: 6))
                                 .contentShape(Rectangle())
-                                .onTapGesture { openPhoto(content) }
-                        } else {
+                                .onTapGesture { openPhoto(thumb) }
+                        }
+                        if kind == "text" || kind == "transfer" {
                             /* 文字收藏（聊天里收藏的和自己写的笔记都算）：点一下进详情，
                                在那儿能复制 / 编辑 / 删除 */
                             Button { noteDetail = item } label: {
@@ -148,17 +166,63 @@ struct FavoritesView: View {
                                 .contentShape(Rectangle())
                             }
                             .buttonStyle(.plain)
+                        } else if kind == "images" {
+                            /* 九宫格收藏：右边一句「N 张图片」（微信也是这么标的） */
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(Tr("［图片］")).font(pf(15)).foregroundColor(C.label)
+                                Text(String(countImages(item)) + Tr(" 张图片"))
+                                    .font(pf(12.5)).foregroundColor(C.subLabel)
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
                         }
                         Spacer(minLength: 0)
                     }
                     .padding(.horizontal, 16)
                     .padding(.vertical, 10)
+                    /* 每一条收藏都单独是一张小卡片（用户要求：行与行之间用小卡片隔开）——
+                       灰底上白卡 + 8pt 间距，不再是原来那种一条到底的白列表。 */
+                    .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(C.cardBg))
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 4)
                     .listRowInsets(EdgeInsets())
                     .listRowSeparator(.hidden)
-                    .listRowBackground(C.cardBg)
+                    .listRowBackground(Color.clear)
+                    /* 微信收藏是**左滑出「删除」**（右滑不管用），全滑到底就直接删。
+                       以前只有长按菜单，很多人根本不知道能删 —— 用户反馈的
+                       「收藏里的东西没有删除」就是这个。 */
+                    .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                        if let fid = item["id"] as? String {
+                            Button(role: .destructive) {
+                                Task {
+                                    await API.shared.deleteFavorite(fid)
+                                    await load()
+                                }
+                            } label: {
+                                Label(Tr("删除"), systemImage: "trash")
+                            }
+                            Button {
+                                let on = ((item["pinned"] as? Bool) != true)
+                                Task {
+                                    _ = await API.shared.updateFavorite(id: fid, pinned: on)
+                                    await load()
+                                }
+                            } label: {
+                                Label((item["pinned"] as? Bool) == true ? Tr("取消置顶") : Tr("置顶"),
+                                      systemImage: (item["pinned"] as? Bool) == true ? "pin.slash" : "pin")
+                            }
+                            .tint(C.orange)
+                        }
+                    }
                     /* 长按（微信收藏是长按出菜单）：置顶 / 删除 */
                     .contextMenu {
                         if let i = item["id"] as? String {
+                            /* 转发给朋友（微信收藏长按第一项就是这个）—— 用户要求「要可以转发」 */
+                            Button {
+                                forward = forwardItems(of: item)
+                                showForward = true
+                            } label: {
+                                Label(Tr("转发给朋友"), systemImage: "arrowshape.turn.up.right")
+                            }
                             Button {
                                 let on = ((item["pinned"] as? Bool) != true)
                                 Task {
@@ -223,6 +287,11 @@ struct FavoritesView: View {
                 .environmentObject(app)
             }
         }
+        /* 转发给朋友：走聊天那套「先选一个聊天」 */
+        .sheet(isPresented: $showForward) {
+            ForwardPickerView(items: forward) { }
+                .environmentObject(app)
+        }
         .overlay {
             if let i = viewerIndex, !viewerPaths.isEmpty {
                 /* 收藏里的图：一样给「转发 / 保存」 */
@@ -238,6 +307,58 @@ struct FavoritesView: View {
         guard !all.isEmpty else { return }
         viewerPaths = all
         viewerIndex = all.firstIndex(of: path) ?? 0
+    }
+
+    /// 一条收藏要转发时，按类型包成聊天消息：
+    /// · 图片 / 九宫格 → 原样当图片发（对面收到的是图，不是一串路径）
+    /// · 笔记（文字，里面可能有 [图]路径）→ kind = note，对面收到的是**笔记卡片**
+    ///   （以前按 text 发，对面看到的是一大段带 [图]路径 的"代码"）
+    /// · 转账那种摘要 → 当普通文字发
+    private func forwardItems(of item: [String: Any]) -> [ForwardItem] {
+        let kind = (item["kind"] as? String) ?? "text"
+        let content = (item["content"] as? String) ?? ""
+        switch kind {
+        case "image":
+            return [ForwardItem(kind: "image", content: content)]
+        case "images":
+            return [ForwardItem(kind: "images", content: content)]
+        case "video":
+            return [ForwardItem(kind: "video", content: content)]
+        case "livephoto":
+            return [ForwardItem(kind: "livephoto", content: content)]
+        case "transfer":
+            return [ForwardItem(kind: "text", content: content)]
+        default:
+            /* 笔记：有图就当笔记卡片发，纯文字直接当文字发（对面不用再点开） */
+            let hasPic = content.components(separatedBy: "\n").contains { $0.hasPrefix("[图]") }
+            return [ForwardItem(kind: hasPic ? "note" : "text", content: content)]
+        }
+    }
+
+    /// 收藏里那条是图片的话，取一张缩略图出来（九宫格取第一张）；
+    /// 不是图片就返回 nil。以前只认 kind == "image"，从聊天里收藏的九宫格
+    /// 会被当成文字，把一整段 JSON 显示出来。
+    private func thumbOf(_ item: [String: Any]) -> String? {
+        let kind = (item["kind"] as? String) ?? "text"
+        let content = (item["content"] as? String) ?? ""
+        if kind == "image" { return content.isEmpty ? nil : content }
+        if kind == "images" {
+            guard let d = content.data(using: .utf8),
+                  let o = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
+                  let paths = o["paths"] as? [String],
+                  let first = paths.first, !first.isEmpty else { return nil }
+            return first
+        }
+        return nil
+    }
+
+    /// 九宫格收藏里有几张图（列表右边写「N 张图片」）
+    private func countImages(_ item: [String: Any]) -> Int {
+        let content = (item["content"] as? String) ?? ""
+        guard let d = content.data(using: .utf8),
+              let o = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
+              let paths = o["paths"] as? [String] else { return 0 }
+        return paths.count
     }
 
     private func load() async {
