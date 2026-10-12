@@ -53,6 +53,8 @@ struct PendingMsg: Identifiable, Hashable {
         case "redpacket": return "[红包]"
         case "gift": return "[礼物]"
         case "link": return "[链接]"
+        /* 笔记卡片（收藏里的笔记转发到聊天）：列表/引用里显示「[笔记]」 */
+        case "note": return "[笔记]"
         default: return "[" + kind + "]"
         }
     }
@@ -1297,7 +1299,12 @@ struct ChatDetailView: View {
             pushTask = Task {
                 try? await Task.sleep(nanoseconds: 250_000_000)
                 if Task.isCancelled { return }
+                /* 打点（各 1 分钟最多一次）：聊天页每次「推送到达 → 刷新」都记一笔，
+                   万一又被系统 watchdog 杀掉（无崩溃栈），最后一条就能告诉我们是死在
+                   刷新开头还是刷新中间 —— 2026-10-12 用户报「190 推送过来会闪退」。 */
+                AppLog.error("聊天页刷新开", "事件=" + ev.type + " 条数=\(messages.count)")
                 await load(initial: false)
+                AppLog.error("聊天页刷新完", "条数=\(messages.count)")
             }
         }
         /* 聊天记录一变就排一次本机落盘（防抖，见 schedulePersist） */
@@ -3223,10 +3230,20 @@ struct ChatDetailView: View {
     /// 免得边翻历史边反复序列化整段 JSON。
     private func schedulePersist() {
         persistTask?.cancel()
-        persistTask = Task { @MainActor in
+        /* ⚠ 落盘要放到**主线程外面**做（2026-10-12 改）：
+           以前这个 Task 是 @MainActor，等于把「整段聊天记录 JSON 编码 + 写文件」
+           压在主线程上 —— 会话大一点（几百上千条）就是几百毫秒到几秒不响应，
+           再撞上"推送来了要重画列表"，主线程被堵住，系统 watchdog 直接把 App 杀掉
+           （用户报的「点推送通知就闪退」「在聊天页收到消息就闪退」，日志里
+             内存只有 45MB、一条崩溃栈都没有，就是这种被杀）。
+           现在：先睡 1.2 秒（防抖），起来后在后台线程编码 + 写盘，主线程只负责安排。 */
+        persistTask = Task { @MainActor [messages, chatId = chat.id] in
             try? await Task.sleep(nanoseconds: 1_200_000_000)
             if Task.isCancelled { return }
-            LocalStore.saveChat(chat.id, messages)
+            let list = messages                       // 拷一份常量交给后台线程
+            Task.detached(priority: .utility) {
+                LocalStore.saveChat(chatId, list)
+            }
         }
     }
 
