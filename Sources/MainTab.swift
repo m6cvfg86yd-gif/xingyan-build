@@ -202,25 +202,24 @@ struct MainTabView: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: .chrisOpenChat)) { note in
             guard let chatId = note.userInfo?["chatId"] as? String, !chatId.isEmpty else { return }
+            CrashCatcher.note("推送", "点通知 chatId=" + chatId)
             Task { @MainActor in
-                await app.loadChats()
-                if let c = app.chats.first(where: { $0.id == chatId }) {
-                    /* ⚠ 点推送进来的时候 App 可能还在启动 / 刚从后台回前台：
-                       这时候直接弹聊天页会跟启动那一帧打架（用户报的
-                       「弹出推送点过去会闪退」）。等 App 真的 active 了再弹。 */
-                    for _ in 0..<25 {
-                        if UIApplication.shared.applicationState == .active { break }
-                        try? await Task.sleep(nanoseconds: 200_000_000)
-                    }
-                    /* 再等久一点（250ms → 1.2 秒）：聊天页是个超大视图，
-                       冷启动那几秒里还有同步/预取在跑，抢在一起就会被系统 watchdog 杀
-                       （2026-10-12 用户反复报「点推送通知就闪退」，日志里内存只有 45MB）。 */
-                    while app.syncing { try? await Task.sleep(nanoseconds: 200_000_000) }
-                    try? await Task.sleep(nanoseconds: 1_200_000_000)
-                    app.openChat = c
-                } else {
-                    app.show(Tr("找不到这个会话"))
+                /* 点通知进来时 App 往往还在冷启动：先等真的 active */
+                for _ in 0..<40 {
+                    if UIApplication.shared.applicationState == .active { break }
+                    try? await Task.sleep(nanoseconds: 200_000_000)
                 }
+                await app.loadChats()
+                CrashCatcher.note("推送", "会话已加载 " + String(app.chats.count) + " 个")
+                /* 2026-10-12 修「点推送通知依旧闪退」：
+                   以前这里用 `app.openChat = c` —— 最外层 fullScreenCover 把**整页**聊天页
+                   压上去；点通知进来时 App 常常刚冷启动，那一帧和启动打架就被系统杀掉
+                   （服务器日志里既没有崩溃栈、内存也只有 40MB 左右，典型的 SIGKILL）。
+                   现在**不再整页弹**：切回「会话」这个 tab，把会话 id 交给会话列表，
+                   由它用自己那条导航路径 push —— 和用户手点一个会话**完全同一条路**，
+                   那条路是稳的（日志里「8 准备打开 → 9 页面出现 → 刷新完」都正常）。 */
+                tab = 0
+                app.pendingPushChatId = chatId
             }
         }
         /* 点了「登录确认」那条通知 → 直接出确认卡片（不用手输 6 位数字） */

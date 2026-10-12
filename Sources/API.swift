@@ -3497,6 +3497,34 @@ final class API {
         return try await post("/api/shop/order", b, as: ShopOrderPayload.self)
     }
 
+    /* ============================================================ 拼多多商城（原生版，2026-10-12）
+       GET  /api/mall     → { products, banners }（商城的商品和轮播图，服务器 data/mall.json 是真源）
+       POST /api/ops/mall → 管理侧（上架/下架/改价/删除/新增商品 + 换轮播图），只有 ops 账号能用。
+       页面见 MallNative.swift（商城）；管理侧见 MallManage.swift（管理页里的「拼多多商城」）。 */
+
+    struct MallPayload: Decodable {
+        var products: [DDProduct]?
+        var banners: [String]?
+        /// 商城名 / 标语（管理页里能改，用户要求「商城名」）
+        var name: String?
+        var slogan: String?
+    }
+
+    /// 商城数据：拿不到就返回空（App 会退回内置那 16 个商品，至少不是白屏）
+    func mallData() async -> (products: [DDProduct], banners: [String], name: String, slogan: String) {
+        guard let p: MallPayload = try? await get("/api/mall", as: MallPayload.self) else {
+            return ([], [], "", "")
+        }
+        return (p.products ?? [], p.banners ?? [], p.name ?? "", p.slogan ?? "")
+    }
+
+    /// 管理侧改商城：action = product（新增或改一件）/ remove（删一件）/
+    /// banners（整份换轮播图）/ settings（改商城名 + 标语）
+    @discardableResult
+    func opsMall(_ body: [String: Any]) async -> Bool {
+        (try? await post("/api/ops/mall", body, as: MallPayload.self)) != nil
+    }
+
     /* ============================================================ 小星（顶栏那颗眼睛）的三档
        GET/POST /api/me/eyes → { eyes: on|static|off, paid, price, balance }。
        on 是 ¥40 一次性买断（走零钱），static / off 免费。
