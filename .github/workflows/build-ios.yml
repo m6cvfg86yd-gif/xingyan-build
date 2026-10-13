@@ -23,6 +23,8 @@ on:
       # 启动图也在包里（CI 会把它拷进 App），换了图必须重新打包
       - 'splash.png'
       - 'splash.jpg'
+      # 朋友圈默认封面（没设封面时显示的那张风景照），也在包里
+      - 'moments-cover.jpg'
       # 等级图标（Blender 渲的 3D 图）也在包里，换了必须重新打包
       - 'levelicons/**'
   workflow_dispatch:
@@ -133,6 +135,9 @@ jobs:
           # 启动图用 JPEG：同一张 1290×2796 的图，PNG 5.4MB、JPEG 0.37MB
           # （UIImage(named: "splash") 不挑扩展名，jpg 一样能取到）
           cp splash.jpg "$APP/"
+          # 朋友圈默认封面（代码里 UIImage(named: "moments-cover") 取它）：
+          # 用户没设封面时显示这张微信风风景照；自己设过封面的人仍然用自己的
+          cp moments-cover.jpg "$APP/"
           # 等级图标：Blender 渲的 3D 图（星星/月亮/太阳/皇冠），拷进 App 根目录，
           # 代码里用 UIImage(named: "level-star-3d") 取；图没在包里会自动退回自绘那套
           cp levelicons/*.png "$APP/"

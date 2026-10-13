@@ -909,6 +909,21 @@ struct Avatar: View {
                 JarvisEyesAvatar(size: size * 0.86)
                     .frame(width: size, height: size)
                     .background(shape.fill(Color.white))
+            } else if path.isEmpty {
+                /* 没头像时按微信来（2026-10-14 用户要求）：浅灰底 + 白色人形剪影。
+                   微信里没设头像就是这个观感 —— 不是空白、也不是首字母色块。
+                   深色模式换成深灰底 + 浅灰剪影，保证夜里也看得清。 */
+                ZStack {
+                    shape.fill(Color.dyn(0xEDEDED, 0x2C2C2E))
+                    Image(systemName: "person.fill")
+                        .resizable()
+                        .scaledToFit()
+                        .frame(width: size * 0.56, height: size * 0.56)
+                        .foregroundColor(Color.dyn(0xFFFFFF, 0x8E8E93))
+                        .offset(y: size * 0.04)
+                }
+                .frame(width: size, height: size)
+                .clipShape(shape)
             } else {
                 RemoteImage(path: path, icon: "person.fill")
                     .id(path)                 // 换了头像立刻生效（不然会一直显示旧图）

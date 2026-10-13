@@ -1004,7 +1004,12 @@ struct RootView: View {
                     /* 二级登录框：启动时（之前登录过）和**退出登录之后**都先出这一屏 */
                     SavedLoginConfirm()
                 } else if app.me == nil {
-                    LoginView()
+                    /* 2026-10-13 用户要求「退回老版登录框」：
+                       新版（LoginView，方案3 极简版）的「更多登录方式 → 账号密码登录」
+                       那条路过不去（sheet 叠 sheet 被系统丢掉），用户登不进来。
+                       这里直接挂回老版 LoginViewOld —— 它的账号/密码输入框**就在这一页上**，
+                       不用点任何弹窗，从根上绕开那个坑。新版代码一行没删，随时能切回来。 */
+                    LoginViewOld()
                 } else {
                     MainTabView()
                 }

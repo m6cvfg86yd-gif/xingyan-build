@@ -399,7 +399,11 @@ struct MomentsView: View {
 
     var body: some View {
         ZStack(alignment: .top) {
-            C.pageBg.ignoresSafeArea()
+            /* 2026-10-14 用户反馈「封面底下有 2 种色差」：这一页以前铺的是**页面底色**
+               （浅色 #EDEDED / 深色 #0B0B0D），而下面的列表是**纯白 / #191919** ——
+               封面和列表交界的那一段就露出第二层颜色。微信朋友圈整页就是一个底色，
+               这里统一成和列表一样：浅色纯白、深色 #191919。 */
+            Color.dyn(0xFFFFFF, 0x191919).ignoresSafeArea()
 
             ScrollView {
                 VStack(spacing: 0) {
@@ -691,8 +695,15 @@ struct MomentsView: View {
     private func coverView(_ extra: CGFloat) -> some View {
         ZStack(alignment: .bottom) {
             if cover.isEmpty {
-                LinearGradient(colors: [Color(hex: 0x0D3B66), Color(hex: 0x1D6FB8), Color(hex: 0x0099FF)],
-                               startPoint: .topLeading, endPoint: .bottomTrailing)
+                /* 没设封面时显示**包内那张微信风风景照**（2026-10-14 用户要求：不要一层纯渐变）。
+                   图在仓库根目录 moments-cover.jpg，CI 会拷进 App 根目录；
+                   万一图没打进包，才退回原来那层蓝渐变。 */
+                if UIImage(named: "moments-cover") != nil {
+                    Image("moments-cover").resizable().scaledToFill()
+                } else {
+                    LinearGradient(colors: [Color(hex: 0x0D3B66), Color(hex: 0x1D6FB8), Color(hex: 0x0099FF)],
+                                   startPoint: .topLeading, endPoint: .bottomTrailing)
+                }
             } else {
                 RemoteImage(path: cover, icon: "photo", maxSide: 2560)
                     .id(cover)        // 换封面立刻生效
@@ -885,12 +896,9 @@ struct MomentsView: View {
                 .frame(height: 1)
                 .onAppear { sentinelGone = false }
                 .onDisappear { sentinelGone = true }
-            if moments.isEmpty {
-                Text(Tr("正在加载朋友圈…"))
-                    .font(pf(14))
-                    .foregroundColor(C.subLabel)
-                    .padding(.vertical, 40)
-            }
+            /* 没有动态时**什么都不显示**（微信就是只有封面，下面干干净净）——
+               以前这里写「正在加载朋友圈…」，没动态 / 拉失败的时候一直挂着那行字，
+               看着像出错。 */
             /* 置顶的那条固定在最上面（带「置顶」标），
                其余按天分组：今天 / 昨天 / 前天 / M月d日 —— 时间轴看着清楚 */
             let pinnedOnes = moments.filter { $0.pinned == true }
@@ -1031,7 +1039,10 @@ struct MomentsView: View {
            这层遮罩就**完全不画**（用户反馈「朋友圈顶上的遮罩没了，原本是有的」）。
            改回旧版那个条件：只要滚过封面（solid，含哨兵兜底）就整条压出来；
            没滚过封面还是按滚动量由浅到深。 */
-        .background { TopGlassBar(scrolled: solid ? 999 : scrolled, fallback: C.pageBg) }
+        /* fallback 也跟着这一页的新底色（浅色纯白 / 深色 #191919），
+           不然没滚过封面时顶栏后面会透出另一种灰 */
+        .background { TopGlassBar(scrolled: solid ? 999 : scrolled,
+                                  fallback: Color.dyn(0xFFFFFF, 0x191919)) }
         .zIndex(25)          // 永远在最上层：不能被下面的滚动层吃掉点击
         .allowsHitTesting(true)
     }

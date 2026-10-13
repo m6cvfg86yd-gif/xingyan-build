@@ -1334,7 +1334,11 @@ const DEFAULT_PLUS_BUTTON = { color: '', size: 0, image: '' };
    group 相同的一串排在一张卡片里，group 变了就换一张卡（和微信发现页一样有分块）。
 action 决定点了去哪：moments=朋友圈 / news=星联世界 / soon=占位页（显示「还没做」）。 */
 const DISCOVER_FILE = 'discover.json';
-const DISCOVER_ACTIONS = ['moments', 'news', 'nearby', 'shake', 'live', 'games', 'channels', 'miniapps', 'music', 'soon'];
+/* ⚠ 2026-10-13 加了 'bottle'：发现页那行「漂流瓶」的 action 是 bottle，
+   但这个名字**不在白名单里** → normalizeRowList 会把它改成列表最后那个（soon），
+   于是 App 收到 action=soon，点进去就是「这一页排在下一批」。
+   （用户报的「漂流瓶肯定不在发现页 / 显示的是这一页排在下一批」就是这个。） */
+const DISCOVER_ACTIONS = ['moments', 'news', 'nearby', 'shake', 'bottle', 'live', 'games', 'channels', 'miniapps', 'music', 'soon'];
 /* ---------------------------------------------- 我页（后台也能自由增删） */
 const ME_PAGE_FILE = 'me-page.json';
 const ME_ACTIONS = ['service', 'favorites', 'moments', 'works', 'stickers', 'settings', 'cards', 'channels', 'shop', 'plugins', 'soon'];
@@ -13835,7 +13839,27 @@ async function handleApi(req, res, pathname, query) {
     '陌生人你好，希望你今天遇到的事都刚刚好。',
     '记得吃饭，记得早睡，记得有人在想你。',
     '如果此刻你也不开心，就当这个瓶子是我递给你的糖。',
-    '想去看一次海，把烦恼都扔进去。'
+    '想去看一次海，把烦恼都扔进去。',
+    /* 2026-10-13 又加了一批（用户「漂流瓶没有任何内容」）：海里一直有东西可捞 */
+    '愿你今天走的路，都是你自己想走的那条。',
+    '如果你也睡不着，我们就当隔着一片海在聊天。',
+    '把烦恼写下来丢进海里吧，它沉下去，你浮起来。',
+    '今天有好好吃饭吗？没有的话，现在去。',
+    '别急，慢慢来，好的事都在路上。',
+    '我猜你现在应该挺累的，抱一下。',
+    '海很大，你想不开的那件事，其实没多大。',
+    '希望下一个浪把好消息带给你。',
+    '有些话说不出口，就让瓶子替我说。',
+    '你已经做得比自己以为的好了。',
+    '如果你捡到这个瓶子，说明我们今天有点缘分。',
+    '把心放轻一点，路会好走很多。',
+    '想告诉你：天黑之后，海还是海。',
+    '陌生人，愿你的手机电量永远是满的，愿你等的人正在赶来。',
+    '今天不开心也没关系，明天再说。',
+    '祝你今天遇到的人，都比昨天温柔一点。',
+    '把窗户开一条缝，让风进来，也让它把烦的事带走。',
+    '我在很远的地方，也祝你平安。',
+    '如果你愿意，回一句也行 —— 大海会替我收着。'
   ];
   function bottleSeedList() {
     return BOTTLE_SEEDS.map((t, i) => ({
@@ -13847,15 +13871,24 @@ async function handleApi(req, res, pathname, query) {
     const f = path.join(DATA_DIR, BOTTLE_FILE);
     const b = readJson(f, null);
     if (!b || !Array.isArray(b.bottles)) { const s0 = { bottles: bottleSeedList() }; writeJson(f, s0); return s0; }
-    /* 老文件里只有真人瓶子 → 把官方瓶补上（只补一次，按 id 判重） */
-    const hasSeed = b.bottles.some((x) => x && String(x.id).indexOf('bt_seed_') === 0);
-    if (!hasSeed) { b.bottles = bottleSeedList().concat(b.bottles); writeJson(f, b); }
+    /* CHRIS_BOTTLE_SEED_V2：**按 id 一个一个补**（以前是「一条官方瓶都没有才补」——
+       后来官方瓶从 6 条加到 24 条时，老数据里已经有 6 条了，新的那批**永远补不上**，
+       用户那边就显得"海里没东西"）。现在缺哪条补哪条。 */
+    const seeds = bottleSeedList();
+    const have = new Set(b.bottles.filter((x) => x).map((x) => String(x.id)));
+    const missing = seeds.filter((s) => !have.has(s.id));
+    if (missing.length) { b.bottles = b.bottles.concat(missing); writeJson(f, b); }
     return b;
   }
   function saveBottles(b) { writeJson(path.join(DATA_DIR, BOTTLE_FILE), b); }
 
   if (parts[0] === 'bottle' && parts[1] === 'count' && method === 'GET') {
-    ok(res, { total: readBottles().bottles.length });
+    /* CHRIS_BOTTLE_TRACE_V1：谁在什么时候问了「海里几个瓶子」——
+       用户报「漂流瓶没有任何内容」时，先看这条：有记录 = 页面进去了，
+       没记录 = 根本没进到这一页（问题在入口，不在数据）。 */
+    const bb = readBottles();
+    try { callTrace('bottle count by ' + (user.username || user.id) + ' 海里=' + bb.bottles.length); } catch (e) { }
+    ok(res, { total: bb.bottles.length });
     return;
   }
 
@@ -13871,6 +13904,7 @@ async function handleApi(req, res, pathname, query) {
     });
     if (b.bottles.length > BOTTLE_MAX) b.bottles = b.bottles.slice(-BOTTLE_MAX);
     saveBottles(b);
+    try { callTrace('bottle throw by ' + (user.username || user.id) + ' 海里=' + b.bottles.length); } catch (e) { }
     ok(res, { thrown: true, total: b.bottles.length });
     return;
   }
@@ -13891,6 +13925,10 @@ async function handleApi(req, res, pathname, query) {
       one.pickedBy = (one.pickedBy || []).concat([user.id]).slice(-80);
     }
     saveBottles(b);
+    try {
+      callTrace('bottle pick by ' + (user.username || user.id) + ' 捞到=' + one.id
+        + (fromSeed ? '(官方瓶)' : '(真人瓶)') + ' 海里=' + b.bottles.length);
+    } catch (e) { }
     ok(res, { bottle: { id: one.id, text: one.text, fromName: one.fromName || '', at: one.at },
               total: b.bottles.length });
     return;
