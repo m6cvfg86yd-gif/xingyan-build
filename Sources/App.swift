@@ -1553,10 +1553,15 @@ struct LoginView: View {
                     /* 更多登录方式：照微信做成从底下推上来的白卡（每项一个彩色圆图标） */
                     .sheet(isPresented: $showMoreWays) {
                         LoginWaysSheet(
-                            onPhone: { if requireAgree() { sheet = .phone } },
-                            onPassword: { if requireAgree() { sheet = .password } },
-                            onFace: { if requireAgree() { faceLogin() } },
-                            onVoice: { if requireAgree() { voiceLogin() } })
+                            /* ⚠ 这里是「点了账号密码登录没反应」的真正原因：
+                               这几个回调是在 LoginWaysSheet **这个弹窗里面**点出来的，
+                               而它们做的事是 `sheet = .password` —— **第一个弹窗还没关**，
+                               SwiftUI 不允许在一个 sheet 上再叠一个 sheet，请求就被丢掉了。
+                               修法：先把当前弹窗关掉，等它收完再开下一个（0.35s 是收起的动画时长）。 */
+                            onPhone: { openWay(.phone) },
+                            onPassword: { openWay(.password) },
+                            onFace: { if requireAgree() { showMoreWays = false; afterSheet { faceLogin() } } },
+                            onVoice: { if requireAgree() { showMoreWays = false; afterSheet { voiceLogin() } } })
                     }
                     .confirmationDialog(Tr("更多登录方式"), isPresented: $showMoreWays, titleVisibility: .visible) {
                         Button(Tr("手机号登录")) {
@@ -1833,6 +1838,19 @@ struct LoginView: View {
         if isAgree { return true }
         error = "请先勾选并同意《用户协议》和《隐私政策》"
         return false
+    }
+
+    /// 等当前弹窗收完再执行（0.35s = 系统 sheet 收起动画）
+    private func afterSheet(_ run: @escaping () -> Void) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { run() }
+    }
+
+    /// 从「更多登录方式」里选一种登录：**先把那个弹窗关掉**，再开目标页。
+    /// 不这么做的话，sheet 叠 sheet 会被系统丢掉 —— 表现就是「点了没反应」。
+    private func openWay(_ w: Way) {
+        guard requireAgree() else { return }
+        showMoreWays = false
+        afterSheet { sheet = w }
     }
 
     /// 这台设备上有没有可以「一键登录」的登录态
